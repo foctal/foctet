@@ -1,0 +1,29 @@
+[package]
+name = "foctet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Top-level crate for Foctet APIs"
+readme = "../README.md"
+
+[features]
+default = []
+transport = ["dep:foctet-transport"]
+runtime-tokio = ["transport", "foctet-transport/runtime-tokio"]
+runtime-futures = ["transport", "foctet-transport/runtime-futures"]
+transport-muxtls = ["transport", "foctet-transport/transport-muxtls"]
+transport-webtrans = ["transport", "foctet-transport/transport-webtrans"]
+transport-websock = ["transport", "foctet-transport/transport-websock"]
+transport-quinn = ["transport", "foctet-transport/transport-quinn"]
+
+[dependencies]
+foctet-core = { workspace = true }
+foctet-archive = { workspace = true }
+foctet-transport = { path = "../foctet-transport", version = "0.1.0", optional = true, default-features = false }
+x25519-dalek.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "io-util", "fs"] }

@@ -1,0 +1,24 @@
+[package]
+name = "foctet-archive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Foctet Secure Archive: encrypted manifest/chunks with recipient key wrapping"
+readme = "../README.md"
+
+[dependencies]
+blake3.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+rand_core.workspace = true
+rkyv.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+foctet-core = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.6"

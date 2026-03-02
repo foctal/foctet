@@ -1,0 +1,31 @@
+[package]
+name = "foctet-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Foctet Core protocol: framing, handshake, traffic keys, replay protection"
+readme = "../README.md"
+
+[features]
+default = ["runtime-futures", "runtime-tokio"]
+runtime-tokio = ["dep:tokio"]
+runtime-futures = ["dep:futures-io"]
+
+[dependencies]
+bytes.workspace = true
+chacha20poly1305.workspace = true
+futures-core = "0.3"
+futures-io = { version = "0.3", optional = true }
+futures-sink = "0.3"
+hkdf.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.48", features = ["io-util"], optional = true }
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest = "1.6"

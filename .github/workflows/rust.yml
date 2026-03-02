@@ -1,0 +1,30 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal --component clippy
+        rustup default stable
+    - name: Lint
+      run: cargo clippy --workspace --all-features -- -D warnings
+    - name: Workspace tests
+      run: cargo test --workspace --verbose
+    - name: Feature combinations (foctet-core)
+      run: |
+        cargo test -p foctet-core --no-default-features
+        cargo test -p foctet-core --no-default-features --features runtime-futures
+        cargo test -p foctet-core --no-default-features --features runtime-tokio

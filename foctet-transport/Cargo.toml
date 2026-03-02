@@ -1,0 +1,58 @@
+[package]
+name = "foctet-transport"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thin transport adapters for send/recv streams in foctet E2EE"
+readme = "../README.md"
+
+[features]
+default = []
+runtime-tokio = ["dep:tokio"]
+runtime-futures = ["dep:futures-io"]
+transport-muxtls = ["dep:muxtls"]
+transport-webtrans = ["dep:webtrans"]
+transport-websock = ["dep:websock"]
+transport-quinn = ["dep:quinn"]
+
+[dependencies]
+pin-project-lite = "0.2"
+futures-io = { version = "0.3", optional = true }
+tokio = { version = "1.48", features = ["io-util"], optional = true }
+muxtls = { version = "0.1.0", default-features = false, optional = true }
+webtrans = { version = "0.4.0", default-features = false, optional = true }
+websock = { version = "0.4.0", default-features = false, optional = true }
+quinn = { version = "0.11.9", default-features = false, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.48", features = ["macros", "rt", "rt-multi-thread", "io-util", "time"] }
+foctet-core = { workspace = true, features = ["runtime-tokio"] }
+websock-tungstenite-mux = "0.4.0"
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.14"
+url = "2"
+clap = { version = "4", features = ["derive"] }
+rustls-pemfile = "2"
+
+[[example]]
+name = "muxtls_split"
+path = "examples/muxtls_split.rs"
+required-features = ["runtime-tokio", "transport-muxtls"]
+
+[[example]]
+name = "webtrans_split"
+path = "examples/webtrans_split.rs"
+required-features = ["runtime-tokio", "transport-webtrans"]
+
+[[example]]
+name = "websock_split"
+path = "examples/websock_split.rs"
+required-features = ["runtime-tokio", "transport-websock"]
+
+[[example]]
+name = "quinn_split"
+path = "examples/quinn_split.rs"
+required-features = ["runtime-tokio", "transport-quinn"]

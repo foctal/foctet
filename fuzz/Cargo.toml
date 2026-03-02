@@ -1,0 +1,27 @@
+[package]
+name = "foctet-fuzz"
+version = "0.1.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+foctet-core = { path = "../foctet-core" }
+foctet-archive = { path = "../foctet-archive" }
+
+[[bin]]
+name = "frame_parser"
+path = "fuzz_targets/frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_parser"
+path = "fuzz_targets/archive_parser.rs"
+test = false
+doc = false
+bench = false
