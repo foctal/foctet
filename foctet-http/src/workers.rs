@@ -1,6 +1,6 @@
 //! workers-rs adapter helpers for `application/foctet` bodies.
 //!
-//! This module bridges workers request/response body handling with `foctet-http` helpers. 
+//! This module bridges workers request/response body handling with `foctet-http` helpers.
 
 use thiserror::Error;
 
