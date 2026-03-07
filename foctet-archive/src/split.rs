@@ -4,11 +4,10 @@ use std::{
 };
 
 use crate::{
-    ArchiveError, ArchiveOptions, MANIFEST_MAGIC, PART_MAGIC,
+    ArchiveError, ArchiveLimits, ArchiveOptions, MANIFEST_MAGIC, PART_MAGIC,
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, SplitArchive, WIRE_VERSION_V0,
     build::{
-        build_encrypted_materials, decrypt_chunk_records, decrypt_header, ensure_profile,
-        ensure_version, partition_chunks,
+        build_encrypted_materials, decrypt_header, ensure_profile, ensure_version, partition_chunks,
     },
     codec::{
         decode_wrapped_table, encode_wrapped_table, manifest_prefix_len,
@@ -106,10 +105,30 @@ pub fn decrypt_split_archive_to_bytes(
     part_files: &[&[u8]],
     recipient_private_key: [u8; 32],
 ) -> Result<Vec<u8>, ArchiveError> {
+    decrypt_split_archive_to_bytes_with_limits(
+        manifest_bytes,
+        part_files,
+        recipient_private_key,
+        &ArchiveLimits::default(),
+    )
+}
+
+/// Decrypts split-archive data with explicit parser limits.
+pub fn decrypt_split_archive_to_bytes_with_limits(
+    manifest_bytes: &[u8],
+    part_files: &[&[u8]],
+    recipient_private_key: [u8; 32],
+    limits: &ArchiveLimits,
+) -> Result<Vec<u8>, ArchiveError> {
+    if manifest_bytes.len() > limits.max_manifest_bytes {
+        return Err(ArchiveError::LimitExceeded("manifest_bytes"));
+    }
+
     let mut rd = Cursor::new(manifest_bytes);
 
     let mut magic = [0u8; 8];
-    rd.read_exact(&mut magic).map_err(|_| ArchiveError::Parse)?;
+    rd.read_exact(&mut magic)
+        .map_err(|_| ArchiveError::Truncated)?;
     if magic != MANIFEST_MAGIC {
         return Err(ArchiveError::InvalidMagic);
     }
@@ -120,22 +139,39 @@ pub fn decrypt_split_archive_to_bytes(
     let profile = read_u8(&mut rd)?;
     ensure_profile(profile, PROFILE_X25519_HKDF_XCHACHA20POLY1305)?;
 
-    let wrapped = decode_wrapped_table(&mut rd)?;
+    let wrapped = decode_wrapped_table(&mut rd, limits)?;
 
     let total_parts = read_u32_be(&mut rd)? as usize;
-    let manifest_parts = parse_manifest_part_entries(&mut rd, total_parts)?;
+    if total_parts > limits.max_total_parts {
+        return Err(ArchiveError::LimitExceeded("total_parts"));
+    }
+    let manifest_parts = parse_manifest_part_entries(&mut rd, total_parts, limits)?;
 
     let header_len = read_u32_be(&mut rd)? as usize;
+    if header_len > limits.max_header_ciphertext_len {
+        return Err(ArchiveError::LimitExceeded("header_ciphertext_len"));
+    }
+    let manifest_remaining = manifest_bytes.len().saturating_sub(rd.position() as usize);
+    if header_len > manifest_remaining {
+        return Err(ArchiveError::Truncated);
+    }
     let mut header_ct = vec![0u8; header_len];
     rd.read_exact(&mut header_ct)
-        .map_err(|_| ArchiveError::Parse)?;
+        .map_err(|_| ArchiveError::Truncated)?;
 
     let dek = unwrap_dek_from_recipients(&wrapped, recipient_private_key)?;
     let aad_prefix_len = manifest_prefix_len(&wrapped, total_parts);
+    if aad_prefix_len > manifest_bytes.len() {
+        return Err(ArchiveError::Parse);
+    }
     let aad_prefix = manifest_bytes
         .get(..aad_prefix_len)
         .ok_or(ArchiveError::Parse)?;
     let header = decrypt_header(&dek, aad_prefix, &header_ct)?;
+    let total_chunks = header.manifest.total_chunks as usize;
+    if total_chunks > limits.max_total_chunks {
+        return Err(ArchiveError::LimitExceeded("total_chunks"));
+    }
 
     if part_files.len() != total_parts {
         return Err(ArchiveError::InvalidInput(
@@ -147,7 +183,12 @@ pub fn decrypt_split_archive_to_bytes(
     let mut chunks_by_index: HashMap<u32, Vec<u8>> = HashMap::new();
 
     for part in part_files {
-        let parsed = parse_part_file(part, WIRE_VERSION_V0, PROFILE_X25519_HKDF_XCHACHA20POLY1305)?;
+        let parsed = parse_part_file(
+            part,
+            WIRE_VERSION_V0,
+            PROFILE_X25519_HKDF_XCHACHA20POLY1305,
+            limits,
+        )?;
         if parsed.archive_id != header.archive_id {
             return Err(ArchiveError::Parse);
         }
@@ -172,7 +213,13 @@ pub fn decrypt_split_archive_to_bytes(
         }
 
         for (offset, ct) in parsed.chunk_ciphertexts.into_iter().enumerate() {
-            let idx = parsed.first_chunk_index + offset as u32;
+            let idx = parsed
+                .first_chunk_index
+                .checked_add(offset as u32)
+                .ok_or(ArchiveError::Parse)?;
+            if idx >= header.manifest.total_chunks {
+                return Err(ArchiveError::Parse);
+            }
             chunks_by_index.insert(idx, ct);
         }
     }
@@ -183,7 +230,7 @@ pub fn decrypt_split_archive_to_bytes(
         }
     }
 
-    let mut ordered_chunks = Vec::with_capacity(header.manifest.total_chunks as usize);
+    let mut ordered_chunks = Vec::with_capacity(total_chunks);
     for idx in 0..header.manifest.total_chunks {
         let ct = chunks_by_index.remove(&idx).ok_or(ArchiveError::Parse)?;
         ordered_chunks.push(EncryptedChunkRecord {
@@ -192,5 +239,5 @@ pub fn decrypt_split_archive_to_bytes(
         });
     }
 
-    decrypt_chunk_records(&dek, &header, &ordered_chunks)
+    crate::build::decrypt_chunk_records_with_limits(&dek, &header, &ordered_chunks, limits)
 }

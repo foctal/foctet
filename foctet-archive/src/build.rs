@@ -3,7 +3,7 @@ use rand_core::{OsRng, RngCore};
 use rkyv::rancor::Error as RkyvError;
 
 use crate::{
-    ArchiveError, ArchiveOptions, EncryptedHeader, FileManifest,
+    ArchiveError, ArchiveLimits, ArchiveOptions, EncryptedHeader, FileManifest,
     crypto::{aead_decrypt, aead_encrypt, chunk_nonce, header_nonce, wrap_dek},
     types::{ArchiveBuildResult, BuiltArchive, ChunkPlain, EncryptedChunkRecord},
 };
@@ -98,16 +98,25 @@ pub(crate) fn decrypt_header(
         .map_err(|_| ArchiveError::Deserialize)
 }
 
-pub(crate) fn decrypt_chunk_records(
+pub(crate) fn decrypt_chunk_records_with_limits(
     dek: &[u8; 32],
     header: &EncryptedHeader,
     records: &[EncryptedChunkRecord],
+    limits: &ArchiveLimits,
 ) -> Result<Vec<u8>, ArchiveError> {
     if records.len() != header.manifest.total_chunks as usize {
         return Err(ArchiveError::Parse);
     }
+    if records.len() > limits.max_total_chunks {
+        return Err(ArchiveError::LimitExceeded("total_chunks"));
+    }
+    let file_size = usize::try_from(header.manifest.file_size)
+        .map_err(|_| ArchiveError::LimitExceeded("file_size"))?;
+    if file_size > limits.max_total_output_bytes {
+        return Err(ArchiveError::LimitExceeded("file_size"));
+    }
 
-    let mut output = Vec::with_capacity(header.manifest.file_size as usize);
+    let mut output = Vec::with_capacity(file_size);
     let mut overall = Blake3::new();
 
     for expected_index in 0..header.manifest.total_chunks {
@@ -133,6 +142,14 @@ pub(crate) fn decrypt_chunk_records(
         let hash = blake3::hash(&chunk.payload);
         if hash.as_bytes() != &chunk.payload_hash {
             return Err(ArchiveError::Parse);
+        }
+        if output
+            .len()
+            .checked_add(chunk.payload.len())
+            .ok_or(ArchiveError::LimitExceeded("file_size overflow"))?
+            > limits.max_total_output_bytes
+        {
+            return Err(ArchiveError::LimitExceeded("file_size"));
         }
 
         overall.update(&chunk.payload);

@@ -17,18 +17,27 @@
 //!
 //! - Uses validated-only `rkyv` deserialization (`bytecheck` enabled).
 //! - Rejects malformed container structures with explicit parse errors.
+//! - Treats archive bytes as untrusted input and enforces [`ArchiveLimits`]
+//!   before attacker-controlled allocations.
 
 mod build;
 mod codec;
 mod crypto;
 mod error;
+mod limits;
 mod single;
 mod split;
 mod types;
 
 pub use error::ArchiveError;
-pub use single::{create_archive_from_bytes, decrypt_archive_to_bytes};
-pub use split::{create_split_archive_from_bytes, decrypt_split_archive_to_bytes};
+pub use limits::ArchiveLimits;
+pub use single::{
+    create_archive_from_bytes, decrypt_archive_to_bytes, decrypt_archive_to_bytes_with_limits,
+};
+pub use split::{
+    create_split_archive_from_bytes, decrypt_split_archive_to_bytes,
+    decrypt_split_archive_to_bytes_with_limits,
+};
 pub use types::{
     ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveOptions, DEFAULT_CHUNK_SIZE, EncryptedHeader,
     FileManifest, MANIFEST_MAGIC, PART_MAGIC, PROFILE_X25519_HKDF_XCHACHA20POLY1305, SplitArchive,

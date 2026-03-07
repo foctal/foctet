@@ -15,6 +15,9 @@ pub enum ArchiveError {
     /// Container bytes are malformed or truncated.
     #[error("archive parsing failed")]
     Parse,
+    /// Container bytes ended before declared structures were complete.
+    #[error("archive input is truncated")]
+    Truncated,
     /// Serialization of archive metadata failed.
     #[error("serialization error")]
     Serialize,
@@ -45,4 +48,7 @@ pub enum ArchiveError {
     /// Caller-provided input parameters are invalid.
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
+    /// A configured hard limit was exceeded while parsing/decoding untrusted input.
+    #[error("limit exceeded: {0}")]
+    LimitExceeded(&'static str),
 }
