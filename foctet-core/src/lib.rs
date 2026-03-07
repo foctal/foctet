@@ -7,6 +7,7 @@
 //!
 //! # Main Modules
 //!
+//! - [`body`]: `application/foctet` one-shot encrypted body envelope
 //! - [`frame`]: wire frame structures, parser/encoder, framed transport types
 //! - [`crypto`]: key schedule and frame AEAD helpers
 //! - [`control`]: control message wire payloads
@@ -21,6 +22,8 @@
 //! 3. Use [`Session`] to process control frames and rotate keys.
 //! 4. Encode application bytes as TLV (`APPLICATION_DATA`) via [`payload`].
 
+/// One-shot body-complete encrypted envelope (`application/foctet`) helpers.
+pub mod body;
 /// Control-plane message types used inside encrypted control frames.
 pub mod control;
 /// Cryptographic primitives and key-derivation helpers.
@@ -38,6 +41,11 @@ pub mod secure_channel;
 /// Session handshake/rekey state and key lifecycle handling.
 pub mod session;
 
+pub use body::{
+    BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,
+    open_body_for_key_id, open_body_for_key_id_with_limits, open_body_with_limits, seal_body,
+    seal_body_with_limits,
+};
 pub use control::{ControlMessage, ControlMessageKind};
 pub use crypto::{
     Direction, EphemeralKeyPair, TrafficKeys, decrypt_frame, decrypt_frame_with_key,

@@ -5,7 +5,7 @@ Foctet Protocol Specification (Draft v0)
 ----------
 
 *   **Status**: Draft v0 (work-in-progress)
-*   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule) and **Secure Archive** (encrypted storage format).
+*   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
 *   **Compatibility Policy (Draft v0)**:
     *   The current release line is `0.x` and may include breaking changes while v0 is still draft.

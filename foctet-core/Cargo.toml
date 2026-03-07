@@ -29,3 +29,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 proptest = "1.6"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `OsRng` in this crate flows through `rand_core -> getrandom`.
+# For `wasm32-unknown-unknown`, getrandom requires explicit JS support.
+getrandom = { version = "0.2", features = ["js"] }

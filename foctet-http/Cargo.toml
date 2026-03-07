@@ -1,0 +1,28 @@
+[package]
+name = "foctet-http"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thin HTTP adapter for application/foctet body envelopes"
+readme = "../README.md"
+
+[dependencies]
+foctet-core = { workspace = true }
+http = "1.4"
+thiserror.workspace = true
+axum = { version = "0.8", optional = true }
+
+[dev-dependencies]
+rand_core.workspace = true
+x25519-dalek.workspace = true
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = { version = "0.7.5", optional = true }
+
+[features]
+default = []
+axum = ["dep:axum"]
+workers = ["dep:worker"]
