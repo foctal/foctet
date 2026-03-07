@@ -27,7 +27,7 @@ pub enum AxumError {
 ///
 /// This validates `Content-Type: application/foctet`, decrypts via `foctet-core`,
 /// and returns a request with `Vec<u8>` plaintext body.
-pub async fn open_axum_request(
+pub async fn open_axum_request_body(
     request: AxumRequest,
     recipient_secret_key: [u8; 32],
     max_body_bytes: usize,
@@ -41,7 +41,7 @@ pub async fn open_axum_request(
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes with explicit envelope limits.
-pub async fn open_axum_request_with_limits(
+pub async fn open_axum_request_body_with_limits(
     request: AxumRequest,
     recipient_secret_key: [u8; 32],
     max_body_bytes: usize,
@@ -58,7 +58,7 @@ pub async fn open_axum_request_with_limits(
 /// Seals a plaintext `http::Response<Vec<u8>>` and returns an Axum response.
 ///
 /// `Content-Type: application/foctet` is set on the encrypted response.
-pub fn seal_axum_response(
+pub fn seal_axum_response_body(
     response: http::Response<Vec<u8>>,
     recipient_public_key: [u8; 32],
     recipient_key_id: &[u8],
@@ -68,7 +68,7 @@ pub fn seal_axum_response(
 }
 
 /// Seals a plaintext `http::Response<Vec<u8>>` with explicit envelope limits and returns an Axum response.
-pub fn seal_axum_response_with_limits(
+pub fn seal_axum_response_body_with_limits(
     response: http::Response<Vec<u8>>,
     recipient_public_key: [u8; 32],
     recipient_key_id: &[u8],
@@ -93,7 +93,7 @@ mod tests {
     use x25519_dalek::{PublicKey, StaticSecret};
 
     #[tokio::test]
-    async fn open_axum_request_roundtrip() {
+    async fn open_axum_request_body_roundtrip() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
@@ -111,7 +111,7 @@ mod tests {
         let (parts, body) = encrypted_request.into_parts();
         let axum_request = AxumRequest::from_parts(parts, Body::from(body));
 
-        let opened = open_axum_request(axum_request, recipient_priv.to_bytes(), 1024 * 1024)
+        let opened = open_axum_request_body(axum_request, recipient_priv.to_bytes(), 1024 * 1024)
             .await
             .expect("open");
 
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[test]
-    fn seal_axum_response_sets_content_type() {
+    fn seal_axum_response_body_sets_content_type() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
@@ -135,7 +135,7 @@ mod tests {
             .body(b"axum response body".to_vec())
             .expect("response");
 
-        let sealed = seal_axum_response(response, recipient_pub, b"axum-kid").expect("seal");
+        let sealed = seal_axum_response_body(response, recipient_pub, b"axum-kid").expect("seal");
 
         assert_eq!(sealed.status(), StatusCode::ACCEPTED);
         assert_eq!(sealed.version(), Version::HTTP_2);
