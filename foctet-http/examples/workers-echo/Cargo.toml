@@ -1,0 +1,15 @@
+[package]
+name = "foctet-http-workers-echo"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+foctet-http = { path = "../..", features = ["workers"] }
+worker = "0.7.5"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+
+[workspace]
