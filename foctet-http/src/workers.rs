@@ -1,14 +1,9 @@
-//! workers-rs adapter helpers for `application/foctet` bodies.
-//!
-//! This module bridges workers request/response body handling with `foctet-http` helpers.
+//! Cloudflare Workers adapters built on top of the high-level Foctet HTTP API.
 
 use foctet_core::BodyEnvelopeLimits;
 use thiserror::Error;
 
-use crate::{
-    CONTENT_TYPE, HttpError, is_foctet_content_type_value, open_http_body,
-    open_http_body_with_limits, seal_http_body,
-};
+use crate::{CONTENT_TYPE, HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer};
 
 /// Lightweight request metadata extracted before body decryption.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,90 +38,137 @@ pub enum WorkersError {
     Http(#[from] HttpError),
 }
 
-/// Opens an encrypted workers request body into plaintext bytes.
-///
-/// This validates `Content-Type: application/foctet` before decryption.
-pub async fn open_worker_request_body(
-    mut request: worker::Request,
-    recipient_secret_key: [u8; 32],
-) -> Result<Vec<u8>, WorkersError> {
-    ensure_worker_request_content_type(&request)?;
-
-    let body = request.bytes().await?;
-    open_http_body(&body, recipient_secret_key).map_err(WorkersError::Http)
+/// High-level Workers request opener.
+#[derive(Clone, Debug)]
+pub struct WorkersOpener {
+    opener: HttpOpener,
 }
 
-/// Opens an encrypted workers request body into plaintext bytes with explicit envelope limits.
-///
-/// This validates `Content-Type: application/foctet` before decryption.
+/// High-level Workers response sealer.
+#[derive(Clone, Debug)]
+pub struct WorkersSealer {
+    sealer: HttpSealer,
+}
+
+impl WorkersOpener {
+    /// Creates a Workers opener from Foctet open options.
+    pub fn new(options: HttpOpenOptions) -> Self {
+        Self {
+            opener: HttpOpener::new(options),
+        }
+    }
+
+    /// Creates a Workers opener from an already-configured HTTP opener.
+    pub fn from_http_opener(opener: HttpOpener) -> Self {
+        Self { opener }
+    }
+
+    /// Returns the inner HTTP opener.
+    pub fn opener(&self) -> &HttpOpener {
+        &self.opener
+    }
+
+    /// Opens an encrypted Workers request body into plaintext bytes.
+    pub async fn open_request_body(
+        &self,
+        mut request: worker::Request,
+    ) -> Result<Vec<u8>, WorkersError> {
+        crate::raw::ensure_foctet_content_type(&worker_headers_to_http(&request)?)?;
+        let body = request.bytes().await?;
+        self.opener.open_body(&body).map_err(WorkersError::Http)
+    }
+
+    /// Opens an encrypted Workers request into convenience metadata and plaintext bytes.
+    pub async fn open_request(
+        &self,
+        request: worker::Request,
+    ) -> Result<OpenedWorkerRequest, WorkersError> {
+        let metadata = extract_worker_request_metadata(&request)?;
+        let plaintext = self.open_request_body(request).await?;
+        Ok(OpenedWorkerRequest {
+            metadata,
+            plaintext,
+        })
+    }
+}
+
+impl WorkersSealer {
+    /// Creates a Workers sealer from Foctet seal options.
+    pub fn new(options: HttpSealOptions) -> Self {
+        Self {
+            sealer: HttpSealer::new(options),
+        }
+    }
+
+    /// Creates a Workers sealer from an already-configured HTTP sealer.
+    pub fn from_http_sealer(sealer: HttpSealer) -> Self {
+        Self { sealer }
+    }
+
+    /// Returns the inner HTTP sealer.
+    pub fn sealer(&self) -> &HttpSealer {
+        &self.sealer
+    }
+
+    /// Seals plaintext bytes into a Workers response body.
+    pub fn seal_response_body(&self, plaintext: &[u8]) -> Result<worker::Response, WorkersError> {
+        let sealed = self.sealer.seal_body(plaintext)?;
+        let mut response = worker::Response::from_bytes(sealed)?;
+        response.headers_mut().set("content-type", CONTENT_TYPE)?;
+        Ok(response)
+    }
+}
+
+/// Opens an encrypted Workers request body into plaintext bytes.
+pub async fn open_worker_request_body(
+    request: worker::Request,
+    recipient_secret_key: [u8; 32],
+) -> Result<Vec<u8>, WorkersError> {
+    WorkersOpener::new(HttpOpenOptions::new(recipient_secret_key))
+        .open_request_body(request)
+        .await
+}
+
+/// Opens an encrypted Workers request body into plaintext bytes with explicit envelope limits.
 pub async fn open_worker_request_body_with_limits(
-    mut request: worker::Request,
+    request: worker::Request,
     recipient_secret_key: [u8; 32],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, WorkersError> {
-    ensure_worker_request_content_type(&request)?;
-
-    let body = request.bytes().await?;
-    open_http_body_with_limits(&body, recipient_secret_key, limits).map_err(WorkersError::Http)
+    WorkersOpener::new(HttpOpenOptions::new(recipient_secret_key).with_limits(limits.clone()))
+        .open_request_body(request)
+        .await
 }
 
-/// Opens an encrypted workers request into metadata and plaintext body bytes.
-///
-/// Metadata is extracted before body consumption so callers can retain request context
-/// while using the same body-complete decryption path.
+/// Opens an encrypted Workers request into metadata and plaintext body bytes.
 pub async fn open_worker_request(
     request: worker::Request,
     recipient_secret_key: [u8; 32],
 ) -> Result<OpenedWorkerRequest, WorkersError> {
-    let metadata = extract_worker_request_metadata(&request)?;
-    let plaintext = open_worker_request_body(request, recipient_secret_key).await?;
-    Ok(OpenedWorkerRequest {
-        metadata,
-        plaintext,
-    })
+    WorkersOpener::new(HttpOpenOptions::new(recipient_secret_key))
+        .open_request(request)
+        .await
 }
 
-/// Opens an encrypted workers request into metadata and plaintext bytes with explicit limits.
+/// Opens an encrypted Workers request into metadata and plaintext bytes with explicit limits.
 pub async fn open_worker_request_with_limits(
     request: worker::Request,
     recipient_secret_key: [u8; 32],
     limits: &BodyEnvelopeLimits,
 ) -> Result<OpenedWorkerRequest, WorkersError> {
-    let metadata = extract_worker_request_metadata(&request)?;
-    let plaintext =
-        open_worker_request_body_with_limits(request, recipient_secret_key, limits).await?;
-    Ok(OpenedWorkerRequest {
-        metadata,
-        plaintext,
-    })
+    WorkersOpener::new(HttpOpenOptions::new(recipient_secret_key).with_limits(limits.clone()))
+        .open_request(request)
+        .await
 }
 
-/// Seals plaintext bytes into a workers response body.
-///
-/// `Content-Type: application/foctet` is set on the returned response.
+/// Seals plaintext bytes into a Workers response body.
 pub fn seal_worker_response_body(
     plaintext: &[u8],
     recipient_public_key: [u8; 32],
     recipient_key_id: &[u8],
 ) -> Result<worker::Response, WorkersError> {
-    let sealed = seal_http_body(plaintext, recipient_public_key, recipient_key_id)?;
-
-    let mut response = worker::Response::from_bytes(sealed)?;
-    response.headers_mut().set("content-type", CONTENT_TYPE)?;
-    Ok(response)
-}
-
-fn ensure_worker_request_content_type(request: &worker::Request) -> Result<(), WorkersError> {
-    let content_type = request
-        .headers()
-        .get("content-type")?
-        .ok_or(HttpError::MissingContentType)?;
-
-    if is_foctet_content_type_value(&content_type) {
-        return Ok(());
-    }
-
-    Err(HttpError::InvalidContentType.into())
+    WorkersSealer::new(HttpSealOptions::new(recipient_public_key, recipient_key_id))
+        .seal_response_body(plaintext)
 }
 
 fn extract_worker_request_metadata(
@@ -143,4 +185,16 @@ fn extract_worker_request_metadata(
         url,
         headers,
     })
+}
+
+fn worker_headers_to_http(request: &worker::Request) -> Result<http::HeaderMap, worker::Error> {
+    let mut out = http::HeaderMap::new();
+    for (name, value) in request.headers().entries() {
+        let name = http::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|err| worker::Error::RustError(err.to_string()))?;
+        let value = http::header::HeaderValue::from_str(&value)
+            .map_err(|err| worker::Error::RustError(err.to_string()))?;
+        out.append(name, value);
+    }
+    Ok(out)
 }

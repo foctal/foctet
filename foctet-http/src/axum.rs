@@ -1,16 +1,11 @@
-//! Axum adapter helpers for `application/foctet` bodies.
-//!
-//! This module only bridges Axum body types with `foctet-http` raw HTTP helpers.
+//! Axum adapters built on top of the high-level Foctet HTTP API.
 
 use ::axum::body::{Body, to_bytes};
 use ::axum::extract::Request as AxumRequest;
 use ::axum::response::Response as AxumResponse;
 use thiserror::Error;
 
-use crate::{
-    HttpError, open_http_request, open_http_request_with_limits, seal_http_response,
-    seal_http_response_with_limits,
-};
+use crate::{HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer};
 
 /// Error type for Axum adapter operations.
 #[derive(Debug, Error)]
@@ -23,21 +18,97 @@ pub enum AxumError {
     Http(#[from] HttpError),
 }
 
+/// High-level Axum request opener.
+#[derive(Clone, Debug)]
+pub struct AxumOpener {
+    opener: HttpOpener,
+    max_body_bytes: usize,
+}
+
+/// High-level Axum response sealer.
+#[derive(Clone, Debug)]
+pub struct AxumSealer {
+    sealer: HttpSealer,
+}
+
+impl AxumOpener {
+    /// Creates an Axum opener with the given Foctet open options and body-size limit.
+    pub fn new(options: HttpOpenOptions, max_body_bytes: usize) -> Self {
+        Self {
+            opener: HttpOpener::new(options),
+            max_body_bytes,
+        }
+    }
+
+    /// Creates an Axum opener from an already-configured HTTP opener.
+    pub fn from_http_opener(opener: HttpOpener, max_body_bytes: usize) -> Self {
+        Self {
+            opener,
+            max_body_bytes,
+        }
+    }
+
+    /// Returns the maximum number of bytes read from an Axum request body.
+    pub fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes
+    }
+
+    /// Returns the inner HTTP opener.
+    pub fn opener(&self) -> &HttpOpener {
+        &self.opener
+    }
+
+    /// Opens an encrypted Axum request body into plaintext bytes.
+    pub async fn open_request(
+        &self,
+        request: AxumRequest,
+    ) -> Result<http::Request<Vec<u8>>, AxumError> {
+        let (parts, body) = request.into_parts();
+        let body_bytes = to_bytes(body, self.max_body_bytes)
+            .await
+            .map_err(AxumError::BodyRead)?;
+        let request = http::Request::from_parts(parts, body_bytes.to_vec());
+        self.opener.open_request(request).map_err(AxumError::Http)
+    }
+}
+
+impl AxumSealer {
+    /// Creates an Axum sealer with the given Foctet seal options.
+    pub fn new(options: HttpSealOptions) -> Self {
+        Self {
+            sealer: HttpSealer::new(options),
+        }
+    }
+
+    /// Creates an Axum sealer from an already-configured HTTP sealer.
+    pub fn from_http_sealer(sealer: HttpSealer) -> Self {
+        Self { sealer }
+    }
+
+    /// Returns the inner HTTP sealer.
+    pub fn sealer(&self) -> &HttpSealer {
+        &self.sealer
+    }
+
+    /// Seals a plaintext HTTP response and converts it into an Axum response.
+    pub fn seal_response(
+        &self,
+        response: http::Response<Vec<u8>>,
+    ) -> Result<AxumResponse, AxumError> {
+        let encrypted = self.sealer.seal_response(response)?;
+        Ok(http_response_vec_to_axum(encrypted))
+    }
+}
+
 /// Opens an encrypted Axum request body into plaintext bytes.
-///
-/// This validates `Content-Type: application/foctet`, decrypts via `foctet-core`,
-/// and returns a request with `Vec<u8>` plaintext body.
 pub async fn open_axum_request_body(
     request: AxumRequest,
     recipient_secret_key: [u8; 32],
     max_body_bytes: usize,
 ) -> Result<http::Request<Vec<u8>>, AxumError> {
-    let (parts, body) = request.into_parts();
-    let body_bytes = to_bytes(body, max_body_bytes)
+    AxumOpener::new(HttpOpenOptions::new(recipient_secret_key), max_body_bytes)
+        .open_request(request)
         .await
-        .map_err(AxumError::BodyRead)?;
-    let request = http::Request::from_parts(parts, body_bytes.to_vec());
-    open_http_request(request, recipient_secret_key).map_err(AxumError::Http)
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes with explicit envelope limits.
@@ -47,24 +118,22 @@ pub async fn open_axum_request_body_with_limits(
     max_body_bytes: usize,
     limits: &foctet_core::BodyEnvelopeLimits,
 ) -> Result<http::Request<Vec<u8>>, AxumError> {
-    let (parts, body) = request.into_parts();
-    let body_bytes = to_bytes(body, max_body_bytes)
-        .await
-        .map_err(AxumError::BodyRead)?;
-    let request = http::Request::from_parts(parts, body_bytes.to_vec());
-    open_http_request_with_limits(request, recipient_secret_key, limits).map_err(AxumError::Http)
+    AxumOpener::new(
+        HttpOpenOptions::new(recipient_secret_key).with_limits(limits.clone()),
+        max_body_bytes,
+    )
+    .open_request(request)
+    .await
 }
 
 /// Seals a plaintext `http::Response<Vec<u8>>` and returns an Axum response.
-///
-/// `Content-Type: application/foctet` is set on the encrypted response.
 pub fn seal_axum_response_body(
     response: http::Response<Vec<u8>>,
     recipient_public_key: [u8; 32],
     recipient_key_id: &[u8],
 ) -> Result<AxumResponse, AxumError> {
-    let encrypted = seal_http_response(response, recipient_public_key, recipient_key_id)?;
-    Ok(http_response_vec_to_axum(encrypted))
+    AxumSealer::new(HttpSealOptions::new(recipient_public_key, recipient_key_id))
+        .seal_response(response)
 }
 
 /// Seals a plaintext `http::Response<Vec<u8>>` with explicit envelope limits and returns an Axum response.
@@ -74,9 +143,10 @@ pub fn seal_axum_response_body_with_limits(
     recipient_key_id: &[u8],
     limits: &foctet_core::BodyEnvelopeLimits,
 ) -> Result<AxumResponse, AxumError> {
-    let encrypted =
-        seal_http_response_with_limits(response, recipient_public_key, recipient_key_id, limits)?;
-    Ok(http_response_vec_to_axum(encrypted))
+    AxumSealer::new(
+        HttpSealOptions::new(recipient_public_key, recipient_key_id).with_limits(limits.clone()),
+    )
+    .seal_response(response)
 }
 
 fn http_response_vec_to_axum(response: http::Response<Vec<u8>>) -> AxumResponse {
@@ -87,7 +157,7 @@ fn http_response_vec_to_axum(response: http::Response<Vec<u8>>) -> AxumResponse 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CONTENT_TYPE, seal_http_request};
+    use crate::{CONTENT_TYPE, HttpSealer, raw::seal_http_request};
     use http::{Request, Response, StatusCode, Version, header};
     use rand_core::OsRng;
     use x25519_dalek::{PublicKey, StaticSecret};
@@ -144,5 +214,12 @@ mod tests {
             sealed.headers()[header::CONTENT_TYPE],
             header::HeaderValue::from_static(CONTENT_TYPE)
         );
+    }
+
+    #[test]
+    fn sealer_wrapper_uses_http_core() {
+        let sealer =
+            AxumSealer::from_http_sealer(HttpSealer::new(HttpSealOptions::new([1u8; 32], b"kid")));
+        assert_eq!(sealer.sealer().options().recipient_key_id(), b"kid");
     }
 }

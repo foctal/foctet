@@ -5,7 +5,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use foctet_http::axum::{open_axum_request_body, seal_axum_response_body};
+use foctet_http::{
+    HttpOpenOptions, HttpSealOptions,
+    axum::{AxumOpener, AxumSealer},
+};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const SERVER_SECRET_KEY: [u8; 32] = [0x11; 32];
@@ -27,7 +30,9 @@ async fn main() {
 }
 
 async fn handle_foctet(request: Request) -> Result<Response, StatusCode> {
-    let opened = open_axum_request_body(request, SERVER_SECRET_KEY, MAX_BODY_BYTES)
+    let opener = AxumOpener::new(HttpOpenOptions::new(SERVER_SECRET_KEY), MAX_BODY_BYTES);
+    let opened = opener
+        .open_request(request)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -43,12 +48,13 @@ async fn handle_foctet(request: Request) -> Result<Response, StatusCode> {
         .body(transformed)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let encrypted = seal_axum_response_body(
-        plaintext_response,
+    let sealer = AxumSealer::new(HttpSealOptions::new(
         demo_public_key(CLIENT_SECRET_KEY),
         b"demo-client-kid",
-    )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    ));
+    let encrypted = sealer
+        .seal_response(plaintext_response)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(encrypted.into_response())
 }

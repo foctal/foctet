@@ -1,4 +1,7 @@
-use foctet_http::workers::{open_worker_request, seal_worker_response_body};
+use foctet_http::{
+    HttpOpenOptions, HttpSealOptions,
+    workers::{WorkersOpener, WorkersSealer},
+};
 use worker::{Context, Env, Error, Request, Response, Result, event};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -11,7 +14,9 @@ pub async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Respons
         return Response::error("Not Found", 404);
     }
 
-    let opened = open_worker_request(request, SERVER_SECRET_KEY)
+    let opener = WorkersOpener::new(HttpOpenOptions::new(SERVER_SECRET_KEY));
+    let opened = opener
+        .open_request(request)
         .await
         .map_err(|err| Error::RustError(err.to_string()))?;
 
@@ -21,12 +26,13 @@ pub async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Respons
         .map(|byte| byte.to_ascii_uppercase())
         .collect::<Vec<u8>>();
 
-    seal_worker_response_body(
-        &transformed,
+    let sealer = WorkersSealer::new(HttpSealOptions::new(
         demo_public_key(CLIENT_SECRET_KEY),
         b"demo-client-kid",
-    )
-    .map_err(|err| Error::RustError(err.to_string()))
+    ));
+    sealer
+        .seal_response_body(&transformed)
+        .map_err(|err| Error::RustError(err.to_string()))
 }
 
 fn demo_public_key(secret_key: [u8; 32]) -> [u8; 32] {
