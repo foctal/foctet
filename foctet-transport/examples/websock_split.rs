@@ -3,9 +3,8 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
 
 use clap::Parser;
-use foctet_core::{AsyncSecureChannel, RekeyThresholds, Session};
-use foctet_transport::websock;
-use tokio::io::AsyncWriteExt;
+use foctet_core::{RekeyThresholds, Session};
+use foctet_transport::{TransportConfig, websock};
 use tokio::task::JoinSet;
 use websock_tungstenite_mux::{ClientBuilder, ServerBuilder};
 
@@ -97,19 +96,6 @@ fn build_server_tls(
         .with_single_cert(cert_chain, key)?)
 }
 
-async fn shutdown_channel<T>(
-    channel: AsyncSecureChannel<foctet_core::io::TokioIo<T>>,
-) -> Result<(), Box<dyn Error + Send + Sync>>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let (framed, _session) = channel.into_parts();
-    let io = framed.into_inner();
-    let mut io = io.into_inner();
-    io.shutdown().await?;
-    Ok(())
-}
-
 async fn run_server(
     addr: SocketAddr,
     server_sessions: Vec<Session>,
@@ -124,20 +110,21 @@ async fn run_server(
     let session = server.accept().await?;
 
     let mut tasks = JoinSet::new();
+    let config = TransportConfig::default().with_app_stream_id(1);
     for (idx, session_keys) in server_sessions.into_iter().enumerate() {
-        let (send, recv) = session.accept_bi().await?;
+        let session = session.clone();
         tasks.spawn(async move {
-            let io = websock::from_split(recv, send);
-            let mut channel =
-                AsyncSecureChannel::from_tokio(io, session_keys)?.with_app_stream_id(1);
+            let mut channel = websock::accept_secure_channel_with(&session, session_keys, config)
+                .await
+                .map_err(Box::<dyn Error + Send + Sync>::from)?;
 
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "websock-mux stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
-            channel.send_data(reply.as_bytes()).await?;
-            shutdown_channel(channel).await?;
+            channel.send_application(reply.as_bytes()).await?;
+            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -162,22 +149,23 @@ async fn run_client(
     let session = client.connect(&url).await?;
 
     let mut tasks = JoinSet::new();
+    let config = TransportConfig::default().with_app_stream_id(1);
     for (idx, session_keys) in client_sessions.into_iter().enumerate() {
-        let (send, recv) = session.open_bi().await?;
+        let session = session.clone();
         tasks.spawn(async move {
-            let io = websock::from_split(recv, send);
-            let mut channel =
-                AsyncSecureChannel::from_tokio(io, session_keys)?.with_app_stream_id(1);
+            let mut channel = websock::open_secure_channel_with(&session, session_keys, config)
+                .await
+                .map_err(Box::<dyn Error + Send + Sync>::from)?;
 
             let payload = format!("hello from websock stream {idx}");
-            channel.send_data(payload.as_bytes()).await?;
+            channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
 
             println!(
                 "client stream {idx} got: {}",
                 String::from_utf8_lossy(&response)
             );
-            shutdown_channel(channel).await?;
+            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }

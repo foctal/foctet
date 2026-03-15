@@ -3,9 +3,10 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ::quinn as quinn_transport;
 use clap::Parser;
-use foctet_core::{AsyncSecureChannel, RekeyThresholds, Session};
-use foctet_transport::quinn as quinn_adapter;
+use foctet_core::{RekeyThresholds, Session};
+use foctet_transport::{TransportConfig, quinn as foctet_quinn};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::task::JoinSet;
 
@@ -98,7 +99,7 @@ fn configure_server(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<quinn::ServerConfig, Box<dyn Error + Send + Sync>> {
-    let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key)?;
+    let mut server_config = quinn_transport::ServerConfig::with_single_cert(cert_chain, key)?;
     let transport = Arc::get_mut(&mut server_config.transport)
         .expect("transport config must be uniquely owned");
     transport.max_concurrent_uni_streams(0_u8.into());
@@ -112,9 +113,9 @@ fn configure_client(
     for cert in cert_chain {
         roots.add(cert.clone())?;
     }
-    Ok(quinn::ClientConfig::with_root_certificates(Arc::new(
-        roots,
-    ))?)
+    Ok(quinn_transport::ClientConfig::with_root_certificates(
+        Arc::new(roots),
+    )?)
 }
 
 fn is_graceful_quinn_close(err: &(dyn Error + 'static)) -> bool {
@@ -123,30 +124,33 @@ fn is_graceful_quinn_close(err: &(dyn Error + 'static)) -> bool {
 }
 
 async fn run_server(
-    endpoint: quinn::Endpoint,
+    endpoint: quinn_transport::Endpoint,
     server_sessions: Vec<Session>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let incoming = endpoint.accept().await.ok_or("endpoint closed")?;
     let connection = incoming.await?;
 
     let mut tasks = JoinSet::new();
+    let config = TransportConfig::default().with_app_stream_id(1);
     for (idx, session_keys) in server_sessions.into_iter().enumerate() {
-        let (send, recv) = match connection.accept_bi().await {
-            Ok(pair) => pair,
-            Err(err) if is_graceful_quinn_close(&err) => break,
-            Err(err) => return Err(Box::new(err)),
-        };
+        let connection = connection.clone();
         tasks.spawn(async move {
-            let io = quinn_adapter::from_split(recv, send);
             let mut channel =
-                AsyncSecureChannel::from_tokio(io, session_keys)?.with_app_stream_id(1);
+                match foctet_quinn::accept_secure_channel_with(&connection, session_keys, config)
+                    .await
+                {
+                    Ok(channel) => channel,
+                    Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
+                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
+                };
 
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "quinn stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
-            channel.send_data(reply.as_bytes()).await?;
+            channel.send_application(reply.as_bytes()).await?;
+            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -163,32 +167,35 @@ async fn run_server(
 }
 
 async fn run_client(
-    endpoint: quinn::Endpoint,
+    endpoint: quinn_transport::Endpoint,
     remote: SocketAddr,
     client_sessions: Vec<Session>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection = endpoint.connect(remote, "localhost")?.await?;
 
     let mut tasks = JoinSet::new();
+    let config = TransportConfig::default().with_app_stream_id(1);
     for (idx, session_keys) in client_sessions.into_iter().enumerate() {
-        let (send, recv) = match connection.open_bi().await {
-            Ok(pair) => pair,
-            Err(err) if is_graceful_quinn_close(&err) => break,
-            Err(err) => return Err(Box::new(err)),
-        };
+        let connection = connection.clone();
         tasks.spawn(async move {
-            let io = quinn_adapter::from_split(recv, send);
             let mut channel =
-                AsyncSecureChannel::from_tokio(io, session_keys)?.with_app_stream_id(1);
+                match foctet_quinn::open_secure_channel_with(&connection, session_keys, config)
+                    .await
+                {
+                    Ok(channel) => channel,
+                    Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
+                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
+                };
 
             let payload = format!("hello from quinn stream {idx}");
-            channel.send_data(payload.as_bytes()).await?;
+            channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
 
             println!(
                 "client stream {idx} got: {}",
                 String::from_utf8_lossy(&response)
             );
+            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -212,11 +219,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     let server_config = configure_server(cert_chain.clone(), key)?;
-    let server_endpoint = quinn::Endpoint::server(server_config, bind_addr)?;
+    let server_endpoint = quinn_transport::Endpoint::server(server_config, bind_addr)?;
     let server_addr = server_endpoint.local_addr()?;
 
     let client_config = configure_client(&cert_chain)?;
-    let mut client_endpoint = quinn::Endpoint::client(bind_addr)?;
+    let mut client_endpoint = quinn_transport::Endpoint::client(bind_addr)?;
     client_endpoint.set_default_client_config(client_config);
 
     let server_task = tokio::spawn(run_server(server_endpoint, server_sessions));

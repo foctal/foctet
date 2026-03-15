@@ -2,12 +2,11 @@ use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
+use ::muxtls::{ClientConfig, Endpoint, ServerConfig};
 use clap::Parser;
-use foctet_core::{AsyncSecureChannel, RekeyThresholds, Session};
-use foctet_transport::muxtls as muxtls_adapter;
-use muxtls::{ClientConfig, Endpoint, ServerConfig};
+use foctet_core::{RekeyThresholds, Session};
+use foctet_transport::{TransportConfig, muxtls as foctet_muxtls};
 use rustls::pki_types::CertificateDer;
-use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
 const STREAM_COUNT: usize = 2;
@@ -85,43 +84,31 @@ fn is_graceful_muxtls_close(err: &(dyn Error + 'static)) -> bool {
         || msg.contains("Broken pipe")
 }
 
-async fn shutdown_channel<T>(
-    channel: AsyncSecureChannel<foctet_core::io::TokioIo<T>>,
-) -> Result<(), Box<dyn Error + Send + Sync>>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let (framed, _session) = channel.into_parts();
-    let io = framed.into_inner();
-    let mut io = io.into_inner();
-    io.shutdown().await?;
-    Ok(())
-}
-
 async fn run_server(
     endpoint: Endpoint,
     server_sessions: Vec<Session>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let conn = endpoint.accept().await?;
     let mut tasks = JoinSet::new();
+    let config = TransportConfig::default().with_app_stream_id(1);
 
     for (idx, session) in server_sessions.into_iter().enumerate() {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(pair) => pair,
-            Err(err) if is_graceful_muxtls_close(&err) => break,
-            Err(err) => return Err(Box::new(err)),
-        };
+        let conn = conn.clone();
         tasks.spawn(async move {
-            let io = muxtls_adapter::from_split(recv, send);
-            let mut channel = AsyncSecureChannel::from_tokio(io, session)?.with_app_stream_id(1);
+            let mut channel =
+                match foctet_muxtls::accept_secure_channel_with(&conn, session, config).await {
+                    Ok(channel) => channel,
+                    Err(err) if is_graceful_muxtls_close(&err) => return Ok(()),
+                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
+                };
 
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "muxtls stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
-            channel.send_data(reply.as_bytes()).await?;
-            shutdown_channel(channel).await?;
+            channel.send_application(reply.as_bytes()).await?;
+            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -145,26 +132,27 @@ async fn run_client(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let conn = endpoint.connect(addr, "localhost")?.await?;
     let mut tasks = JoinSet::new();
+    let config = TransportConfig::default().with_app_stream_id(1);
 
     for (idx, session) in client_sessions.into_iter().enumerate() {
-        let (send, recv) = match conn.open_bi().await {
-            Ok(pair) => pair,
-            Err(err) if is_graceful_muxtls_close(&err) => break,
-            Err(err) => return Err(Box::new(err)),
-        };
+        let conn = conn.clone();
         tasks.spawn(async move {
-            let io = muxtls_adapter::from_split(recv, send);
-            let mut channel = AsyncSecureChannel::from_tokio(io, session)?.with_app_stream_id(1);
+            let mut channel =
+                match foctet_muxtls::open_secure_channel_with(&conn, session, config).await {
+                    Ok(channel) => channel,
+                    Err(err) if is_graceful_muxtls_close(&err) => return Ok(()),
+                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
+                };
 
             let payload = format!("hello from muxtls stream {idx}");
-            channel.send_data(payload.as_bytes()).await?;
+            channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
 
             println!(
                 "client stream {idx} got: {}",
                 String::from_utf8_lossy(&response)
             );
-            shutdown_channel(channel).await?;
+            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }

@@ -13,7 +13,7 @@ Transport-agnostic end-to-end encryption layer for secure data transfer.
 - `foctet-core`: Framing, crypto, handshake/rekey state, replay protection.
 - `foctet-http`: Thin HTTP adapter for `application/foctet` body envelopes.
 - `foctet-archive`: Encrypted single-file and split archives with recipient key wrapping.
-- `foctet-transport`: Thin split-stream adapters.
+- `foctet-transport`: Layered transport integration helpers.
 - `foctet`: Top-level re-export crate.
 
 ## Stability
