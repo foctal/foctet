@@ -13,11 +13,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adapter;
 mod config;
 mod error;
 #[cfg(feature = "runtime-futures")]
 mod futures;
-pub mod adapter;
 #[cfg(feature = "runtime-tokio")]
 mod tokio;
 
@@ -30,10 +30,10 @@ pub mod websock;
 #[cfg(feature = "transport-webtrans")]
 pub mod webtrans;
 
+pub use adapter::SplitIo;
 pub use config::TransportConfig;
 pub use error::TransportChannelError;
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
-pub use adapter::SplitIo;
 #[cfg(feature = "runtime-tokio")]
 pub use tokio::{TokioTransportBuilder, TokioTransportChannel};
