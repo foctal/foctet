@@ -4,11 +4,14 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use foctet_core::{RekeyThresholds, Session};
-use foctet_transport::{TransportConfig, websock};
+use foctet_transport::{TokioTransportBuilder, TransportConfig};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use websock_tungstenite_mux::{ClientBuilder, ServerBuilder};
 
 const STREAM_COUNT: usize = 2;
+const STREAM_TAG_LEN: usize = 4;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -96,35 +99,69 @@ fn build_server_tls(
         .with_single_cert(cert_chain, key)?)
 }
 
+fn take_tagged_session(
+    sessions: &mut [Option<Session>],
+    tag: [u8; STREAM_TAG_LEN],
+) -> Result<(usize, Session), Box<dyn Error + Send + Sync>> {
+    let idx = u32::from_be_bytes(tag) as usize;
+    let Some(slot) = sessions.get_mut(idx) else {
+        return Err(format!("received out-of-range stream tag {idx}").into());
+    };
+    let Some(session) = slot.take() else {
+        return Err(format!("received duplicate stream tag {idx}").into());
+    };
+    Ok((idx, session))
+}
+
 async fn run_server(
     addr: SocketAddr,
     server_sessions: Vec<Session>,
     server_tls: rustls::ServerConfig,
+    ready: oneshot::Sender<Result<(), String>>,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let server = ServerBuilder::new()
+    let server = match ServerBuilder::new()
         .with_addr(addr)
         .with_default_alpn()
         .with_tls_config(server_tls)
         .build()
-        .await?;
+        .await
+    {
+        Ok(server) => {
+            let _ = ready.send(Ok(()));
+            server
+        }
+        Err(err) => {
+            let _ = ready.send(Err(err.to_string()));
+            return Err(Box::new(err));
+        }
+    };
     let session = server.accept().await?;
 
-    let mut tasks = JoinSet::new();
     let config = TransportConfig::default().with_app_stream_id(1);
-    for (idx, session_keys) in server_sessions.into_iter().enumerate() {
-        let session = session.clone();
-        tasks.spawn(async move {
-            let mut channel = websock::accept_secure_channel_with(&session, session_keys, config)
-                .await
-                .map_err(Box::<dyn Error + Send + Sync>::from)?;
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut server_sessions = server_sessions.into_iter().map(Some).collect::<Vec<_>>();
+    let mut channels = Vec::with_capacity(server_sessions.len());
 
+    // Read an explicit stream tag before building Foctet so accept order can vary safely.
+    for _ in 0..server_sessions.len() {
+        let (send, mut recv) = session.accept_bi().await?;
+        let mut tag = [0u8; STREAM_TAG_LEN];
+        recv.read_exact(&mut tag).await?;
+        let (idx, session_keys) = take_tagged_session(&mut server_sessions, tag)?;
+        let channel = builder.build_from_split(recv, send, session_keys)?;
+        channels.push((idx, channel));
+    }
+
+    let mut tasks = JoinSet::new();
+    for (idx, mut channel) in channels {
+        tasks.spawn(async move {
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "websock-mux stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
             channel.send_application(reply.as_bytes()).await?;
-            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -132,6 +169,8 @@ async fn run_server(
     while let Some(result) = tasks.join_next().await {
         result??;
     }
+
+    let _ = shutdown.await;
 
     Ok(())
 }
@@ -148,15 +187,23 @@ async fn run_client(
     let url = format!("wss://{}:{}", addr.ip(), addr.port());
     let session = client.connect(&url).await?;
 
-    let mut tasks = JoinSet::new();
     let config = TransportConfig::default().with_app_stream_id(1);
-    for (idx, session_keys) in client_sessions.into_iter().enumerate() {
-        let session = session.clone();
-        tasks.spawn(async move {
-            let mut channel = websock::open_secure_channel_with(&session, session_keys, config)
-                .await
-                .map_err(Box::<dyn Error + Send + Sync>::from)?;
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut channels = Vec::with_capacity(client_sessions.len());
 
+    // Write a small cleartext tag on each raw stream so the server can bind the right Foctet
+    // session even if transport accept order differs from open order.
+    for (idx, session_keys) in client_sessions.into_iter().enumerate() {
+        let (mut send, recv) = session.open_bi().await?;
+        send.write_all(&(idx as u32).to_be_bytes()).await?;
+        send.flush().await?;
+        let channel = builder.build_from_split(recv, send, session_keys)?;
+        channels.push((idx, channel));
+    }
+
+    let mut tasks = JoinSet::new();
+    for (idx, mut channel) in channels {
+        tasks.spawn(async move {
             let payload = format!("hello from websock stream {idx}");
             channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
@@ -165,7 +212,6 @@ async fn run_client(
                 "client stream {idx} got: {}",
                 String::from_utf8_lossy(&response)
             );
-            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -187,10 +233,21 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let client_tls = build_client_tls(&cert_chain)?;
     let server_tls = build_server_tls(cert_chain, key)?;
 
-    let server_task = tokio::spawn(run_server(addr, server_sessions, server_tls));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(run_server(
+        addr,
+        server_sessions,
+        server_tls,
+        ready_tx,
+        shutdown_rx,
+    ));
+    ready_rx
+        .await
+        .map_err(|_| "websock server readiness channel closed")??;
 
     run_client(addr, client_sessions, client_tls).await?;
+    let _ = shutdown_tx.send(());
     server_task.await??;
 
     println!("websock multi-stream foctet E2EE example finished");

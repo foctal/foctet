@@ -6,11 +6,14 @@ use std::sync::Arc;
 use ::quinn as quinn_transport;
 use clap::Parser;
 use foctet_core::{RekeyThresholds, Session};
-use foctet_transport::{TransportConfig, quinn as foctet_quinn};
+use foctet_transport::{TokioTransportBuilder, TransportConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 const STREAM_COUNT: usize = 2;
+const STREAM_TAG_LEN: usize = 4;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -119,38 +122,71 @@ fn configure_client(
 }
 
 fn is_graceful_quinn_close(err: &(dyn Error + 'static)) -> bool {
-    let msg = err.to_string();
-    msg.contains("ApplicationClosed") || msg.contains("ConnectionLost(ApplicationClosed")
+    let mut current = Some(err);
+    while let Some(item) = current {
+        let msg = item.to_string();
+        if msg.contains("ApplicationClosed")
+            || msg.contains("ConnectionLost(ApplicationClosed")
+            || msg.contains("error_code: 0")
+            || msg.contains("NotConnected")
+            || msg.contains("not connected")
+        {
+            return true;
+        }
+        current = item.source();
+    }
+    false
+}
+
+fn take_tagged_session(
+    sessions: &mut [Option<Session>],
+    tag: [u8; STREAM_TAG_LEN],
+) -> Result<(usize, Session), Box<dyn Error + Send + Sync>> {
+    let idx = u32::from_be_bytes(tag) as usize;
+    let Some(slot) = sessions.get_mut(idx) else {
+        return Err(format!("received out-of-range stream tag {idx}").into());
+    };
+    let Some(session) = slot.take() else {
+        return Err(format!("received duplicate stream tag {idx}").into());
+    };
+    Ok((idx, session))
 }
 
 async fn run_server(
     endpoint: quinn_transport::Endpoint,
     server_sessions: Vec<Session>,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let incoming = endpoint.accept().await.ok_or("endpoint closed")?;
     let connection = incoming.await?;
+    let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut server_sessions = server_sessions.into_iter().map(Some).collect::<Vec<_>>();
+    let mut channels = Vec::with_capacity(server_sessions.len());
+
+    // Read an explicit stream tag before building Foctet so accept order can vary safely.
+    for _ in 0..server_sessions.len() {
+        let (send, mut recv) = match connection.accept_bi().await {
+            Ok(parts) => parts,
+            Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        };
+        let mut tag = [0u8; STREAM_TAG_LEN];
+        recv.read_exact(&mut tag).await?;
+        let (idx, session) = take_tagged_session(&mut server_sessions, tag)?;
+        let channel = builder.build_from_split(recv, send, session)?;
+        channels.push((idx, channel));
+    }
 
     let mut tasks = JoinSet::new();
-    let config = TransportConfig::default().with_app_stream_id(1);
-    for (idx, session_keys) in server_sessions.into_iter().enumerate() {
-        let connection = connection.clone();
+    for (idx, mut channel) in channels {
         tasks.spawn(async move {
-            let mut channel =
-                match foctet_quinn::accept_secure_channel_with(&connection, session_keys, config)
-                    .await
-                {
-                    Ok(channel) => channel,
-                    Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
-                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
-                };
-
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "quinn stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
             channel.send_application(reply.as_bytes()).await?;
-            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -163,6 +199,7 @@ async fn run_server(
             Err(err) => return Err(Box::new(err)),
         }
     }
+    let _ = shutdown.await;
     Ok(())
 }
 
@@ -172,21 +209,27 @@ async fn run_client(
     client_sessions: Vec<Session>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection = endpoint.connect(remote, "localhost")?.await?;
+    let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut channels = Vec::with_capacity(client_sessions.len());
+
+    // Write a small cleartext tag on each raw stream so the server can bind the right Foctet
+    // session even if transport accept order differs from open order.
+    for (idx, session_keys) in client_sessions.into_iter().enumerate() {
+        let (mut send, recv) = match connection.open_bi().await {
+            Ok(parts) => parts,
+            Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        };
+        send.write_all(&(idx as u32).to_be_bytes()).await?;
+        send.flush().await?;
+        let channel = builder.build_from_split(recv, send, session_keys)?;
+        channels.push((idx, channel));
+    }
 
     let mut tasks = JoinSet::new();
-    let config = TransportConfig::default().with_app_stream_id(1);
-    for (idx, session_keys) in client_sessions.into_iter().enumerate() {
-        let connection = connection.clone();
+    for (idx, mut channel) in channels {
         tasks.spawn(async move {
-            let mut channel =
-                match foctet_quinn::open_secure_channel_with(&connection, session_keys, config)
-                    .await
-                {
-                    Ok(channel) => channel,
-                    Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
-                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
-                };
-
             let payload = format!("hello from quinn stream {idx}");
             channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
@@ -195,7 +238,6 @@ async fn run_client(
                 "client stream {idx} got: {}",
                 String::from_utf8_lossy(&response)
             );
-            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -226,12 +268,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut client_endpoint = quinn_transport::Endpoint::client(bind_addr)?;
     client_endpoint.set_default_client_config(client_config);
 
-    let server_task = tokio::spawn(run_server(server_endpoint, server_sessions));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(run_server(server_endpoint, server_sessions, shutdown_rx));
     if let Err(err) = run_client(client_endpoint, server_addr, client_sessions).await
         && !is_graceful_quinn_close(err.as_ref())
     {
         return Err(err);
     }
+    let _ = shutdown_tx.send(());
 
     match server_task.await {
         Ok(Ok(())) => {}

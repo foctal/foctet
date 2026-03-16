@@ -5,10 +5,13 @@ use std::path::PathBuf;
 use ::webtrans::{ClientBuilder, ServerBuilder, tls};
 use clap::Parser;
 use foctet_core::{RekeyThresholds, Session};
-use foctet_transport::{TransportConfig, webtrans as foctet_webtrans};
+use foctet_transport::{TokioTransportBuilder, TransportConfig};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
 use url::Url;
 
 const STREAM_COUNT: usize = 2;
+const STREAM_TAG_LEN: usize = 4;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -72,34 +75,69 @@ fn resolve_cert_pair(
     }
 }
 
+fn take_tagged_session(
+    sessions: &mut [Option<Session>],
+    tag: [u8; STREAM_TAG_LEN],
+) -> Result<(usize, Session), Box<dyn Error + Send + Sync>> {
+    let idx = u32::from_be_bytes(tag) as usize;
+    let Some(slot) = sessions.get_mut(idx) else {
+        return Err(format!("received out-of-range stream tag {idx}").into());
+    };
+    let Some(session) = slot.take() else {
+        return Err(format!("received duplicate stream tag {idx}").into());
+    };
+    Ok((idx, session))
+}
+
 async fn run_server(
     addr: SocketAddr,
     server_sessions: Vec<Session>,
     cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
     key: rustls::pki_types::PrivateKeyDer<'static>,
+    ready: oneshot::Sender<Result<(), String>>,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut server = ServerBuilder::new()
+    let mut server = match ServerBuilder::new()
         .with_addr(addr)
-        .with_certificate(cert_chain, key)?;
+        .with_certificate(cert_chain, key)
+    {
+        Ok(server) => {
+            let _ = ready.send(Ok(()));
+            server
+        }
+        Err(err) => {
+            let _ = ready.send(Err(err.to_string()));
+            return Err(Box::new(err));
+        }
+    };
 
     let request = server.accept().await.ok_or("server closed")?;
     let session = request.ok().await?;
     let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut server_sessions = server_sessions.into_iter().map(Some).collect::<Vec<_>>();
+    let mut channels = Vec::with_capacity(server_sessions.len());
 
-    for (idx, session_keys) in server_sessions.into_iter().enumerate() {
-        let mut channel =
-            foctet_webtrans::accept_secure_channel_with(&session, session_keys, config)
-                .await
-                .map_err(Box::<dyn Error + Send + Sync>::from)?;
+    // Read an explicit stream tag before building Foctet so accept order can vary safely.
+    for _ in 0..server_sessions.len() {
+        let (send, mut recv) = session.accept_bi().await?;
+        let mut tag = [0u8; STREAM_TAG_LEN];
+        recv.read_exact(&mut tag).await?;
+        let (idx, session_keys) = take_tagged_session(&mut server_sessions, tag)?;
+        let channel = builder.build_from_split(recv, send, session_keys)?;
+        channels.push((idx, channel));
+    }
 
+    for (idx, mut channel) in channels {
         let incoming = channel.recv_application().await?;
         let reply = format!(
             "webtrans stream {idx} reply to: {}",
             String::from_utf8_lossy(&incoming)
         );
         channel.send_application(reply.as_bytes()).await?;
-        channel.close().await?;
     }
+
+    let _ = shutdown.await;
 
     Ok(())
 }
@@ -114,12 +152,20 @@ async fn run_client(
     let url = Url::parse(&format!("https://127.0.0.1:{}", addr.port()))?;
     let session = client.connect(url).await?;
     let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut channels = Vec::with_capacity(client_sessions.len());
 
+    // Write a small cleartext tag on each raw stream so the server can bind the right Foctet
+    // session even if transport accept order differs from open order.
     for (idx, session_keys) in client_sessions.into_iter().enumerate() {
-        let mut channel = foctet_webtrans::open_secure_channel_with(&session, session_keys, config)
-            .await
-            .map_err(Box::<dyn Error + Send + Sync>::from)?;
+        let (mut send, recv) = session.open_bi().await?;
+        send.write_all(&(idx as u32).to_be_bytes()).await?;
+        send.flush().await?;
+        let channel = builder.build_from_split(recv, send, session_keys)?;
+        channels.push((idx, channel));
+    }
 
+    for (idx, mut channel) in channels {
         let payload = format!("hello from webtrans stream {idx}");
         channel.send_application(payload.as_bytes()).await?;
         let response = channel.recv_application().await?;
@@ -128,7 +174,6 @@ async fn run_client(
             "client stream {idx} got: {}",
             String::from_utf8_lossy(&response)
         );
-        channel.close().await?;
     }
 
     Ok(())
@@ -141,10 +186,22 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (cert_chain, key) = resolve_cert_pair(&args)?;
     let addr = find_free_udp_addr()?;
 
-    let server_task = tokio::spawn(run_server(addr, server_sessions, cert_chain.clone(), key));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(run_server(
+        addr,
+        server_sessions,
+        cert_chain.clone(),
+        key,
+        ready_tx,
+        shutdown_rx,
+    ));
+    ready_rx
+        .await
+        .map_err(|_| "webtrans server readiness channel closed")??;
 
     run_client(addr, client_sessions, cert_chain).await?;
+    let _ = shutdown_tx.send(());
     server_task.await??;
 
     println!("webtrans multi-stream foctet E2EE example finished");

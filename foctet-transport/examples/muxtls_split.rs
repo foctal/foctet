@@ -5,11 +5,14 @@ use std::path::{Path, PathBuf};
 use ::muxtls::{ClientConfig, Endpoint, ServerConfig};
 use clap::Parser;
 use foctet_core::{RekeyThresholds, Session};
-use foctet_transport::{TransportConfig, muxtls as foctet_muxtls};
+use foctet_transport::{TokioTransportBuilder, TransportConfig};
 use rustls::pki_types::CertificateDer;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 const STREAM_COUNT: usize = 2;
+const STREAM_TAG_LEN: usize = 4;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -84,31 +87,55 @@ fn is_graceful_muxtls_close(err: &(dyn Error + 'static)) -> bool {
         || msg.contains("Broken pipe")
 }
 
+fn take_tagged_session(
+    sessions: &mut [Option<Session>],
+    tag: [u8; STREAM_TAG_LEN],
+) -> Result<(usize, Session), Box<dyn Error + Send + Sync>> {
+    let idx = u32::from_be_bytes(tag) as usize;
+    let Some(slot) = sessions.get_mut(idx) else {
+        return Err(format!("received out-of-range stream tag {idx}").into());
+    };
+    let Some(session) = slot.take() else {
+        return Err(format!("received duplicate stream tag {idx}").into());
+    };
+    Ok((idx, session))
+}
+
 async fn run_server(
     endpoint: Endpoint,
     server_sessions: Vec<Session>,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let conn = endpoint.accept().await?;
-    let mut tasks = JoinSet::new();
     let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut server_sessions = server_sessions.into_iter().map(Some).collect::<Vec<_>>();
+    let mut channels = Vec::with_capacity(server_sessions.len());
 
-    for (idx, session) in server_sessions.into_iter().enumerate() {
-        let conn = conn.clone();
+    // Read an explicit stream tag before building Foctet so accept order can vary safely.
+    for _ in 0..server_sessions.len() {
+        let (send, mut recv) = match conn.accept_bi().await {
+            Ok(parts) => parts,
+            Err(err) if is_graceful_muxtls_close(&err) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        };
+
+        let mut tag = [0u8; STREAM_TAG_LEN];
+        recv.read_exact(&mut tag).await?;
+        let (idx, session) = take_tagged_session(&mut server_sessions, tag)?;
+        let channel = builder.build_from_split(recv, send, session)?;
+        channels.push((idx, channel));
+    }
+
+    let mut tasks = JoinSet::new();
+    for (idx, mut channel) in channels {
         tasks.spawn(async move {
-            let mut channel =
-                match foctet_muxtls::accept_secure_channel_with(&conn, session, config).await {
-                    Ok(channel) => channel,
-                    Err(err) if is_graceful_muxtls_close(&err) => return Ok(()),
-                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
-                };
-
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "muxtls stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
             channel.send_application(reply.as_bytes()).await?;
-            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -122,6 +149,8 @@ async fn run_server(
         }
     }
 
+    let _ = shutdown.await;
+
     Ok(())
 }
 
@@ -131,19 +160,27 @@ async fn run_client(
     client_sessions: Vec<Session>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let conn = endpoint.connect(addr, "localhost")?.await?;
-    let mut tasks = JoinSet::new();
     let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut channels = Vec::with_capacity(client_sessions.len());
 
+    // Write a small cleartext tag on each raw stream so the server can bind the right Foctet
+    // session even if transport accept order differs from open order.
     for (idx, session) in client_sessions.into_iter().enumerate() {
-        let conn = conn.clone();
-        tasks.spawn(async move {
-            let mut channel =
-                match foctet_muxtls::open_secure_channel_with(&conn, session, config).await {
-                    Ok(channel) => channel,
-                    Err(err) if is_graceful_muxtls_close(&err) => return Ok(()),
-                    Err(err) => return Err(Box::new(err) as Box<dyn Error + Send + Sync>),
-                };
+        let (mut send, recv) = match conn.open_bi().await {
+            Ok(parts) => parts,
+            Err(err) if is_graceful_muxtls_close(&err) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        };
+        send.write_all(&(idx as u32).to_be_bytes()).await?;
+        send.flush().await?;
+        let channel = builder.build_from_split(recv, send, session)?;
+        channels.push((idx, channel));
+    }
 
+    let mut tasks = JoinSet::new();
+    for (idx, mut channel) in channels {
+        tasks.spawn(async move {
             let payload = format!("hello from muxtls stream {idx}");
             channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
@@ -152,7 +189,6 @@ async fn run_client(
                 "client stream {idx} got: {}",
                 String::from_utf8_lossy(&response)
             );
-            channel.close().await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -183,8 +219,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let addr = server_endpoint.local_addr()?;
     let client_endpoint = Endpoint::client(client_config);
 
-    let server_task = tokio::spawn(run_server(server_endpoint, server_sessions));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(run_server(server_endpoint, server_sessions, shutdown_rx));
     run_client(client_endpoint, addr, client_sessions).await?;
+    let _ = shutdown_tx.send(());
     server_task.await??;
 
     println!("muxtls multi-stream foctet E2EE example finished");
