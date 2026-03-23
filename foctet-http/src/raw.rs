@@ -2,13 +2,16 @@
 //!
 //! These functions expose direct request/response/body helpers and are useful
 //! when callers need custom assembly.
+//!
+//! The envelope protects HTTP body bytes only. Method, URI, status code, and
+//! outer headers remain visible to the surrounding HTTP transport.
 
 use foctet_core::{
     BodyEnvelopeLimits, open_body, open_body_with_limits, seal_body, seal_body_with_limits,
 };
 use http::{
     HeaderMap, Request, Response,
-    header::{self, HeaderValue},
+    header::{self, HeaderName, HeaderValue},
 };
 
 use crate::{CONTENT_TYPE, HttpError};
@@ -16,6 +19,14 @@ use crate::{CONTENT_TYPE, HttpError};
 /// Sets `Content-Type: application/foctet`.
 pub fn set_foctet_content_type(headers: &mut HeaderMap) {
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE));
+}
+
+/// Sets the advisory Foctet scope header to `body-only`.
+pub fn set_foctet_scope_header(headers: &mut HeaderMap) {
+    headers.insert(
+        HeaderName::from_static(crate::SCOPE_HEADER),
+        HeaderValue::from_static(crate::BODY_ONLY_SCOPE),
+    );
 }
 
 /// Returns `true` if headers contain `Content-Type: application/foctet`.
@@ -26,6 +37,14 @@ pub fn is_foctet_content_type(headers: &HeaderMap) -> bool {
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(is_foctet_content_type_value)
+}
+
+/// Returns `true` if headers contain `x-foctet-scope: body-only`.
+pub fn has_body_only_scope(headers: &HeaderMap) -> bool {
+    headers
+        .get(HeaderName::from_static(crate::SCOPE_HEADER))
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case(crate::BODY_ONLY_SCOPE))
 }
 
 /// Validates that headers contain `Content-Type: application/foctet`.
@@ -196,6 +215,15 @@ mod tests {
         set_foctet_content_type(&mut headers);
         assert!(is_foctet_content_type(&headers));
         assert!(ensure_foctet_content_type(&headers).is_ok());
+    }
+
+    #[test]
+    fn scope_header_helper_sets_body_only_marker() {
+        let mut headers = HeaderMap::new();
+        assert!(!has_body_only_scope(&headers));
+
+        set_foctet_scope_header(&mut headers);
+        assert!(has_body_only_scope(&headers));
     }
 
     #[test]

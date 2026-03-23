@@ -1,5 +1,7 @@
 # HTTP examples
 
+For a full cross-crate map of examples, see `docs/examples.md`.
+
 Run the server:
 
 ```bash
@@ -16,5 +18,7 @@ Notes:
 
 - Demo keys are hardcoded and are not production-safe.
 - The examples use the recommended high-level `HttpSealer` / `HttpOpener` path.
-- `application/foctet` v1 authenticates the encrypted body only, not request metadata.
-- The examples show only body-complete encryption/decryption flow.
+- `application/foctet` v0 encrypts and authenticates the body bytes only, not request metadata.
+- HTTP method, URL, status code, and most headers remain visible to the outer HTTP stack.
+- For production use, pair body envelopes with an authenticated outer transport such as HTTPS, WebTransport, or an authenticated Foctet transport channel.
+- The examples show one-shot body-complete encryption/decryption flow, not streaming transport sessions.

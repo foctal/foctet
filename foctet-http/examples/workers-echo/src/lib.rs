@@ -30,9 +30,14 @@ pub async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Respons
         demo_public_key(CLIENT_SECRET_KEY),
         b"demo-client-kid",
     ));
-    sealer
+    let mut response = sealer
         .seal_response_body(&transformed)
-        .map_err(|err| Error::RustError(err.to_string()))
+        .map_err(|err| Error::RustError(err.to_string()))?;
+    response
+        .headers_mut()
+        .set("x-foctet-scope", "body-only")
+        .map_err(|err| Error::RustError(err.to_string()))?;
+    Ok(response)
 }
 
 fn demo_public_key(secret_key: [u8; 32]) -> [u8; 32] {

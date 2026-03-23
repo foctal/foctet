@@ -25,6 +25,9 @@ async fn main() {
 
     println!("axum demo server listening on http://127.0.0.1:3000/foctet");
     println!("demo keys are hardcoded for local examples only. do not use in production.");
+    println!(
+        "this example protects HTTP bodies only. authenticate the outer transport separately."
+    );
 
     axum::serve(listener, app).await.expect("serve app");
 }
@@ -45,6 +48,7 @@ async fn handle_foctet(request: Request) -> Result<Response, StatusCode> {
     let plaintext_response = http::Response::builder()
         .status(StatusCode::OK)
         .header("x-foctet-example", "axum")
+        .header("x-foctet-scope", "body-only")
         .body(transformed)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

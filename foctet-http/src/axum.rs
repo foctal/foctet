@@ -1,4 +1,7 @@
 //! Axum adapters built on top of the high-level Foctet HTTP API.
+//!
+//! These adapters preserve the surrounding HTTP request and response metadata.
+//! Only the body bytes are protected by the Foctet envelope.
 
 use ::axum::body::{Body, to_bytes};
 use ::axum::extract::Request as AxumRequest;
@@ -157,7 +160,7 @@ fn http_response_vec_to_axum(response: http::Response<Vec<u8>>) -> AxumResponse 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CONTENT_TYPE, HttpSealer, raw::seal_http_request};
+    use crate::{BODY_ONLY_SCOPE, CONTENT_TYPE, HttpSealer, SCOPE_HEADER, raw::seal_http_request};
     use http::{Request, Response, StatusCode, Version, header};
     use rand_core::OsRng;
     use x25519_dalek::{PublicKey, StaticSecret};
@@ -214,6 +217,7 @@ mod tests {
             sealed.headers()[header::CONTENT_TYPE],
             header::HeaderValue::from_static(CONTENT_TYPE)
         );
+        assert_eq!(sealed.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
     }
 
     #[test]

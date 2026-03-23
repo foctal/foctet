@@ -4,12 +4,14 @@ use foctet_core::BodyEnvelopeLimits;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpConfig {
     strip_content_type_on_open: bool,
+    set_scope_header_on_seal: bool,
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             strip_content_type_on_open: true,
+            set_scope_header_on_seal: true,
         }
     }
 }
@@ -25,9 +27,20 @@ impl HttpConfig {
         self.strip_content_type_on_open
     }
 
+    /// Returns whether the advisory Foctet scope header is added when sealing.
+    pub fn set_scope_header_on_seal(&self) -> bool {
+        self.set_scope_header_on_seal
+    }
+
     /// Controls whether `Content-Type` is removed after opening.
     pub fn with_strip_content_type_on_open(mut self, value: bool) -> Self {
         self.strip_content_type_on_open = value;
+        self
+    }
+
+    /// Controls whether sealed HTTP messages receive the advisory Foctet scope header.
+    pub fn with_scope_header_on_seal(mut self, value: bool) -> Self {
+        self.set_scope_header_on_seal = value;
         self
     }
 }

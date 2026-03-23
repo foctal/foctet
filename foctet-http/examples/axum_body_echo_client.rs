@@ -66,9 +66,18 @@ async fn main() {
             .unwrap_or("<missing>")
     );
     println!(
+        "x-foctet-scope: {}",
+        decrypted_response
+            .headers()
+            .get("x-foctet-scope")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("<missing>")
+    );
+    println!(
         "plaintext body: {}",
         String::from_utf8_lossy(decrypted_response.body())
     );
+    println!("note: request path, method, and headers are still outer HTTP metadata.");
 }
 
 fn demo_public_key(secret_key: [u8; 32]) -> [u8; 32] {

@@ -1,9 +1,16 @@
 //! Cloudflare Workers adapters built on top of the high-level Foctet HTTP API.
+//!
+//! These adapters protect the request or response body bytes while leaving the
+//! surrounding Worker routing metadata, headers, and method visible to the
+//! outer HTTPS channel and Worker runtime.
 
 use foctet_core::BodyEnvelopeLimits;
 use thiserror::Error;
 
-use crate::{CONTENT_TYPE, HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer};
+use crate::{
+    BODY_ONLY_SCOPE, CONTENT_TYPE, HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions,
+    HttpSealer, SCOPE_HEADER,
+};
 
 /// Lightweight request metadata extracted before body decryption.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +122,7 @@ impl WorkersSealer {
         let sealed = self.sealer.seal_body(plaintext)?;
         let mut response = worker::Response::from_bytes(sealed)?;
         response.headers_mut().set("content-type", CONTENT_TYPE)?;
+        response.headers_mut().set(SCOPE_HEADER, BODY_ONLY_SCOPE)?;
         Ok(response)
     }
 }

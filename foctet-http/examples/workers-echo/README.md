@@ -17,4 +17,6 @@ cargo run -p foctet-http --example workers_echo_client
 Notes:
 
 - Demo keys are hardcoded and are not production-safe.
-- The examples show only body-complete encryption/decryption flow.
+- The example protects request and response bodies only; method, path, and headers remain outer HTTP metadata.
+- In production, combine this with HTTPS and your normal Worker authentication / authorization checks.
+- The example shows only body-complete encryption/decryption flow.

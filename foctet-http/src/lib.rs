@@ -3,6 +3,12 @@
 //! `foctet-http` adapts HTTP requests and responses onto the body-complete
 //! envelope format.
 //!
+//! Foctet HTTP integration encrypts and authenticates the body bytes only. The
+//! outer HTTP method, URI, status code, and headers remain visible to the
+//! surrounding transport and should be protected by an authenticated outer
+//! channel such as HTTPS, authenticated WebTransport, or an authenticated
+//! Foctet transport session.
+//!
 //! # Layers
 //!
 //! - Recommended high-level API:
@@ -11,6 +17,10 @@
 //!   [`axum`] and [`workers`]
 //! - Lower-level helpers:
 //!   [`raw`]
+//!
+//! Sealed requests and responses also carry an advisory
+//! `x-foctet-scope: body-only` header so downstream systems can distinguish
+//! Foctet body envelopes from full-message protection.
 //!
 
 /// Re-export of the `http` crate used by this adapter.
@@ -35,6 +45,10 @@ pub use error::HttpError;
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";
+/// Advisory header name describing the Foctet protection scope.
+pub const SCOPE_HEADER: &str = "x-foctet-scope";
+/// Advisory header value indicating that only the HTTP body is protected.
+pub const BODY_ONLY_SCOPE: &str = "body-only";
 
 /// High-level helper for sealing HTTP bodies, requests, and responses.
 #[derive(Clone, Debug)]
@@ -92,14 +106,25 @@ impl HttpSealer {
     }
 
     /// Seals a plaintext request and sets `Content-Type: application/foctet`.
+    ///
+    /// By default this also adds the advisory `x-foctet-scope: body-only`
+    /// header so downstream consumers do not mistake body protection for
+    /// full HTTP message protection.
     pub fn seal_request(&self, request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
         let sealed = self.seal_body(&body)?;
         raw::set_foctet_content_type(&mut parts.headers);
+        if self.config.set_scope_header_on_seal() {
+            raw::set_foctet_scope_header(&mut parts.headers);
+        }
         Ok(Request::from_parts(parts, sealed))
     }
 
     /// Seals a plaintext response and sets `Content-Type: application/foctet`.
+    ///
+    /// By default this also adds the advisory `x-foctet-scope: body-only`
+    /// header so downstream consumers do not mistake body protection for
+    /// full HTTP message protection.
     pub fn seal_response(
         &self,
         response: Response<Vec<u8>>,
@@ -107,6 +132,9 @@ impl HttpSealer {
         let (mut parts, body) = response.into_parts();
         let sealed = self.seal_body(&body)?;
         raw::set_foctet_content_type(&mut parts.headers);
+        if self.config.set_scope_header_on_seal() {
+            raw::set_foctet_scope_header(&mut parts.headers);
+        }
         Ok(Response::from_parts(parts, sealed))
     }
 }
@@ -199,11 +227,13 @@ mod tests {
             .expect("request");
 
         let sealed_request = sealer.seal_request(request).expect("seal request");
+        assert_eq!(sealed_request.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
         let opened_request = opener.open_request(sealed_request).expect("open request");
 
         assert_eq!(opened_request.method(), "POST");
         assert_eq!(opened_request.uri().path(), "/submit");
         assert_eq!(opened_request.headers()["x-trace-id"], "abc123");
+        assert_eq!(opened_request.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
         assert!(!opened_request.headers().contains_key(header::CONTENT_TYPE));
         assert_eq!(opened_request.body(), b"request payload");
 
@@ -215,6 +245,7 @@ mod tests {
             .expect("response");
 
         let sealed_response = sealer.seal_response(response).expect("seal response");
+        assert_eq!(sealed_response.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
         let opened_response = opener
             .open_response(sealed_response)
             .expect("open response");
@@ -222,6 +253,7 @@ mod tests {
         assert_eq!(opened_response.status(), StatusCode::CREATED);
         assert_eq!(opened_response.version(), Version::HTTP_2);
         assert_eq!(opened_response.headers()["x-server"], "foctet");
+        assert_eq!(opened_response.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
         assert_eq!(opened_response.body(), b"response payload");
     }
 
@@ -244,6 +276,26 @@ mod tests {
         let opened = opener.open_response(sealed).expect("open");
 
         assert!(opened.headers().contains_key(header::CONTENT_TYPE));
+        assert_eq!(opened.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
+    }
+
+    #[test]
+    fn scope_header_can_be_disabled() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::with_config(
+            HttpSealOptions::new(recipient_pub, b"kid"),
+            HttpConfig::default().with_scope_header_on_seal(false),
+        );
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(b"payload".to_vec())
+            .expect("response");
+        let sealed = sealer.seal_response(response).expect("seal");
+
+        assert!(!sealed.headers().contains_key(SCOPE_HEADER));
     }
 
     #[test]
