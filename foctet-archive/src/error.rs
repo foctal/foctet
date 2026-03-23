@@ -48,6 +48,9 @@ pub enum ArchiveError {
     /// Caller-provided input parameters are invalid.
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
+    /// Caller-provided deterministic build secrets are inconsistent.
+    #[error("invalid build secrets: {0}")]
+    InvalidBuildSecrets(&'static str),
     /// A configured hard limit was exceeded while parsing/decoding untrusted input.
     #[error("limit exceeded: {0}")]
     LimitExceeded(&'static str),

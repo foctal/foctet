@@ -4,10 +4,11 @@ use std::{
 };
 
 use crate::{
-    ArchiveError, ArchiveLimits, ArchiveOptions, MANIFEST_MAGIC, PART_MAGIC,
+    ArchiveBuildSecrets, ArchiveError, ArchiveLimits, ArchiveOptions, MANIFEST_MAGIC, PART_MAGIC,
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, SplitArchive, WIRE_VERSION_V0,
     build::{
-        build_encrypted_materials, decrypt_header, ensure_profile, ensure_version, partition_chunks,
+        build_encrypted_materials, build_encrypted_materials_with_secrets, decrypt_header,
+        ensure_profile, ensure_version, partition_chunks,
     },
     codec::{
         decode_wrapped_table, encode_wrapped_table, manifest_prefix_len,
@@ -31,6 +32,38 @@ pub fn create_split_archive_from_bytes(
     }
 
     let built = build_encrypted_materials(plaintext, recipient_public_keys, options)?;
+    encode_split_archive_from_built(built, target_part_size)
+}
+
+/// Creates split-archive outputs with caller-provided deterministic secrets.
+///
+/// This is primarily intended for reproducible vector generation and deterministic tests.
+pub fn create_split_archive_from_bytes_with_secrets(
+    plaintext: &[u8],
+    recipient_public_keys: &[[u8; 32]],
+    options: ArchiveOptions,
+    target_part_size: usize,
+    secrets: &ArchiveBuildSecrets,
+) -> Result<SplitArchive, ArchiveError> {
+    if target_part_size == 0 {
+        return Err(ArchiveError::InvalidInput(
+            "target_part_size must be greater than zero",
+        ));
+    }
+
+    let built = build_encrypted_materials_with_secrets(
+        plaintext,
+        recipient_public_keys,
+        options,
+        Some(secrets),
+    )?;
+    encode_split_archive_from_built(built, target_part_size)
+}
+
+fn encode_split_archive_from_built(
+    built: crate::types::BuiltArchive,
+    target_part_size: usize,
+) -> Result<SplitArchive, ArchiveError> {
     let part_groups = partition_chunks(&built.chunks, target_part_size);
 
     let mut part_entries = Vec::with_capacity(part_groups.len());

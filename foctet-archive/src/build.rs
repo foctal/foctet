@@ -3,8 +3,12 @@ use rand_core::{OsRng, RngCore};
 use rkyv::rancor::Error as RkyvError;
 
 use crate::{
-    ArchiveError, ArchiveLimits, ArchiveOptions, EncryptedHeader, FileManifest,
-    crypto::{aead_decrypt, aead_encrypt, chunk_nonce, header_nonce, wrap_dek},
+    ArchiveBuildSecrets, ArchiveError, ArchiveLimits, ArchiveOptions, EncryptedHeader,
+    FileManifest,
+    crypto::{
+        aead_decrypt, aead_encrypt, chunk_nonce, header_nonce, wrap_dek,
+        wrap_dek_with_ephemeral_secret,
+    },
     types::{ArchiveBuildResult, BuiltArchive, ChunkPlain, EncryptedChunkRecord},
 };
 
@@ -13,15 +17,31 @@ pub(crate) fn build_encrypted_materials(
     recipient_public_keys: &[[u8; 32]],
     options: ArchiveOptions,
 ) -> Result<BuiltArchive, ArchiveError> {
+    build_encrypted_materials_with_secrets(plaintext, recipient_public_keys, options, None)
+}
+
+pub(crate) fn build_encrypted_materials_with_secrets(
+    plaintext: &[u8],
+    recipient_public_keys: &[[u8; 32]],
+    options: ArchiveOptions,
+    secrets: Option<&ArchiveBuildSecrets>,
+) -> Result<BuiltArchive, ArchiveError> {
     validate_inputs(recipient_public_keys, &options)?;
+    validate_build_secrets(recipient_public_keys, secrets)?;
 
-    let mut archive_id = [0u8; 16];
-    let mut file_id = [0u8; 16];
-    OsRng.fill_bytes(&mut archive_id);
-    OsRng.fill_bytes(&mut file_id);
+    let (archive_id, file_id, dek) = match secrets {
+        Some(secrets) => (secrets.archive_id, secrets.file_id, secrets.dek),
+        None => {
+            let mut archive_id = [0u8; 16];
+            let mut file_id = [0u8; 16];
+            OsRng.fill_bytes(&mut archive_id);
+            OsRng.fill_bytes(&mut file_id);
 
-    let mut dek = [0u8; 32];
-    OsRng.fill_bytes(&mut dek);
+            let mut dek = [0u8; 32];
+            OsRng.fill_bytes(&mut dek);
+            (archive_id, file_id, dek)
+        }
+    };
 
     let mut hasher = Blake3::new();
     hasher.update(plaintext);
@@ -31,7 +51,15 @@ pub(crate) fn build_encrypted_materials(
 
     let wrapped = recipient_public_keys
         .iter()
-        .map(|recipient_public| wrap_dek(&dek, *recipient_public))
+        .enumerate()
+        .map(|(idx, recipient_public)| match secrets {
+            Some(secrets) => wrap_dek_with_ephemeral_secret(
+                &dek,
+                *recipient_public,
+                secrets.wrap_ephemeral_secret_keys[idx],
+            ),
+            None => wrap_dek(&dek, *recipient_public),
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     let manifest = FileManifest {
@@ -86,6 +114,23 @@ pub(crate) fn build_encrypted_materials(
             total_chunks,
         },
     })
+}
+
+fn validate_build_secrets(
+    recipient_public_keys: &[[u8; 32]],
+    secrets: Option<&ArchiveBuildSecrets>,
+) -> Result<(), ArchiveError> {
+    let Some(secrets) = secrets else {
+        return Ok(());
+    };
+
+    if secrets.wrap_ephemeral_secret_keys.len() != recipient_public_keys.len() {
+        return Err(ArchiveError::InvalidBuildSecrets(
+            "wrap_ephemeral_secret_keys length must match recipient count",
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn decrypt_header(

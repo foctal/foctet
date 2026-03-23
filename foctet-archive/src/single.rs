@@ -1,9 +1,12 @@
 use std::io::{Cursor, Read};
 
 use crate::{
-    ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveError, ArchiveLimits, ArchiveOptions,
-    PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
-    build::{build_encrypted_materials, decrypt_header, ensure_profile, ensure_version},
+    ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveBuildSecrets, ArchiveError, ArchiveLimits,
+    ArchiveOptions, PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
+    build::{
+        build_encrypted_materials, build_encrypted_materials_with_secrets, decrypt_header,
+        ensure_profile, ensure_version,
+    },
     codec::{archive_prefix_len, decode_wrapped_table, encode_wrapped_table, read_u8, read_u32_be},
     crypto::{aead_encrypt, header_nonce, unwrap_dek_from_recipients},
     types::EncryptedChunkRecord,
@@ -18,7 +21,31 @@ pub fn create_archive_from_bytes(
     options: ArchiveOptions,
 ) -> Result<(Vec<u8>, ArchiveBuildResult), ArchiveError> {
     let built = build_encrypted_materials(plaintext, recipient_public_keys, options)?;
+    encode_archive_from_built(plaintext, built)
+}
 
+/// Creates a single-file Foctet archive from plaintext bytes using caller-provided deterministic secrets.
+///
+/// This is primarily intended for reproducible vector generation and deterministic tests.
+pub fn create_archive_from_bytes_with_secrets(
+    plaintext: &[u8],
+    recipient_public_keys: &[[u8; 32]],
+    options: ArchiveOptions,
+    secrets: &ArchiveBuildSecrets,
+) -> Result<(Vec<u8>, ArchiveBuildResult), ArchiveError> {
+    let built = build_encrypted_materials_with_secrets(
+        plaintext,
+        recipient_public_keys,
+        options,
+        Some(secrets),
+    )?;
+    encode_archive_from_built(plaintext, built)
+}
+
+fn encode_archive_from_built(
+    plaintext: &[u8],
+    built: crate::types::BuiltArchive,
+) -> Result<(Vec<u8>, ArchiveBuildResult), ArchiveError> {
     let mut out = Vec::with_capacity(plaintext.len() + 4096);
     out.extend_from_slice(&ARCHIVE_MAGIC);
     out.push(WIRE_VERSION_V0);
