@@ -5,6 +5,12 @@
 //! - Replay window enforcement
 //! - Runtime-agnostic streaming adapters
 //!
+//! `foctet-core` is the low-level protocol crate for applications that need to
+//! drive Foctet sessions directly. If you already have a split stream transport
+//! such as QUIC, WebTransport, WebSocket multiplexing, or another byte-stream
+//! abstraction, prefer `foctet-transport` for the recommended handshake and
+//! channel builders.
+//!
 //! # Main Modules
 //!
 //! - [`body`]: `application/foctet` one-shot encrypted body envelope
@@ -21,7 +27,38 @@
 //! 2. Send/receive via [`frame::FoctetFramed`] or [`io::SyncIo`].
 //! 3. Use [`Session`] to process control frames and rotate keys.
 //! 4. Encode application bytes as TLV (`APPLICATION_DATA`) via [`payload`].
+//!
+//! # Authentication Guidance
+//!
+//! - For production use, prefer [`SessionAuthConfig`] with local identity keys,
+//!   pinned [`PeerIdentity`] values, and
+//!   [`SessionAuthConfig::require_peer_authentication(true)`].
+//! - If Foctet runs inside an already-authenticated outer channel, you may use
+//!   the native handshake without identity signatures, but the outer channel
+//!   then carries the peer-authentication responsibility.
+//! - Sequence numbers and rekey identifiers fail closed on exhaustion; callers
+//!   should treat those errors as terminal and establish a fresh session.
+//!
+//! # Typical Native Handshake
+//!
+//! ```rust,ignore
+//! use foctet_core::{
+//!     IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
+//! };
+//!
+//! let auth = SessionAuthConfig::new()
+//!     .with_local_identity(IdentityKeyPair::generate())
+//!     .with_peer_identity(PeerIdentity::new(peer_identity_public_key))
+//!     .require_peer_authentication(true);
+//!
+//! let mut initiator = Session::new_initiator_with_auth(RekeyThresholds::default(), auth);
+//! let client_hello = initiator.start_handshake()?;
+//! # let _ = client_hello;
+//! # Ok::<(), foctet_core::CoreError>(())
+//! ```
 
+/// Handshake authentication helpers and identity-key types.
+pub mod auth;
 /// One-shot body-complete encrypted envelope (`application/foctet`) helpers.
 pub mod body;
 /// Control-plane message types used inside encrypted control frames.
@@ -41,6 +78,10 @@ pub mod secure_channel;
 /// Session handshake/rekey state and key lifecycle handling.
 pub mod session;
 
+pub use auth::{
+    HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth, IdentityKeyPair, PeerIdentity,
+    SessionAuthConfig,
+};
 pub use body::{
     BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,
     open_body_for_key_id, open_body_for_key_id_with_limits, open_body_with_limits, seal_body,
@@ -138,4 +179,22 @@ pub enum CoreError {
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// X25519 produced a forbidden all-zero shared secret.
+    #[error("invalid shared secret")]
+    InvalidSharedSecret,
+    /// Outbound sequence space is exhausted and must not wrap.
+    #[error("sequence space exhausted")]
+    SequenceExhausted,
+    /// Rekey key identifier space is exhausted and must not wrap.
+    #[error("key id space exhausted")]
+    KeyIdExhausted,
+    /// Peer authentication was required but not present.
+    #[error("missing peer authentication")]
+    MissingPeerAuthentication,
+    /// Peer authentication failed validation.
+    #[error("invalid peer authentication")]
+    InvalidPeerAuthentication,
+    /// Peer identity did not match the pinned expectation.
+    #[error("peer identity mismatch")]
+    PeerIdentityMismatch,
 }
