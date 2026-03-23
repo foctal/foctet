@@ -6,6 +6,7 @@ Foctet Protocol Specification (Draft v0)
 
 *   **Status**: Draft v0 (work-in-progress)
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
+*   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
 *   **Compatibility Policy (Draft v0)**:
     *   The current release line is `0.x` and may include breaking changes while v0 is still draft.
@@ -252,6 +253,28 @@ Draft v0 defines **Native**.
     *   `key_s2c = HKDF-Expand(prk, info="foctet s2c", L=keylen)`
 *   Optional: bind to static identity keys (Ed25519) by signing transcript.
 
+### 8.2.1 Handshake Authentication Payload
+
+Draft v0 native handshake messages MAY carry an authentication payload after the transcript binding:
+
+*   `auth_mode = 0x00` means no handshake authentication is present.
+*   `auth_mode = 0x01` means Ed25519 transcript authentication is present and is encoded as:
+    *   `identity_public_key[32]`
+    *   `signature[64]`
+
+For backwards compatibility with older Draft v0 test vectors, decoders MAY accept handshake messages with no trailing `auth_mode` byte and treat them as unauthenticated.
+
+### 8.2.2 Transcript Signature Inputs
+
+When `auth_mode = 0x01`, signatures are computed over domain-separated transcript messages:
+
+*   ClientHello authentication input:
+    *   `"foctet auth client" || client_eph_public || session_salt || client_transcript_binding`
+*   ServerHello authentication input:
+    *   `"foctet auth server" || client_eph_public || server_eph_public || session_salt || server_transcript_binding`
+
+The claimed `identity_public_key` MUST verify the corresponding signature.
+
 ### 8.3 Authentication (Recommended)
 
 To prevent MITM:
@@ -259,6 +282,7 @@ To prevent MITM:
 *   Each endpoint SHOULD have a long-term identity key and present a signature over the transcript.
 *   If identity is out-of-band (pre-shared public keys), verification is mandatory.
 *   If using a directory / PKI, trust model is defined at higher layer.
+*   Implementations targeting production SHOULD support pinned peer identity verification and fail closed when authentication is required but absent.
 
 * * *
 
@@ -510,7 +534,7 @@ Future extension designs SHOULD:
 The repository includes deterministic vectors under `test-vectors/`:
 
 *   `frame-v0.json`
-*   `handshake-v0.json`
+*   `handshake-v0.json` (includes authenticated ClientHello / ServerHello control encodings)
 *   `archive-v0.json`
 
 Implementations SHOULD validate these vectors as part of CI.
