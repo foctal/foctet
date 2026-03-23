@@ -31,11 +31,15 @@ This directory contains deterministic vectors for interoperability and regressio
   - `manifest_hex`: hex
   - `parts_hex`: array of hex strings
 
+The archive vector is generated with fixed `ArchiveBuildSecrets` so repeated regeneration is byte-for-byte stable across runs.
+
 ## Regeneration
 
 ```bash
 cargo run -p foctet --example gen_vectors
 ```
+
+The generator intentionally uses deterministic handshake/archive inputs. Do not copy those fixed secrets into production applications.
 
 ## Verification
 

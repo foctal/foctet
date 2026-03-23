@@ -8,6 +8,7 @@ This document defines the first `application/foctet` envelope format for HTTP an
 - Transport-agnostic binary body envelope.
 - Self-contained encrypted body (no external metadata required for decryption).
 - Single-recipient in current API, with recipient-table structure designed for multi-recipient extension.
+- Body protection only: outer HTTP metadata is intentionally out of scope.
 
 ## Media Type
 
@@ -65,6 +66,17 @@ The full `header` bytes are used as payload AEAD associated data (AAD).
 2. For recipient entries, derive wrap material from recipient secret key and envelope ephemeral public key.
 3. Attempt content-key unwrap (`aad = entry key_id`).
 4. Decrypt payload ciphertext using unwrapped content key and full header as AAD.
+
+## Security Boundaries
+
+`application/foctet` protects the HTTP body bytes and detects body tampering, but it does not hide or authenticate:
+
+- HTTP method
+- URL / path / query
+- response status code
+- outer headers that are not embedded into the encrypted body by the application
+
+Production deployments should compose body envelopes with an authenticated outer channel such as HTTPS, authenticated WebTransport, or an already-authenticated Foctet transport session.
 
 ## Hardening Requirements
 
