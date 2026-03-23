@@ -4,13 +4,25 @@ use std::{
     thread,
 };
 
-use foctet::core::{RekeyThresholds, SecureChannel, Session};
+use foctet::core::{
+    IdentityKeyPair, PeerIdentity, RekeyThresholds, SecureChannel, Session, SessionAuthConfig,
+};
 
 fn make_session_pair() -> (Session, Session) {
     let thresholds = RekeyThresholds::default();
+    let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
+    let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
+    let client_auth = SessionAuthConfig::new()
+        .with_local_identity(client_identity.clone())
+        .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
+        .require_peer_authentication(true);
+    let server_auth = SessionAuthConfig::new()
+        .with_local_identity(server_identity)
+        .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
+        .require_peer_authentication(true);
 
-    let (mut initiator, hello) = Session::new_initiator(thresholds.clone());
-    let mut responder = Session::new_responder(thresholds);
+    let (mut initiator, hello) = Session::new_initiator_with_auth(thresholds.clone(), client_auth);
+    let mut responder = Session::new_responder_with_auth(thresholds, server_auth);
 
     let server_hello = responder
         .handle_control(&hello)
@@ -35,6 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut channel =
             SecureChannel::from_active_session(stream, server_session)?.with_app_stream_id(1);
+        assert!(channel.session().peer_authenticated());
 
         let incoming = channel.recv_application()?;
         println!(
@@ -51,6 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut channel =
         SecureChannel::from_active_session(stream, client_session)?.with_app_stream_id(1);
+    assert!(channel.session().peer_authenticated());
     channel.send_data(b"ping over secure channel")?;
     let reply = channel.recv_application()?;
     println!("client received: {}", String::from_utf8_lossy(&reply));
