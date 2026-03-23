@@ -11,7 +11,7 @@ readme = "../README.md"
 [features]
 default = []
 runtime-tokio = ["dep:tokio", "foctet-core/runtime-tokio", "dep:futures-sink"]
-runtime-futures = ["dep:futures-io", "dep:futures-sink", "foctet-core/runtime-futures"]
+runtime-futures = ["dep:futures-io", "dep:futures-sink", "dep:futures-util", "foctet-core/runtime-futures"]
 transport-muxtls = ["dep:muxtls"]
 transport-webtrans = ["dep:webtrans"]
 transport-websock = ["dep:websock", "dep:websock-tungstenite-mux"]
@@ -22,6 +22,7 @@ foctet-core = { workspace = true }
 pin-project-lite = "0.2"
 futures-io = { version = "0.3", optional = true }
 futures-sink = { version = "0.3", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
 tokio = { version = "1.48", features = ["io-util"], optional = true }
 muxtls = { version = "0.1.0", default-features = false, optional = true }
 webtrans = { version = "0.4.0", default-features = false, optional = true }
