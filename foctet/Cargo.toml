@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Top-level crate for Foctet APIs"
+description = "Transport-agnostic end-to-end encryption layer for secure data transfer."
 readme = "../README.md"
 
 [features]
@@ -21,7 +21,7 @@ transport-quinn = ["transport", "foctet-transport/transport-quinn"]
 [dependencies]
 foctet-core = { workspace = true }
 foctet-archive = { workspace = true }
-foctet-transport = { path = "../foctet-transport", version = "0.1.0", optional = true, default-features = false }
+foctet-transport = { path = "../foctet-transport", version = "0.2.0", optional = true, default-features = false }
 ed25519-dalek.workspace = true
 sha2.workspace = true
 x25519-dalek.workspace = true
