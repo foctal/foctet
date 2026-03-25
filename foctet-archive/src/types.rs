@@ -35,6 +35,19 @@ impl Default for ArchiveOptions {
     }
 }
 
+/// Optional deterministic secrets for reproducible archive generation.
+#[derive(Clone, Debug)]
+pub struct ArchiveBuildSecrets {
+    /// Fixed archive identifier to embed in metadata.
+    pub archive_id: [u8; 16],
+    /// Fixed file identifier to embed in metadata.
+    pub file_id: [u8; 16],
+    /// Fixed archive data-encryption key.
+    pub dek: [u8; 32],
+    /// Fixed ephemeral X25519 secret keys used to wrap the DEK for recipients.
+    pub wrap_ephemeral_secret_keys: Vec<[u8; 32]>,
+}
+
 /// Recipient-specific wrapped copy of the archive data-encryption key (DEK).
 #[derive(Clone, Debug, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct WrappedDek {

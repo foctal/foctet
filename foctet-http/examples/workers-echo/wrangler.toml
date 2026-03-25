@@ -1,0 +1,6 @@
+name = "foctet-http-workers-echo"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-03-08"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"

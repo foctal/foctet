@@ -19,10 +19,13 @@ jobs:
       run: |
         rustup toolchain install stable --profile minimal --component clippy
         rustup default stable
+        rustup target add wasm32-unknown-unknown
     - name: Lint
       run: cargo clippy --workspace --all-features -- -D warnings
     - name: Workspace tests
       run: cargo test --workspace --verbose
+    - name: Wasm check
+      run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown
     - name: Feature combinations (foctet-core)
       run: |
         cargo test -p foctet-core --no-default-features

@@ -6,6 +6,7 @@ use zeroize::Zeroize;
 
 use crate::{
     CoreError,
+    auth::{HandshakeAuth, SessionAuthConfig},
     control::ControlMessage,
     crypto::{
         Direction, EphemeralKeyPair, TrafficKeys, derive_rekey_traffic_keys, derive_traffic_keys,
@@ -71,6 +72,8 @@ pub struct Session {
     active_keys: Option<TrafficKeys>,
     previous_keys: Vec<TrafficKeys>,
     thresholds: RekeyThresholds,
+    auth: SessionAuthConfig,
+    peer_authenticated: bool,
     outbound_frames: u64,
     outbound_bytes: u64,
     last_rekey_at: Instant,
@@ -88,14 +91,29 @@ impl Drop for Session {
 impl Session {
     /// Creates an initiator session and returns the initial `ClientHello`.
     pub fn new_initiator(thresholds: RekeyThresholds) -> (Self, ControlMessage) {
+        Self::new_initiator_with_auth(thresholds, SessionAuthConfig::default())
+    }
+
+    /// Creates an initiator session with explicit authentication configuration.
+    pub fn new_initiator_with_auth(
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+    ) -> (Self, ControlMessage) {
         let local_eph = EphemeralKeyPair::generate();
         let session_salt = random_session_salt();
         let binding = client_hello_binding(local_eph.public, session_salt);
+        let auth_payload = auth.local_identity().map(|identity| {
+            HandshakeAuth::sign(
+                identity,
+                &client_auth_message(local_eph.public, session_salt, binding),
+            )
+        });
 
         let msg = ControlMessage::ClientHello {
             eph_public: local_eph.public,
             session_salt,
             transcript_binding: binding,
+            auth: auth_payload,
         };
 
         (
@@ -109,6 +127,8 @@ impl Session {
                 active_keys: None,
                 previous_keys: Vec::new(),
                 thresholds,
+                auth,
+                peer_authenticated: false,
                 outbound_frames: 0,
                 outbound_bytes: 0,
                 last_rekey_at: Instant::now(),
@@ -119,6 +139,11 @@ impl Session {
 
     /// Creates a responder session waiting for a peer `ClientHello`.
     pub fn new_responder(thresholds: RekeyThresholds) -> Self {
+        Self::new_responder_with_auth(thresholds, SessionAuthConfig::default())
+    }
+
+    /// Creates a responder session with explicit authentication configuration.
+    pub fn new_responder_with_auth(thresholds: RekeyThresholds, auth: SessionAuthConfig) -> Self {
         Self {
             role: HandshakeRole::Responder,
             state: SessionState::WaitingPeerHello,
@@ -129,6 +154,8 @@ impl Session {
             active_keys: None,
             previous_keys: Vec::new(),
             thresholds,
+            auth,
+            peer_authenticated: false,
             outbound_frames: 0,
             outbound_bytes: 0,
             last_rekey_at: Instant::now(),
@@ -143,6 +170,11 @@ impl Session {
     /// Returns configured handshake role.
     pub fn role(&self) -> HandshakeRole {
         self.role
+    }
+
+    /// Returns whether the peer presented and passed handshake authentication.
+    pub fn peer_authenticated(&self) -> bool {
+        self.peer_authenticated
     }
 
     /// Returns outbound traffic direction for this role.
@@ -174,28 +206,48 @@ impl Session {
                     eph_public,
                     session_salt,
                     transcript_binding,
+                    auth,
                 },
             ) => {
                 let expected = client_hello_binding(*eph_public, *session_salt);
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
+                let peer_authenticated = self.verify_client_auth(
+                    *eph_public,
+                    *session_salt,
+                    *transcript_binding,
+                    auth.as_ref(),
+                )?;
 
                 self.peer_eph_public = Some(*eph_public);
                 self.session_salt = *session_salt;
-                let shared = self.local_eph.shared_secret(*eph_public);
+                let shared = self.local_eph.shared_secret(*eph_public)?;
                 let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
 
                 self.shared_secret = Some(shared);
                 self.active_keys = Some(keys);
                 self.state = SessionState::Active;
+                self.peer_authenticated = peer_authenticated;
                 self.last_rekey_at = Instant::now();
 
                 let server_binding =
                     server_hello_binding(*eph_public, self.local_eph.public, self.session_salt);
+                let server_auth = self.auth.local_identity().map(|identity| {
+                    HandshakeAuth::sign(
+                        identity,
+                        &server_auth_message(
+                            *eph_public,
+                            self.local_eph.public,
+                            self.session_salt,
+                            server_binding,
+                        ),
+                    )
+                });
                 Ok(Some(ControlMessage::ServerHello {
                     eph_public: self.local_eph.public,
                     transcript_binding: server_binding,
+                    auth: server_auth,
                 }))
             }
             (
@@ -204,6 +256,7 @@ impl Session {
                 ControlMessage::ServerHello {
                     eph_public,
                     transcript_binding,
+                    auth,
                 },
             ) => {
                 let expected =
@@ -211,14 +264,17 @@ impl Session {
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
+                let peer_authenticated =
+                    self.verify_server_auth(*eph_public, *transcript_binding, auth.as_ref())?;
 
                 self.peer_eph_public = Some(*eph_public);
-                let shared = self.local_eph.shared_secret(*eph_public);
+                let shared = self.local_eph.shared_secret(*eph_public)?;
                 let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
 
                 self.shared_secret = Some(shared);
                 self.active_keys = Some(keys);
                 self.state = SessionState::Active;
+                self.peer_authenticated = peer_authenticated;
                 self.last_rekey_at = Instant::now();
                 Ok(None)
             }
@@ -313,7 +369,7 @@ impl Session {
             .clone()
             .ok_or(CoreError::InvalidSessionState)?;
         let old_key_id = active.key_id;
-        let new_key_id = old_key_id.wrapping_add(1);
+        let new_key_id = old_key_id.checked_add(1).ok_or(CoreError::KeyIdExhausted)?;
 
         let mut rekey_salt = [0u8; 32];
         OsRng.fill_bytes(&mut rekey_salt);
@@ -352,6 +408,56 @@ impl Session {
         }
         self.active_keys = Some(next);
     }
+
+    fn verify_client_auth(
+        &self,
+        eph_public: [u8; 32],
+        session_salt: [u8; 32],
+        transcript_binding: [u8; 32],
+        auth: Option<&HandshakeAuth>,
+    ) -> Result<bool, CoreError> {
+        let message = client_auth_message(eph_public, session_salt, transcript_binding);
+        self.verify_auth_payload(auth, &message)
+    }
+
+    fn verify_server_auth(
+        &self,
+        server_public: [u8; 32],
+        transcript_binding: [u8; 32],
+        auth: Option<&HandshakeAuth>,
+    ) -> Result<bool, CoreError> {
+        let message = server_auth_message(
+            self.local_eph.public,
+            server_public,
+            self.session_salt,
+            transcript_binding,
+        );
+        self.verify_auth_payload(auth, &message)
+    }
+
+    fn verify_auth_payload(
+        &self,
+        auth: Option<&HandshakeAuth>,
+        message: &[u8],
+    ) -> Result<bool, CoreError> {
+        match auth {
+            Some(auth) => {
+                auth.verify(message)?;
+                if let Some(peer_identity) = self.auth.peer_identity()
+                    && auth.identity_public_key != peer_identity.public_key
+                {
+                    return Err(CoreError::PeerIdentityMismatch);
+                }
+                Ok(true)
+            }
+            None if self.auth.requires_peer_authentication()
+                || self.auth.peer_identity().is_some() =>
+            {
+                Err(CoreError::MissingPeerAuthentication)
+            }
+            None => Ok(false),
+        }
+    }
 }
 
 fn client_hello_binding(client_public: [u8; 32], session_salt: [u8; 32]) -> [u8; 32] {
@@ -360,6 +466,19 @@ fn client_hello_binding(client_public: [u8; 32], session_salt: [u8; 32]) -> [u8;
     hasher.update(client_public);
     hasher.update(session_salt);
     hasher.finalize().into()
+}
+
+fn client_auth_message(
+    client_public: [u8; 32],
+    session_salt: [u8; 32],
+    transcript_binding: [u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(19 + 32 + 32 + 32);
+    out.extend_from_slice(b"foctet auth client");
+    out.extend_from_slice(&client_public);
+    out.extend_from_slice(&session_salt);
+    out.extend_from_slice(&transcript_binding);
+    out
 }
 
 fn server_hello_binding(
@@ -373,6 +492,21 @@ fn server_hello_binding(
     hasher.update(server_public);
     hasher.update(session_salt);
     hasher.finalize().into()
+}
+
+fn server_auth_message(
+    client_public: [u8; 32],
+    server_public: [u8; 32],
+    session_salt: [u8; 32],
+    transcript_binding: [u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(19 + 32 + 32 + 32 + 32);
+    out.extend_from_slice(b"foctet auth server");
+    out.extend_from_slice(&client_public);
+    out.extend_from_slice(&server_public);
+    out.extend_from_slice(&session_salt);
+    out.extend_from_slice(&transcript_binding);
+    out
 }
 
 fn rekey_binding(
@@ -393,6 +527,7 @@ fn rekey_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{IdentityKeyPair, PeerIdentity};
 
     #[test]
     fn session_handshake_and_rekey() {
@@ -417,5 +552,34 @@ mod tests {
         let client_key = client.active_keys().expect("client active key");
         let server_key = server.active_keys().expect("server active key");
         assert_eq!(client_key.key_id, server_key.key_id);
+    }
+
+    #[test]
+    fn session_authenticates_pinned_peer_identities() {
+        let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
+        let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
+        let client_auth = SessionAuthConfig::new()
+            .with_local_identity(client_identity.clone())
+            .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
+            .require_peer_authentication(true);
+        let server_auth = SessionAuthConfig::new()
+            .with_local_identity(server_identity.clone())
+            .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
+            .require_peer_authentication(true);
+
+        let (mut client, hello) =
+            Session::new_initiator_with_auth(RekeyThresholds::default(), client_auth);
+        let mut server = Session::new_responder_with_auth(RekeyThresholds::default(), server_auth);
+
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handle client hello")
+            .expect("server hello response");
+        client
+            .handle_control(&server_hello)
+            .expect("client handle server hello");
+
+        assert!(client.peer_authenticated());
+        assert!(server.peer_authenticated());
     }
 }

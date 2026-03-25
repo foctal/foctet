@@ -350,7 +350,10 @@ impl<T> FoctetFramed<T> {
             self.next_seq,
             plaintext,
         )?;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        self.next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or(CoreError::SequenceExhausted)?;
         self.tx.extend_from_slice(&frame.to_bytes());
         Ok(())
     }
@@ -388,7 +391,10 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
             this.next_seq,
             plaintext,
         )?;
-        this.next_seq = this.next_seq.wrapping_add(1);
+        this.next_seq = this
+            .next_seq
+            .checked_add(1)
+            .ok_or(CoreError::SequenceExhausted)?;
         this.tx.extend_from_slice(&frame.to_bytes());
         Ok(())
     }
@@ -612,7 +618,10 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
             this.next_seq,
             &item,
         )?;
-        this.next_seq = this.next_seq.wrapping_add(1);
+        this.next_seq = this
+            .next_seq
+            .checked_add(1)
+            .ok_or(CoreError::SequenceExhausted)?;
         this.tx.extend_from_slice(&frame.to_bytes());
         Ok(())
     }
@@ -803,7 +812,7 @@ mod tests {
     fn framed_sink_stream_roundtrip() {
         let eph_a = EphemeralKeyPair::generate();
         let eph_b = EphemeralKeyPair::generate();
-        let ss = eph_a.shared_secret(eph_b.public);
+        let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
         let salt = random_session_salt();
         let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
 

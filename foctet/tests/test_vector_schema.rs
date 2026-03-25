@@ -50,6 +50,10 @@ fn handshake_vector_schema_is_valid() {
         "server_private_hex",
         "client_public_hex",
         "server_public_hex",
+        "client_identity_private_hex",
+        "server_identity_private_hex",
+        "client_identity_public_hex",
+        "server_identity_public_hex",
         "session_salt_hex",
         "shared_secret_hex",
         "key_c2s_hex",
@@ -57,6 +61,8 @@ fn handshake_vector_schema_is_valid() {
     ] {
         assert_hex_len(&v, key, 32);
     }
+    assert_hex_field(&v, "client_hello_hex");
+    assert_hex_field(&v, "server_hello_hex");
 }
 
 #[test]

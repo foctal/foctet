@@ -1,13 +1,25 @@
 use std::error::Error;
 
-use foctet::core::{AsyncSecureChannel, RekeyThresholds, Session};
+use foctet::core::{
+    AsyncSecureChannel, IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
+};
 use tokio::net::{TcpListener, TcpStream};
 
 fn make_session_pair() -> (Session, Session) {
     let thresholds = RekeyThresholds::default();
+    let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
+    let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
+    let client_auth = SessionAuthConfig::new()
+        .with_local_identity(client_identity.clone())
+        .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
+        .require_peer_authentication(true);
+    let server_auth = SessionAuthConfig::new()
+        .with_local_identity(server_identity)
+        .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
+        .require_peer_authentication(true);
 
-    let (mut initiator, hello) = Session::new_initiator(thresholds.clone());
-    let mut responder = Session::new_responder(thresholds);
+    let (mut initiator, hello) = Session::new_initiator_with_auth(thresholds.clone(), client_auth);
+    let mut responder = Session::new_responder_with_auth(thresholds, server_auth);
 
     let server_hello = responder
         .handle_control(&hello)
@@ -28,6 +40,7 @@ async fn run_server(
     stream.set_nodelay(true)?;
 
     let mut channel = AsyncSecureChannel::from_tokio(stream, session)?.with_app_stream_id(1);
+    assert!(channel.session().peer_authenticated());
 
     let incoming = channel.recv_application().await?;
     println!(
@@ -44,6 +57,7 @@ async fn run_client(addr: std::net::SocketAddr, session: Session) -> Result<(), 
     stream.set_nodelay(true)?;
 
     let mut channel = AsyncSecureChannel::from_tokio(stream, session)?.with_app_stream_id(1);
+    assert!(channel.session().peer_authenticated());
     channel.send_data(b"ping over async secure channel").await?;
 
     let reply = channel.recv_application().await?;

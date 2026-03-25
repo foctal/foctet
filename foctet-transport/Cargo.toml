@@ -5,26 +5,31 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Thin transport adapters for send/recv streams in foctet E2EE"
+description = "Layered transport integration helpers for Foctet secure channels"
 readme = "../README.md"
 
 [features]
 default = []
-runtime-tokio = ["dep:tokio"]
-runtime-futures = ["dep:futures-io"]
+runtime-tokio = ["dep:tokio", "foctet-core/runtime-tokio", "dep:futures-sink"]
+runtime-futures = ["dep:futures-io", "dep:futures-sink", "dep:futures-util", "foctet-core/runtime-futures"]
 transport-muxtls = ["dep:muxtls"]
 transport-webtrans = ["dep:webtrans"]
-transport-websock = ["dep:websock"]
+transport-websock = ["dep:websock", "dep:websock-tungstenite-mux"]
 transport-quinn = ["dep:quinn"]
 
 [dependencies]
+foctet-core = { workspace = true }
 pin-project-lite = "0.2"
 futures-io = { version = "0.3", optional = true }
+futures-sink = { version = "0.3", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
 tokio = { version = "1.48", features = ["io-util"], optional = true }
 muxtls = { version = "0.1.0", default-features = false, optional = true }
 webtrans = { version = "0.4.0", default-features = false, optional = true }
 websock = { version = "0.4.0", default-features = false, optional = true }
+websock-tungstenite-mux = { version = "0.4.0", optional = true }
 quinn = { version = "0.11.9", default-features = false, optional = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.48", features = ["macros", "rt", "rt-multi-thread", "io-util", "time"] }

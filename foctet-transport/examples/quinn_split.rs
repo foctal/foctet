@@ -3,13 +3,18 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ::quinn as quinn_transport;
 use clap::Parser;
-use foctet_core::{AsyncSecureChannel, RekeyThresholds, Session};
-use foctet_transport::quinn as quinn_adapter;
+use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
+use foctet_transport::adapter::SplitIo;
+use foctet_transport::{TokioTransportBuilder, TransportConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 const STREAM_COUNT: usize = 2;
+const STREAM_TAG_LEN: usize = 4;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -21,30 +26,18 @@ struct Args {
     tls_key: Option<PathBuf>,
 }
 
-fn make_session_pair() -> Result<(Session, Session), foctet_core::CoreError> {
-    let thresholds = RekeyThresholds::default();
-    let (mut initiator, hello) = Session::new_initiator(thresholds.clone());
-    let mut responder = Session::new_responder(thresholds);
-
-    let server_hello = responder
-        .handle_control(&hello)?
-        .expect("responder must return server hello");
-    initiator.handle_control(&server_hello)?;
-
-    Ok((initiator, responder))
-}
-
-fn make_session_sets() -> Result<(Vec<Session>, Vec<Session>), foctet_core::CoreError> {
-    let mut client = Vec::with_capacity(STREAM_COUNT);
-    let mut server = Vec::with_capacity(STREAM_COUNT);
-
-    for _ in 0..STREAM_COUNT {
-        let (c, s) = make_session_pair()?;
-        client.push(c);
-        server.push(s);
-    }
-
-    Ok((client, server))
+fn auth_config_pair(idx: usize) -> (SessionAuthConfig, SessionAuthConfig) {
+    let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41 + idx as u8; 32]);
+    let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61 + idx as u8; 32]);
+    let client = SessionAuthConfig::new()
+        .with_local_identity(client_identity.clone())
+        .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
+        .require_peer_authentication(true);
+    let server = SessionAuthConfig::new()
+        .with_local_identity(server_identity)
+        .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
+        .require_peer_authentication(true);
+    (client, server)
 }
 
 fn load_cert_chain(
@@ -98,7 +91,7 @@ fn configure_server(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<quinn::ServerConfig, Box<dyn Error + Send + Sync>> {
-    let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key)?;
+    let mut server_config = quinn_transport::ServerConfig::with_single_cert(cert_chain, key)?;
     let transport = Arc::get_mut(&mut server_config.transport)
         .expect("transport config must be uniquely owned");
     transport.max_concurrent_uni_streams(0_u8.into());
@@ -112,41 +105,87 @@ fn configure_client(
     for cert in cert_chain {
         roots.add(cert.clone())?;
     }
-    Ok(quinn::ClientConfig::with_root_certificates(Arc::new(
-        roots,
-    ))?)
+    Ok(quinn_transport::ClientConfig::with_root_certificates(
+        Arc::new(roots),
+    )?)
 }
 
 fn is_graceful_quinn_close(err: &(dyn Error + 'static)) -> bool {
-    let msg = err.to_string();
-    msg.contains("ApplicationClosed") || msg.contains("ConnectionLost(ApplicationClosed")
+    let mut current = Some(err);
+    while let Some(item) = current {
+        let msg = item.to_string();
+        if msg.contains("ApplicationClosed")
+            || msg.contains("ConnectionLost(ApplicationClosed")
+            || msg.contains("error_code: 0")
+            || msg.contains("NotConnected")
+            || msg.contains("not connected")
+        {
+            return true;
+        }
+        current = item.source();
+    }
+    false
+}
+
+fn take_tagged_auth(
+    auth_configs: &mut [Option<SessionAuthConfig>],
+    tag: [u8; STREAM_TAG_LEN],
+) -> Result<(usize, SessionAuthConfig), Box<dyn Error + Send + Sync>> {
+    let idx = u32::from_be_bytes(tag) as usize;
+    let Some(slot) = auth_configs.get_mut(idx) else {
+        return Err(format!("received out-of-range stream tag {idx}").into());
+    };
+    let Some(auth) = slot.take() else {
+        return Err(format!("received duplicate stream tag {idx}").into());
+    };
+    Ok((idx, auth))
 }
 
 async fn run_server(
-    endpoint: quinn::Endpoint,
-    server_sessions: Vec<Session>,
+    endpoint: quinn_transport::Endpoint,
+    server_auth_configs: Vec<SessionAuthConfig>,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let incoming = endpoint.accept().await.ok_or("endpoint closed")?;
     let connection = incoming.await?;
+    let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut server_auth_configs = server_auth_configs
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    let mut channels = Vec::with_capacity(server_auth_configs.len());
 
-    let mut tasks = JoinSet::new();
-    for (idx, session_keys) in server_sessions.into_iter().enumerate() {
-        let (send, recv) = match connection.accept_bi().await {
-            Ok(pair) => pair,
-            Err(err) if is_graceful_quinn_close(&err) => break,
+    // Read an explicit stream tag before building Foctet so accept order can vary safely.
+    for _ in 0..server_auth_configs.len() {
+        let (send, mut recv) = match connection.accept_bi().await {
+            Ok(parts) => parts,
+            Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
             Err(err) => return Err(Box::new(err)),
         };
-        tasks.spawn(async move {
-            let io = quinn_adapter::from_split(recv, send);
-            let mut channel =
-                AsyncSecureChannel::from_tokio(io, session_keys)?.with_app_stream_id(1);
+        let mut tag = [0u8; STREAM_TAG_LEN];
+        recv.read_exact(&mut tag).await?;
+        let (idx, auth) = take_tagged_auth(&mut server_auth_configs, tag)?;
+        let channel = builder
+            .establish_responder_with_auth(
+                SplitIo::from_split(recv, send),
+                RekeyThresholds::default(),
+                auth,
+            )
+            .await?;
+        channels.push((idx, channel));
+    }
 
+    let mut tasks = JoinSet::new();
+    for (idx, mut channel) in channels {
+        tasks.spawn(async move {
+            assert!(channel.session().peer_authenticated());
             let incoming = channel.recv_application().await?;
             let reply = format!(
                 "quinn stream {idx} reply to: {}",
                 String::from_utf8_lossy(&incoming)
             );
-            channel.send_data(reply.as_bytes()).await?;
+            channel.send_application(reply.as_bytes()).await?;
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -159,30 +198,46 @@ async fn run_server(
             Err(err) => return Err(Box::new(err)),
         }
     }
+    let _ = shutdown.await;
     Ok(())
 }
 
 async fn run_client(
-    endpoint: quinn::Endpoint,
+    endpoint: quinn_transport::Endpoint,
     remote: SocketAddr,
-    client_sessions: Vec<Session>,
+    client_auth_configs: Vec<SessionAuthConfig>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection = endpoint.connect(remote, "localhost")?.await?;
+    let config = TransportConfig::default().with_app_stream_id(1);
+    let builder = TokioTransportBuilder::new().with_config(config);
+    let mut channels = Vec::with_capacity(client_auth_configs.len());
 
-    let mut tasks = JoinSet::new();
-    for (idx, session_keys) in client_sessions.into_iter().enumerate() {
-        let (send, recv) = match connection.open_bi().await {
-            Ok(pair) => pair,
-            Err(err) if is_graceful_quinn_close(&err) => break,
+    // Write a small cleartext tag on each raw stream so the server can bind the right Foctet
+    // session even if transport accept order differs from open order.
+    for (idx, auth) in client_auth_configs.into_iter().enumerate() {
+        let (mut send, recv) = match connection.open_bi().await {
+            Ok(parts) => parts,
+            Err(err) if is_graceful_quinn_close(&err) => return Ok(()),
             Err(err) => return Err(Box::new(err)),
         };
-        tasks.spawn(async move {
-            let io = quinn_adapter::from_split(recv, send);
-            let mut channel =
-                AsyncSecureChannel::from_tokio(io, session_keys)?.with_app_stream_id(1);
+        send.write_all(&(idx as u32).to_be_bytes()).await?;
+        send.flush().await?;
+        let channel = builder
+            .establish_initiator_with_auth(
+                SplitIo::from_split(recv, send),
+                RekeyThresholds::default(),
+                auth,
+            )
+            .await?;
+        channels.push((idx, channel));
+    }
 
+    let mut tasks = JoinSet::new();
+    for (idx, mut channel) in channels {
+        tasks.spawn(async move {
+            assert!(channel.session().peer_authenticated());
             let payload = format!("hello from quinn stream {idx}");
-            channel.send_data(payload.as_bytes()).await?;
+            channel.send_application(payload.as_bytes()).await?;
             let response = channel.recv_application().await?;
 
             println!(
@@ -207,24 +262,31 @@ async fn run_client(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args = Args::parse();
-    let (client_sessions, server_sessions) = make_session_sets()?;
+    let (client_auth_configs, server_auth_configs): (Vec<_>, Vec<_>) =
+        (0..STREAM_COUNT).map(auth_config_pair).unzip();
     let (cert_chain, key) = resolve_cert_pair(&args)?;
 
     let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     let server_config = configure_server(cert_chain.clone(), key)?;
-    let server_endpoint = quinn::Endpoint::server(server_config, bind_addr)?;
+    let server_endpoint = quinn_transport::Endpoint::server(server_config, bind_addr)?;
     let server_addr = server_endpoint.local_addr()?;
 
     let client_config = configure_client(&cert_chain)?;
-    let mut client_endpoint = quinn::Endpoint::client(bind_addr)?;
+    let mut client_endpoint = quinn_transport::Endpoint::client(bind_addr)?;
     client_endpoint.set_default_client_config(client_config);
 
-    let server_task = tokio::spawn(run_server(server_endpoint, server_sessions));
-    if let Err(err) = run_client(client_endpoint, server_addr, client_sessions).await
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(run_server(
+        server_endpoint,
+        server_auth_configs,
+        shutdown_rx,
+    ));
+    if let Err(err) = run_client(client_endpoint, server_addr, client_auth_configs).await
         && !is_graceful_quinn_close(err.as_ref())
     {
         return Err(err);
     }
+    let _ = shutdown_tx.send(());
 
     match server_task.await {
         Ok(Ok(())) => {}

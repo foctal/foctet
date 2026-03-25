@@ -132,10 +132,14 @@ impl EphemeralKeyPair {
     }
 
     /// Computes shared secret with peer ephemeral public key.
-    pub fn shared_secret(&self, peer_public: [u8; 32]) -> [u8; 32] {
+    pub fn shared_secret(&self, peer_public: [u8; 32]) -> Result<[u8; 32], CoreError> {
         let private = StaticSecret::from(*self.private);
         let peer = PublicKey::from(peer_public);
-        private.diffie_hellman(&peer).to_bytes()
+        let shared = private.diffie_hellman(&peer).to_bytes();
+        if shared.iter().all(|byte| *byte == 0) {
+            return Err(CoreError::InvalidSharedSecret);
+        }
+        Ok(shared)
     }
 }
 
@@ -241,8 +245,8 @@ mod tests {
     fn frame_roundtrip_encrypt_decrypt() {
         let eph_a = EphemeralKeyPair::generate();
         let eph_b = EphemeralKeyPair::generate();
-        let ss_a = eph_a.shared_secret(eph_b.public);
-        let ss_b = eph_b.shared_secret(eph_a.public);
+        let ss_a = eph_a.shared_secret(eph_b.public).expect("shared secret a");
+        let ss_b = eph_b.shared_secret(eph_a.public).expect("shared secret b");
         assert_eq!(ss_a, ss_b);
 
         let salt = random_session_salt();

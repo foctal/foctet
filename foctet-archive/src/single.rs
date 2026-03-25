@@ -1,11 +1,11 @@
 use std::io::{Cursor, Read};
 
 use crate::{
-    ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveError, ArchiveOptions,
-    PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
+    ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveBuildSecrets, ArchiveError, ArchiveLimits,
+    ArchiveOptions, PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
     build::{
-        build_encrypted_materials, decrypt_chunk_records, decrypt_header, ensure_profile,
-        ensure_version,
+        build_encrypted_materials, build_encrypted_materials_with_secrets, decrypt_header,
+        ensure_profile, ensure_version,
     },
     codec::{archive_prefix_len, decode_wrapped_table, encode_wrapped_table, read_u8, read_u32_be},
     crypto::{aead_encrypt, header_nonce, unwrap_dek_from_recipients},
@@ -21,7 +21,31 @@ pub fn create_archive_from_bytes(
     options: ArchiveOptions,
 ) -> Result<(Vec<u8>, ArchiveBuildResult), ArchiveError> {
     let built = build_encrypted_materials(plaintext, recipient_public_keys, options)?;
+    encode_archive_from_built(plaintext, built)
+}
 
+/// Creates a single-file Foctet archive from plaintext bytes using caller-provided deterministic secrets.
+///
+/// This is primarily intended for reproducible vector generation and deterministic tests.
+pub fn create_archive_from_bytes_with_secrets(
+    plaintext: &[u8],
+    recipient_public_keys: &[[u8; 32]],
+    options: ArchiveOptions,
+    secrets: &ArchiveBuildSecrets,
+) -> Result<(Vec<u8>, ArchiveBuildResult), ArchiveError> {
+    let built = build_encrypted_materials_with_secrets(
+        plaintext,
+        recipient_public_keys,
+        options,
+        Some(secrets),
+    )?;
+    encode_archive_from_built(plaintext, built)
+}
+
+fn encode_archive_from_built(
+    plaintext: &[u8],
+    built: crate::types::BuiltArchive,
+) -> Result<(Vec<u8>, ArchiveBuildResult), ArchiveError> {
     let mut out = Vec::with_capacity(plaintext.len() + 4096);
     out.extend_from_slice(&ARCHIVE_MAGIC);
     out.push(WIRE_VERSION_V0);
@@ -54,10 +78,31 @@ pub fn decrypt_archive_to_bytes(
     archive_bytes: &[u8],
     recipient_private_key: [u8; 32],
 ) -> Result<Vec<u8>, ArchiveError> {
+    decrypt_archive_to_bytes_with_limits(
+        archive_bytes,
+        recipient_private_key,
+        &ArchiveLimits::default(),
+    )
+}
+
+/// Decrypts a single-file Foctet archive with explicit parser limits.
+///
+/// Use this when decoding untrusted input and you need tighter bounds than
+/// [`ArchiveLimits::default`].
+pub fn decrypt_archive_to_bytes_with_limits(
+    archive_bytes: &[u8],
+    recipient_private_key: [u8; 32],
+    limits: &ArchiveLimits,
+) -> Result<Vec<u8>, ArchiveError> {
+    if archive_bytes.len() > limits.max_archive_bytes {
+        return Err(ArchiveError::LimitExceeded("archive_bytes"));
+    }
+
     let mut rd = Cursor::new(archive_bytes);
 
     let mut magic = [0u8; 8];
-    rd.read_exact(&mut magic).map_err(|_| ArchiveError::Parse)?;
+    rd.read_exact(&mut magic)
+        .map_err(|_| ArchiveError::Truncated)?;
     if magic != ARCHIVE_MAGIC {
         return Err(ArchiveError::InvalidMagic);
     }
@@ -68,12 +113,19 @@ pub fn decrypt_archive_to_bytes(
     let profile = read_u8(&mut rd)?;
     ensure_profile(profile, PROFILE_X25519_HKDF_XCHACHA20POLY1305)?;
 
-    let wrapped = decode_wrapped_table(&mut rd)?;
+    let wrapped = decode_wrapped_table(&mut rd, limits)?;
 
     let header_len = read_u32_be(&mut rd)? as usize;
+    if header_len > limits.max_header_ciphertext_len {
+        return Err(ArchiveError::LimitExceeded("header_ciphertext_len"));
+    }
+    let remaining = archive_bytes.len().saturating_sub(rd.position() as usize);
+    if header_len > remaining {
+        return Err(ArchiveError::Truncated);
+    }
     let mut header_ct = vec![0u8; header_len];
     rd.read_exact(&mut header_ct)
-        .map_err(|_| ArchiveError::Parse)?;
+        .map_err(|_| ArchiveError::Truncated)?;
 
     let dek = unwrap_dek_from_recipients(&wrapped, recipient_private_key)?;
     let aad_prefix_len = archive_prefix_len(&wrapped);
@@ -83,17 +135,32 @@ pub fn decrypt_archive_to_bytes(
 
     let header = decrypt_header(&dek, aad_prefix, &header_ct)?;
 
-    let mut chunks = Vec::with_capacity(header.manifest.total_chunks as usize);
+    let total_chunks = header.manifest.total_chunks as usize;
+    if total_chunks > limits.max_total_chunks {
+        return Err(ArchiveError::LimitExceeded("total_chunks"));
+    }
+    let mut chunks = Vec::with_capacity(total_chunks);
     for idx in 0..header.manifest.total_chunks {
         let chunk_len = read_u32_be(&mut rd)? as usize;
+        if chunk_len > limits.max_chunk_ciphertext_len {
+            return Err(ArchiveError::LimitExceeded("chunk_ciphertext_len"));
+        }
+        let remaining = archive_bytes.len().saturating_sub(rd.position() as usize);
+        if chunk_len > remaining {
+            return Err(ArchiveError::Truncated);
+        }
         let mut chunk_ct = vec![0u8; chunk_len];
         rd.read_exact(&mut chunk_ct)
-            .map_err(|_| ArchiveError::Parse)?;
+            .map_err(|_| ArchiveError::Truncated)?;
         chunks.push(EncryptedChunkRecord {
             chunk_index: idx,
             chunk_ct,
         });
     }
 
-    decrypt_chunk_records(&dek, &header, &chunks)
+    if rd.position() as usize != archive_bytes.len() {
+        return Err(ArchiveError::Parse);
+    }
+
+    crate::build::decrypt_chunk_records_with_limits(&dek, &header, &chunks, limits)
 }

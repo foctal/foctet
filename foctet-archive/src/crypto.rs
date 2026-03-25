@@ -15,6 +15,15 @@ pub(crate) fn wrap_dek(
     recipient_public: [u8; 32],
 ) -> Result<WrappedDek, ArchiveError> {
     let eph_priv = StaticSecret::random_from_rng(OsRng);
+    wrap_dek_with_ephemeral_secret(dek, recipient_public, eph_priv.to_bytes())
+}
+
+pub(crate) fn wrap_dek_with_ephemeral_secret(
+    dek: &[u8; 32],
+    recipient_public: [u8; 32],
+    ephemeral_secret: [u8; 32],
+) -> Result<WrappedDek, ArchiveError> {
+    let eph_priv = StaticSecret::from(ephemeral_secret);
     let eph_pub = PublicKey::from(&eph_priv);
     let recipient = PublicKey::from(recipient_public);
     let shared = Zeroizing::new(eph_priv.diffie_hellman(&recipient).to_bytes());

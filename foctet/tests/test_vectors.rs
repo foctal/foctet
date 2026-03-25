@@ -1,7 +1,9 @@
 use std::{fs, path::PathBuf};
 
+use ed25519_dalek::{Signer, SigningKey};
 use foctet::{archive, core};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn root_dir() -> PathBuf {
@@ -31,6 +33,55 @@ fn hex32(s: &str) -> [u8; 32] {
     assert_eq!(v.len(), 32);
     let mut out = [0u8; 32];
     out.copy_from_slice(&v);
+    out
+}
+
+fn client_hello_binding(client_public: [u8; 32], session_salt: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"foctet hs client");
+    hasher.update(client_public);
+    hasher.update(session_salt);
+    hasher.finalize().into()
+}
+
+fn server_hello_binding(
+    client_public: [u8; 32],
+    server_public: [u8; 32],
+    session_salt: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"foctet hs server");
+    hasher.update(client_public);
+    hasher.update(server_public);
+    hasher.update(session_salt);
+    hasher.finalize().into()
+}
+
+fn client_auth_message(
+    client_public: [u8; 32],
+    session_salt: [u8; 32],
+    transcript_binding: [u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"foctet auth client");
+    out.extend_from_slice(&client_public);
+    out.extend_from_slice(&session_salt);
+    out.extend_from_slice(&transcript_binding);
+    out
+}
+
+fn server_auth_message(
+    client_public: [u8; 32],
+    server_public: [u8; 32],
+    session_salt: [u8; 32],
+    transcript_binding: [u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"foctet auth server");
+    out.extend_from_slice(&client_public);
+    out.extend_from_slice(&server_public);
+    out.extend_from_slice(&session_salt);
+    out.extend_from_slice(&transcript_binding);
     out
 }
 
@@ -86,10 +137,32 @@ fn handshake_vector_matches() {
     );
     let expected_client_pub = hex32(v["client_public_hex"].as_str().expect("client_public_hex"));
     let expected_server_pub = hex32(v["server_public_hex"].as_str().expect("server_public_hex"));
+    let client_identity_priv = hex32(
+        v["client_identity_private_hex"]
+            .as_str()
+            .expect("client_identity_private_hex"),
+    );
+    let server_identity_priv = hex32(
+        v["server_identity_private_hex"]
+            .as_str()
+            .expect("server_identity_private_hex"),
+    );
+    let client_identity_pub = hex32(
+        v["client_identity_public_hex"]
+            .as_str()
+            .expect("client_identity_public_hex"),
+    );
+    let server_identity_pub = hex32(
+        v["server_identity_public_hex"]
+            .as_str()
+            .expect("server_identity_public_hex"),
+    );
     let session_salt = hex32(v["session_salt_hex"].as_str().expect("session_salt_hex"));
     let expected_shared = hex32(v["shared_secret_hex"].as_str().expect("shared_secret_hex"));
     let expected_c2s = hex32(v["key_c2s_hex"].as_str().expect("key_c2s_hex"));
     let expected_s2c = hex32(v["key_s2c_hex"].as_str().expect("key_s2c_hex"));
+    let client_hello_hex = hex_decode(v["client_hello_hex"].as_str().expect("client_hello_hex"));
+    let server_hello_hex = hex_decode(v["server_hello_hex"].as_str().expect("server_hello_hex"));
 
     let client_secret = StaticSecret::from(client_priv);
     let server_secret = StaticSecret::from(server_priv);
@@ -107,6 +180,63 @@ fn handshake_vector_matches() {
     assert_eq!(keys.c2s, expected_c2s);
     assert_eq!(keys.s2c, expected_s2c);
     assert_ne!(keys.c2s, keys.s2c, "directional keys must be different");
+
+    let client_identity = SigningKey::from_bytes(&client_identity_priv);
+    let server_identity = SigningKey::from_bytes(&server_identity_priv);
+    assert_eq!(
+        client_identity.verifying_key().to_bytes(),
+        client_identity_pub
+    );
+    assert_eq!(
+        server_identity.verifying_key().to_bytes(),
+        server_identity_pub
+    );
+
+    let client_binding = client_hello_binding(client_pub, session_salt);
+    let client_auth_sig = client_identity
+        .sign(&client_auth_message(
+            client_pub,
+            session_salt,
+            client_binding,
+        ))
+        .to_bytes();
+    let expected_client_hello = core::ControlMessage::ClientHello {
+        eph_public: client_pub,
+        session_salt,
+        transcript_binding: client_binding,
+        auth: Some(core::HandshakeAuth {
+            identity_public_key: client_identity_pub,
+            signature: client_auth_sig,
+        }),
+    };
+    assert_eq!(expected_client_hello.encode(), client_hello_hex);
+
+    let parsed_client_hello =
+        core::ControlMessage::decode(&client_hello_hex).expect("decode client hello");
+    assert_eq!(parsed_client_hello, expected_client_hello);
+
+    let server_binding = server_hello_binding(client_pub, server_pub, session_salt);
+    let server_auth_sig = server_identity
+        .sign(&server_auth_message(
+            client_pub,
+            server_pub,
+            session_salt,
+            server_binding,
+        ))
+        .to_bytes();
+    let expected_server_hello = core::ControlMessage::ServerHello {
+        eph_public: server_pub,
+        transcript_binding: server_binding,
+        auth: Some(core::HandshakeAuth {
+            identity_public_key: server_identity_pub,
+            signature: server_auth_sig,
+        }),
+    };
+    assert_eq!(expected_server_hello.encode(), server_hello_hex);
+
+    let parsed_server_hello =
+        core::ControlMessage::decode(&server_hello_hex).expect("decode server hello");
+    assert_eq!(parsed_server_hello, expected_server_hello);
 }
 
 #[test]

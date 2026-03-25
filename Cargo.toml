@@ -3,23 +3,25 @@ resolver = "2"
 members = [
   "foctet",
   "foctet-core",
+  "foctet-http",
   "foctet-archive",
   "foctet-transport",
   "fuzz"
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["shellrow <shellrow@foctal.com>"]
 license = "MIT"
 repository = "https://github.com/foctal/foctet"
-description = "Transport-agnostic end-to-end encryption layer for secure frame-based data transfer."
+description = "Transport-agnostic end-to-end encryption layer for secure data transfer."
 
 [workspace.dependencies]
 blake3 = "1.8"
 bytes = "1.10"
 chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["rand_core"] }
 hkdf = "0.12"
 rand_core = "0.6"
 rkyv = { version = "0.8", features = ["bytecheck"] }
@@ -27,6 +29,7 @@ sha2 = "0.10"
 thiserror = "2.0"
 x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = "1.8"
-foctet-core = { path = "foctet-core", version = "0.1.0" }
-foctet-archive = { path = "foctet-archive", version = "0.1.0" }
-foctet-transport = { path = "foctet-transport", version = "0.1.0" }
+foctet-core = { path = "foctet-core", version = "0.2.0" }
+foctet-http = { path = "foctet-http", version = "0.2.0" }
+foctet-archive = { path = "foctet-archive", version = "0.2.0" }
+foctet-transport = { path = "foctet-transport", version = "0.2.0" }

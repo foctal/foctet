@@ -1,6 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use foctet::{archive, core};
+use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn hex(bytes: &[u8]) -> String {
@@ -20,8 +21,57 @@ fn json_line(k: &str, v: &str, comma: bool) -> String {
     }
 }
 
+fn client_hello_binding(client_public: [u8; 32], session_salt: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"foctet hs client");
+    hasher.update(client_public);
+    hasher.update(session_salt);
+    hasher.finalize().into()
+}
+
+fn server_hello_binding(
+    client_public: [u8; 32],
+    server_public: [u8; 32],
+    session_salt: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"foctet hs server");
+    hasher.update(client_public);
+    hasher.update(server_public);
+    hasher.update(session_salt);
+    hasher.finalize().into()
+}
+
+fn client_auth_message(
+    client_public: [u8; 32],
+    session_salt: [u8; 32],
+    transcript_binding: [u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"foctet auth client");
+    out.extend_from_slice(&client_public);
+    out.extend_from_slice(&session_salt);
+    out.extend_from_slice(&transcript_binding);
+    out
+}
+
+fn server_auth_message(
+    client_public: [u8; 32],
+    server_public: [u8; 32],
+    session_salt: [u8; 32],
+    transcript_binding: [u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"foctet auth server");
+    out.extend_from_slice(&client_public);
+    out.extend_from_slice(&server_public);
+    out.extend_from_slice(&session_salt);
+    out.extend_from_slice(&transcript_binding);
+    out
+}
+
 fn main() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let out_dir = root.join("test-vectors");
     fs::create_dir_all(&out_dir).expect("create test-vectors dir");
 
@@ -62,6 +112,27 @@ fn main() {
         .to_bytes();
     let hs_salt = [0xA5u8; 32];
     let hs_keys = core::derive_traffic_keys(&shared, &hs_salt, 1).expect("derive hs keys");
+    let client_identity = core::IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
+    let server_identity = core::IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
+    let client_binding = client_hello_binding(client_pub, hs_salt);
+    let client_hello = core::ControlMessage::ClientHello {
+        eph_public: client_pub,
+        session_salt: hs_salt,
+        transcript_binding: client_binding,
+        auth: Some(core::HandshakeAuth::sign(
+            &client_identity,
+            &client_auth_message(client_pub, hs_salt, client_binding),
+        )),
+    };
+    let server_binding = server_hello_binding(client_pub, server_pub, hs_salt);
+    let server_hello = core::ControlMessage::ServerHello {
+        eph_public: server_pub,
+        transcript_binding: server_binding,
+        auth: Some(core::HandshakeAuth::sign(
+            &server_identity,
+            &server_auth_message(client_pub, server_pub, hs_salt, server_binding),
+        )),
+    };
 
     let mut hs_json = String::new();
     hs_json.push_str("{\n");
@@ -69,10 +140,40 @@ fn main() {
     hs_json.push_str(&json_line("server_private_hex", &hex(&server_priv), true));
     hs_json.push_str(&json_line("client_public_hex", &hex(&client_pub), true));
     hs_json.push_str(&json_line("server_public_hex", &hex(&server_pub), true));
+    hs_json.push_str(&json_line(
+        "client_identity_private_hex",
+        &hex(&client_identity.secret_key_bytes()),
+        true,
+    ));
+    hs_json.push_str(&json_line(
+        "server_identity_private_hex",
+        &hex(&server_identity.secret_key_bytes()),
+        true,
+    ));
+    hs_json.push_str(&json_line(
+        "client_identity_public_hex",
+        &hex(&client_identity.public_key()),
+        true,
+    ));
+    hs_json.push_str(&json_line(
+        "server_identity_public_hex",
+        &hex(&server_identity.public_key()),
+        true,
+    ));
     hs_json.push_str(&json_line("session_salt_hex", &hex(&hs_salt), true));
     hs_json.push_str(&json_line("shared_secret_hex", &hex(&shared), true));
     hs_json.push_str(&json_line("key_c2s_hex", &hex(&hs_keys.c2s), true));
-    hs_json.push_str(&json_line("key_s2c_hex", &hex(&hs_keys.s2c), false));
+    hs_json.push_str(&json_line("key_s2c_hex", &hex(&hs_keys.s2c), true));
+    hs_json.push_str(&json_line(
+        "client_hello_hex",
+        &hex(&client_hello.encode()),
+        true,
+    ));
+    hs_json.push_str(&json_line(
+        "server_hello_hex",
+        &hex(&server_hello.encode()),
+        false,
+    ));
     hs_json.push_str("}\n");
     fs::write(out_dir.join("handshake-v0.json"), hs_json).expect("write handshake vector");
 
@@ -81,6 +182,12 @@ fn main() {
     let recipient_secret = StaticSecret::from(recipient_priv);
     let recipient_pub = PublicKey::from(&recipient_secret).to_bytes();
     let payload: Vec<u8> = (0..(32 * 1024 + 123)).map(|i| (i % 251) as u8).collect();
+    let archive_secrets = archive::ArchiveBuildSecrets {
+        archive_id: [0x91; 16],
+        file_id: [0x92; 16],
+        dek: [0x93; 32],
+        wrap_ephemeral_secret_keys: vec![[0x94; 32]],
+    };
 
     let options = archive::ArchiveOptions {
         chunk_size: 128 * 1024,
@@ -89,13 +196,22 @@ fn main() {
         created_at_unix: Some(1_700_000_777),
     };
 
-    let (single_archive, _) =
-        archive::create_archive_from_bytes(&payload, &[recipient_pub], options.clone())
-            .expect("create single archive");
+    let (single_archive, _) = archive::create_archive_from_bytes_with_secrets(
+        &payload,
+        &[recipient_pub],
+        options.clone(),
+        &archive_secrets,
+    )
+    .expect("create single archive");
 
-    let split =
-        archive::create_split_archive_from_bytes(&payload, &[recipient_pub], options, 10 * 1024)
-            .expect("create split archive");
+    let split = archive::create_split_archive_from_bytes_with_secrets(
+        &payload,
+        &[recipient_pub],
+        options,
+        10 * 1024,
+        &archive_secrets,
+    )
+    .expect("create split archive");
 
     let mut archive_json = String::new();
     archive_json.push_str("{\n");
