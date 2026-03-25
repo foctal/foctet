@@ -8,10 +8,10 @@
 //! # Layers
 //!
 //! - Recommended high-level API:
-//!   [`TransportConfig`], [`TokioTransportBuilder`], [`FuturesTransportBuilder`],
-//!   [`TokioTransportChannel`], and [`FuturesTransportChannel`]
+//!   [`TransportConfig`], `TokioTransportBuilder`, `FuturesTransportBuilder`,
+//!   `TokioTransportChannel`, and `FuturesTransportChannel`
 //! - Transport-specific helpers:
-//!   feature-gated modules such as [`muxtls`] and [`quinn`]
+//!   feature-gated modules such as `muxtls` and `quinn`
 //! - Low-level escape hatch:
 //!   [`adapter`] and [`SplitIo`]
 //!
@@ -25,10 +25,10 @@
 //!
 //! # Choosing an Integration Style
 //!
-//! - Use [`TokioTransportBuilder`] or [`FuturesTransportBuilder`] when you
+//! - Use `TokioTransportBuilder` or `FuturesTransportBuilder` when you
 //!   already have split I/O halves and want runtime-generic Foctet channels.
-//! - Use transport-specific modules such as [`quinn`], [`webtrans`],
-//!   [`websock`], or [`muxtls`] when you want convenience wrappers that open or
+//! - Use transport-specific modules such as `quinn`, `webtrans`,
+//!   `websock`, or `muxtls` when you want convenience wrappers that open or
 //!   accept streams and immediately wrap them as Foctet channels.
 //! - Use [`adapter`] and [`SplitIo`] only when you need a custom integration
 //!   path that the high-level builders do not cover.

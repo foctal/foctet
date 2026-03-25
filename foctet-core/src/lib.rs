@@ -32,7 +32,7 @@
 //!
 //! - For production use, prefer [`SessionAuthConfig`] with local identity keys,
 //!   pinned [`PeerIdentity`] values, and
-//!   [`SessionAuthConfig::require_peer_authentication(true)`].
+//!   `SessionAuthConfig::require_peer_authentication(true)`.
 //! - If Foctet runs inside an already-authenticated outer channel, you may use
 //!   the native handshake without identity signatures, but the outer channel
 //!   then carries the peer-authentication responsibility.

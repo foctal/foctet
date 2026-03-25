@@ -14,7 +14,7 @@
 //! - Recommended high-level API:
 //!   [`HttpSealer`] and [`HttpOpener`]
 //! - Framework adapters:
-//!   [`axum`] and [`workers`]
+//!   `axum` and `workers`
 //! - Lower-level helpers:
 //!   [`raw`]
 //!
