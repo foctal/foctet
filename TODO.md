@@ -59,28 +59,38 @@ reviewed.** Do not use "production-ready" / "v1 stable" wording before
       by tests).
 
 ### 1.2 HTTP body envelopes — replay protection & HTTP-context binding
-Foundation done; the first-class HTTP protocol is the big remaining P0.
+Core schema + replay store + axum integration done; durable store + default-
+enforcement remain.
 - [x] Core AEAD context primitive: `seal_body_with_context` /
       `open_body_with_context` / `open_body_for_key_id_with_context`.
-- [ ] Define a **versioned HTTP protected-context schema** (canonical, length-
-      delimited, domain-separated) authenticating at minimum:
-  - [ ] protocol purpose + version + direction (request vs response binding)
-  - [ ] method, normalized authority, normalized path, query (or an application
-        route identifier)
-  - [ ] timestamp + expiry (skew policy)
-  - [ ] cryptographically random message ID
-  - [ ] optional idempotency key + selected-header binding
-- [ ] Build the context bytes from `http::Request`/`Response` parts in
-      `foctet-http` and feed them through `*_with_context`.
-- [ ] **`ReplayStore` trait** with an atomic check-and-insert contract
-      (message ID + expiry), bounded size, and TTL eviction.
-  - [ ] In-memory adapter (single process).
-  - [ ] Durable adapter pattern for Workers (Durable Object / KV) — see 5.2.
-- [ ] Make context-bound + replay-protected APIs the **default** in `foctet-http`;
-      relabel raw `seal_body`/`open_body` as low-level/stateless.
-- [ ] Tests: replay of a captured request is rejected; cross-route substitution
-      rejected; expired context rejected; clock-skew window enforced.
-- **Gate:** block production HTTP/Workers recommendations until done.
+- [x] **Versioned HTTP protected-context schema** (canonical, length-delimited,
+      domain-separated `foctet-http-ctx-v1`) in `foctet-http/src/context.rs`,
+      authenticating:
+  - [x] protocol label + version + direction (request vs response)
+  - [x] method, path, query (authority opt-in via `ContextBinding`)
+  - [x] response status (responses)
+  - [x] timestamp + expiry with clock-skew validation
+  - [x] cryptographically random 16-byte message ID
+  - [x] optional idempotency key; response→request message-id binding
+  - [ ] selected-header binding (optional, not yet)
+- [x] Build context bytes from `http::Request`/`Response` parts and feed through
+      `*_with_context` (`HttpSealer::seal_request_with_context` /
+      `HttpOpener::open_request_with_context`, + response variants).
+- [x] **`ReplayStore` trait** with atomic check-and-insert + `ReplayCheck`;
+      `InMemoryReplayStore` (TTL eviction + capacity bound).
+- [x] Authenticate-before-replay ordering (store consulted only after AEAD).
+- [x] Axum adapter: `AxumOpener::open_request_with_context`,
+      `AxumSealer::seal_response_with_context` (body bounded by `max_body_bytes`).
+- [x] Tests: replay rejected, route substitution rejected, expired rejected,
+      response roundtrip, carrier header roundtrip, store capacity/eviction.
+- [ ] **Durable `ReplayStore`** for multi-instance / Workers (KV / Durable
+      Object / Redis) — `InMemoryReplayStore` is single-process only.
+- [ ] Make context-bound APIs the **enforced default**; consider deprecating the
+      stateless `seal_request`/`open_request` for production use.
+- [ ] Workers adapter parity (`open_request_with_context` for `worker::Request`).
+- [ ] Optional selected-header binding + authority normalization guidance.
+- **Gate:** block production HTTP/Workers recommendations until durable store +
+  default-enforcement land.
 
 ---
 
@@ -166,10 +176,11 @@ Foundation done; the first-class HTTP protocol is the big remaining P0.
 
 ## 4. P1 — HTTP & Workers (depends on §1.2)
 
-- [ ] Axum middleware/extractors that **require** verified protected context and
-      enforce body limits + backpressure (don't leave limits app-dependent).
-- [ ] Safe default body limits documented now (interim) — current default allows
-      64 MiB ciphertext with no framework limit set by the library.
+- [~] Axum adapter that requires verified protected context + bounds body size:
+      `AxumOpener::open_request_with_context` (bounded by `max_body_bytes`) done;
+      a ready-made middleware/extractor layer is still TODO.
+- [~] Safe default body limits: Axum opener bounds via `max_body_bytes`; document
+      recommended values and add backpressure guidance.
 - [ ] Streaming HTTP mode (only after design + review): per-chunk AEAD, unique
       nonces, final authenticated manifest/length, cancellation, context/replay
       binding. Do not market whole-buffer envelope as streaming.

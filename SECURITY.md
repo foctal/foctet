@@ -61,13 +61,17 @@ supported-version policy will accompany the first `v1` release.
 These are tracked work items; treat each as **unsupported** until implemented,
 tested, and independently reviewed:
 
-1. **HTTP anti-replay is the application's responsibility.** The core provides
-   the context-binding primitive (`*_with_context`), but a versioned HTTP
-   protected-context schema, a bounded replay store with atomic
-   check-and-insert, and Axum/Workers integrations that *require* verified
-   context are not yet shipped. A body envelope on its own is a stateless,
-   replayable one-shot ciphertext unless the application binds and validates the
-   full request context.
+1. **HTTP anti-replay (partial).** `foctet-http` now ships a versioned protected-
+   context schema (`ProtectedContext`, `x-foctet-*` carrier headers), a bounded
+   `ReplayStore` with atomic check-and-insert (`InMemoryReplayStore`), and
+   context-bound APIs (`seal_request_with_context` / `open_request_with_context`,
+   plus an Axum adapter) that bind method/path/query/message-id/timestamp/expiry
+   into the AEAD and enforce single use. Still required before this is considered
+   production-complete: a **durable** replay store for multi-instance / serverless
+   (Cloudflare Workers) deployments, making the context-bound path the enforced
+   default, and authority/idempotency-key guidance. The low-level `seal_body` /
+   `open_body` and `seal_request` / `open_request` paths remain stateless and
+   replayable by design — use the `*_with_context` APIs in production.
 2. **No post-compromise security.** In-session rekey is symmetric traffic-key
    rotation, not a DH ratchet. See `SPEC.md` §3.2.
 3. **No datagram support.** UDP and QUIC/WebTransport datagram operation are

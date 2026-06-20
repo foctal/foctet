@@ -8,7 +8,10 @@ use ::axum::extract::Request as AxumRequest;
 use ::axum::response::Response as AxumResponse;
 use thiserror::Error;
 
-use crate::{HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer};
+use crate::{
+    ContextBinding, ContextCarrier, HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions,
+    HttpSealer, ReplayStore,
+};
 
 /// Error type for Axum adapter operations.
 #[derive(Debug, Error)]
@@ -62,6 +65,9 @@ impl AxumOpener {
     }
 
     /// Opens an encrypted Axum request body into plaintext bytes.
+    ///
+    /// Body-only; no replay protection or HTTP-context binding. Prefer
+    /// [`AxumOpener::open_request_with_context`] for production.
     pub async fn open_request(
         &self,
         request: AxumRequest,
@@ -72,6 +78,32 @@ impl AxumOpener {
             .map_err(AxumError::BodyRead)?;
         let request = http::Request::from_parts(parts, body_bytes.to_vec());
         self.opener.open_request(request).map_err(AxumError::Http)
+    }
+
+    /// Opens an encrypted Axum request, enforcing the bound HTTP protected
+    /// context, freshness, and single use against `store`.
+    ///
+    /// The request body is bounded by `max_body_bytes` before decryption, so
+    /// the library — not the application — caps memory use here.
+    pub async fn open_request_with_context<S>(
+        &self,
+        request: AxumRequest,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<http::Request<Vec<u8>>, AxumError>
+    where
+        S: ReplayStore + ?Sized,
+    {
+        let (parts, body) = request.into_parts();
+        let body_bytes = to_bytes(body, self.max_body_bytes)
+            .await
+            .map_err(AxumError::BodyRead)?;
+        let request = http::Request::from_parts(parts, body_bytes.to_vec());
+        self.opener
+            .open_request_with_context(request, store, now_secs, max_skew_secs, binding)
+            .map_err(AxumError::Http)
     }
 }
 
@@ -99,6 +131,17 @@ impl AxumSealer {
         response: http::Response<Vec<u8>>,
     ) -> Result<AxumResponse, AxumError> {
         let encrypted = self.sealer.seal_response(response)?;
+        Ok(http_response_vec_to_axum(encrypted))
+    }
+
+    /// Seals a plaintext HTTP response with bound protected context and converts
+    /// it into an Axum response.
+    pub fn seal_response_with_context(
+        &self,
+        response: http::Response<Vec<u8>>,
+        carrier: ContextCarrier,
+    ) -> Result<AxumResponse, AxumError> {
+        let encrypted = self.sealer.seal_response_with_context(response, carrier)?;
         Ok(http_response_vec_to_axum(encrypted))
     }
 }
@@ -218,6 +261,54 @@ mod tests {
             header::HeaderValue::from_static(CONTENT_TYPE)
         );
         assert_eq!(sealed.headers()[SCOPE_HEADER], BODY_ONLY_SCOPE);
+    }
+
+    #[tokio::test]
+    async fn open_axum_request_with_context_enforces_replay() {
+        use crate::{ContextBinding, ContextCarrier, InMemoryReplayStore};
+
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"axum-kid"));
+        let opener = AxumOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()), 1024 * 1024);
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 5_000u64;
+
+        let plain = Request::builder()
+            .method("POST")
+            .uri("https://example.com/axum/pay")
+            .body(b"axum charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, 300);
+        let sealed = sealer
+            .seal_request_with_context(plain, carrier, binding)
+            .expect("seal");
+
+        let make_axum = |req: &Request<Vec<u8>>| {
+            let mut builder = Request::builder()
+                .method(req.method().clone())
+                .uri(req.uri().clone());
+            for (name, value) in req.headers() {
+                builder = builder.header(name, value);
+            }
+            let r = builder.body(req.body().clone()).expect("clone");
+            let (parts, body) = r.into_parts();
+            AxumRequest::from_parts(parts, Body::from(body))
+        };
+
+        let opened = opener
+            .open_request_with_context(make_axum(&sealed), &store, now, 30, binding)
+            .await
+            .expect("first open");
+        assert_eq!(opened.body(), b"axum charge");
+
+        let err = opener
+            .open_request_with_context(make_axum(&sealed), &store, now, 30, binding)
+            .await
+            .expect_err("replay rejected");
+        assert!(matches!(err, AxumError::Http(HttpError::Replayed)));
     }
 
     #[test]

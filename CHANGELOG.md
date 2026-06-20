@@ -25,6 +25,15 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **`foctet-http`: HTTP protected-context + anti-replay.** New versioned context
+  schema (`ProtectedContext`, `ContextCarrier`, `ContextBinding`,
+  `foctet-http-ctx-v1`) that binds method/path/query/status/message-id/timestamp/
+  expiry into the body-envelope AEAD, plus a `ReplayStore` trait with atomic
+  check-and-insert and an `InMemoryReplayStore`. New high-level APIs
+  `HttpSealer::seal_request_with_context` / `HttpOpener::open_request_with_context`
+  (and response variants), and an Axum adapter
+  (`AxumOpener::open_request_with_context`, `AxumSealer::seal_response_with_context`).
+  A captured envelope can no longer be replayed or moved onto a different route.
 - `seal_body_with_context` / `open_body_with_context` /
   `open_body_for_key_id_with_context`: bind an application-supplied context into the
   body-envelope AEAD as associated data (foundation for HTTP context binding /
