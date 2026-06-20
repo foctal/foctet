@@ -158,13 +158,23 @@ enforcement remain.
 - [ ] Split APIs by shape: `ByteStream`, `MessageTransport` (raw WebSocket
       messages), `DatagramTransport`. Define guarantees per shape.
 
-### 3.3 Datagram support (NOT implemented)
-- [ ] `DatagramTransport` trait + datagram encoder/decoder.
-- [ ] Exactly one bounded frame per datagram; app-configured max datagram size
-      below transport MTU; MTU/fragmentation policy.
-- [ ] Authenticate before committing replay state; replay-window resource caps;
-      anti-amplification.
-- [ ] Adapters: quinn datagrams, browser WebTransport datagrams; loss/reorder tests.
+### 3.3 Datagram support
+- [x] Datagram encoder/decoder: `foctet_core::datagram::DatagramEndpoint`
+      (`seal`/`open`), `DatagramConfig`, `DecodedDatagram`.
+- [x] Exactly one bounded frame per datagram; app-configured max datagram size
+      (`DEFAULT_MAX_DATAGRAM_SIZE`, clamped to transport MTU by the adapter).
+- [x] Authenticate before committing replay state; replay-window resource caps;
+      per-`(key_id, stream_id)` fail-closed sequence allocation.
+- [x] quinn datagram adapter (`QuinnDatagramChannel`) + real-connection
+      roundtrip test; core loss/reorder/duplicate/oversize/forgery tests.
+- [ ] Generic `DatagramTransport` trait (transport-shape abstraction, §3.2) so
+      non-quinn datagram backends share one interface.
+- [ ] Browser WebTransport datagram adapter; raw-UDP adapter + session/discovery
+      guidance.
+- [ ] MTU/path-change handling and fragmentation policy for payloads above the
+      datagram limit (currently fail-closed `FrameTooLarge`).
+- [ ] Rekey-over-datagram story (control frames are stream-oriented today).
+- [ ] Anti-amplification guidance/limits documented for datagram adapters.
 
 ### 3.4 WebSocket / WebTransport specifics
 - [ ] Test real WebSocket message framing + a browser client; define

@@ -74,8 +74,12 @@ tested, and independently reviewed:
    replayable by design — use the `*_with_context` APIs in production.
 2. **No post-compromise security.** In-session rekey is symmetric traffic-key
    rotation, not a DH ratchet. See `SPEC.md` §3.2.
-3. **No datagram support.** UDP and QUIC/WebTransport datagram operation are
-   unimplemented. The QUIC/WebTransport helpers wrap *bidirectional streams*.
+3. **Datagram support (partial).** A dedicated datagram API
+   (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
+   size cap, authenticate-before-replay, loss/reorder tolerant) ships with a QUIC
+   datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`). Raw-UDP and
+   browser-WebTransport datagram adapters, plus a session/rekey story over
+   datagrams, are still pending.
 4. **No TypeScript/WASM SDK.** The core compiles to `wasm32-unknown-unknown`, but
    there is no `wasm-bindgen` API, npm package, generated `.d.ts`, or browser/Node
    crypto interop. `interop/minimal_decoder.ts` decodes a frame header only.

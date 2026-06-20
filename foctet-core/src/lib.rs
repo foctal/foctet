@@ -67,6 +67,8 @@ pub mod auth;
 pub mod body;
 /// Control-plane message types used inside encrypted control frames.
 pub mod control;
+/// Datagram-oriented endpoint (one frame per datagram) for UDP/QUIC/WebTransport.
+pub mod datagram;
 /// Cryptographic primitives and key-derivation helpers.
 pub mod crypto;
 /// Frame wire format, parser/encoder, and framed transport adapters.
@@ -93,6 +95,10 @@ pub use body::{
     seal_body_with_limits,
 };
 pub use control::{ControlMessage, ControlMessageKind};
+pub use datagram::{
+    DATAGRAM_FRAME_OVERHEAD, DEFAULT_MAX_DATAGRAM_SIZE, DatagramConfig, DatagramEndpoint,
+    DecodedDatagram,
+};
 pub use crypto::{
     Direction, EphemeralKeyPair, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
     derive_rekey_traffic_keys, derive_traffic_keys, encrypt_frame, make_nonce, random_session_salt,

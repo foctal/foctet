@@ -25,6 +25,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Datagram API.** `foctet_core::datagram` (`DatagramEndpoint`, `DatagramConfig`,
+  `DecodedDatagram`): one complete bounded frame per datagram, configurable max
+  datagram size, per-`(key_id, stream_id)` fail-closed sequence allocation,
+  authenticate-before-replay, and loss/reorder tolerance. A QUIC datagram adapter
+  `foctet_transport::quinn::QuinnDatagramChannel` ships with a real-connection
+  roundtrip test.
 - **`foctet-http`: HTTP protected-context + anti-replay.** New versioned context
   schema (`ProtectedContext`, `ContextCarrier`, `ContextBinding`,
   `foctet-http-ctx-v1`) that binds method/path/query/status/message-id/timestamp/
