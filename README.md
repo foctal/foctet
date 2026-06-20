@@ -8,6 +8,13 @@
 
 Transport-agnostic end-to-end encryption layer for secure data transfer.
 
+> **Status: experimental (Draft v0) — not production-ready.** Foctet implements
+> authenticated, **stream-oriented** encrypted framing, a one-shot HTTP body
+> envelope, and encrypted archives. It does **not** yet provide UDP/datagram
+> operation or a TypeScript/WASM SDK, and the wire format is unstable. See
+> [`SECURITY.md`](SECURITY.md) for the security posture and known limitations
+> before deploying.
+
 ## Crates
 
 - `foctet-core`: Framing, crypto, handshake/rekey state, replay protection.
@@ -33,10 +40,23 @@ See [`docs/recommended-deployments.md`](docs/recommended-deployments.md) for the
 
 ## What Foctet Covers
 
-- Transport-agnostic encrypted framing for byte streams and split send/recv transports.
-- Encrypted body envelopes for HTTP integrations such as `axum` and Cloudflare Workers.
+Implemented and tested today:
+
+- Transport-agnostic encrypted framing for **byte streams** and split send/recv
+  transports (TCP, QUIC/WebTransport bidirectional streams, multiplexed WebSocket).
+- Encrypted body envelopes for HTTP integrations such as `axum` and Cloudflare
+  Workers (body-only; optional context binding via `seal_body_with_context`).
 - Encrypted archive formats for files and split-file delivery.
-- Transport helpers for `quinn`, `webtrans`, `websock`, and `muxtls`.
+- Transport helpers for `quinn`, `webtrans`, `websock`, and `muxtls` (stream-only).
+
+Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
+
+- UDP / QUIC datagram / WebTransport datagram operation.
+- A TypeScript/WASM client SDK (the core compiles to WASM; there is no JS API yet).
+- A versioned HTTP protected-context + replay-store integration (the cryptographic
+  primitive exists; the full HTTP schema and replay defense do not).
+- Streaming (chunked) HTTP bodies; adapters are whole-buffer.
+- Post-compromise security (in-session rekey is symmetric rotation, not a DH ratchet).
 
 ## Quick Start
 
@@ -87,7 +107,22 @@ Use the `*_with_secrets` archive APIs only for reproducible vectors and determin
 
 ## Security Notes
 
-- Foctet fails closed on sequence/key identifier exhaustion and rejects invalid all-zero X25519 shared secrets.
-- Native handshake authentication supports optional Ed25519 transcript signatures with pinned peer identity verification.
-- For production deployments, prefer authenticated handshakes with pinned peer keys, or bind Foctet to an already-authenticated outer channel.
-- Deterministic archive secrets intentionally disable build-time randomness. Reusing them across real payloads leaks equality and key-reuse signals, so reserve them for fixtures and interoperability tests.
+See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and reporting process.
+
+- Both the async (`FoctetFramed`) and synchronous (`SyncIo`) paths **fail closed on
+  sequence/key-id exhaustion** — a frame is never emitted with a reused nonce — and
+  reject invalid all-zero X25519 shared secrets.
+- **Replay state is committed only after AEAD authentication**, so a forged frame
+  cannot desynchronize or DoS the receiver; the replay-window map is bounded.
+- The native handshake is **authenticated by default**: an unauthenticated handshake
+  requires an explicit `SessionAuthConfig::unauthenticated_for_testing()` opt-in,
+  intended only for tests or for use inside an already-authenticated outer channel.
+  Prefer authenticated handshakes with pinned peer keys for production.
+- `seal_body_with_context` / `open_body_with_context` bind an application-supplied
+  context (e.g. HTTP method/authority/path/timestamp/message-id) into the AEAD so a
+  captured envelope cannot be replayed onto a different request. The application is
+  responsible for constructing and validating that context and for its own
+  anti-replay store until the first-class HTTP schema ships.
+- Deterministic archive secrets intentionally disable build-time randomness. Reusing
+  them across real payloads leaks equality and key-reuse signals, so reserve them for
+  fixtures and interoperability tests.

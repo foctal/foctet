@@ -1,0 +1,257 @@
+# Foctet — Road to Production-Ready
+
+Tracking document for taking Foctet from **Draft v0 / experimental** to a
+**stable, independently reviewed, general-purpose production E2EE SDK** that can
+protect arbitrary TCP/UDP/QUIC/WebSocket/WebTransport payloads, HTTP bodies
+(axum, Cloudflare Workers), and files.
+
+- Source of requirements: `foctet-review.md` (review, 2026-06-20) + `SPEC.md`.
+- Legend: `[x]` done · `[ ]` not started · `[~]` partial.
+- Priorities follow the review: **P0** (release-blocking), **P1** (required for
+  v1), **P2** (hardening / scope clarity).
+- "Done" means: implemented, documented, **and** covered by tests.
+
+---
+
+## 0. Current state (snapshot)
+
+**Implemented & tested surface today:**
+
+- Stream-oriented authenticated framing (`foctet-core`): `FoctetFramed` (async,
+  tokio/futures) and `SyncIo` (blocking), profile `0x01`
+  (X25519 + HKDF-SHA-256 + XChaCha20-Poly1305), header-as-AAD.
+- Native handshake + symmetric rekey state machine (`session.rs`), Ed25519
+  identity auth with pinned peer (`auth.rs`).
+- Replay windows per `(key_id, stream_id)` (`replay.rs`).
+- One-shot `application/foctet` body envelope (`body.rs`) + optional context
+  binding.
+- Encrypted archives, single & split (`foctet-archive`).
+- HTTP body adapters for axum + Workers (`foctet-http`), whole-buffer.
+- Transport helpers for quinn / webtransport / websocket / muxtls
+  (**bidirectional streams only**).
+- Vectors, property tests, 2 fuzz targets, CI (lint/test/wasm-check).
+
+**Recently fixed (see `CHANGELOG.md` → Unreleased):**
+
+- [x] **P0** SyncIo nonce reuse on sequence exhaustion → fail-closed.
+- [x] **P1** Replay state committed only after AEAD authentication (all paths).
+- [x] **P1** Native handshake authenticated-by-default (explicit opt-in for
+  unauthenticated).
+- [x] **P2** Bounded replay-window map.
+- [x] Body-envelope context-binding primitive (`*_with_context`).
+- [x] `SECURITY.md`; README/SPEC claims corrected.
+
+**Not production-ready until every P0 and P1 below is `[x]` and externally
+reviewed.** Do not use "production-ready" / "v1 stable" wording before
+§8 release gates are all green.
+
+---
+
+## 1. P0 — Release-blocking
+
+### 1.1 Synchronous nonce reuse — **DONE**
+- [x] `SyncIo::send_with_key` uses `checked_add` → `SequenceExhausted`
+      (`foctet-core/src/io.rs`).
+- [x] Regression test at counter near `u64::MAX` proving no wrapped frame
+      emitted (`io.rs::sync_send_fails_closed_on_sequence_exhaustion`).
+- [ ] Follow-up: unify sequence allocation into one shared internal type so sync
+      and async cannot diverge again (currently duplicated logic, kept in sync
+      by tests).
+
+### 1.2 HTTP body envelopes — replay protection & HTTP-context binding
+Foundation done; the first-class HTTP protocol is the big remaining P0.
+- [x] Core AEAD context primitive: `seal_body_with_context` /
+      `open_body_with_context` / `open_body_for_key_id_with_context`.
+- [ ] Define a **versioned HTTP protected-context schema** (canonical, length-
+      delimited, domain-separated) authenticating at minimum:
+  - [ ] protocol purpose + version + direction (request vs response binding)
+  - [ ] method, normalized authority, normalized path, query (or an application
+        route identifier)
+  - [ ] timestamp + expiry (skew policy)
+  - [ ] cryptographically random message ID
+  - [ ] optional idempotency key + selected-header binding
+- [ ] Build the context bytes from `http::Request`/`Response` parts in
+      `foctet-http` and feed them through `*_with_context`.
+- [ ] **`ReplayStore` trait** with an atomic check-and-insert contract
+      (message ID + expiry), bounded size, and TTL eviction.
+  - [ ] In-memory adapter (single process).
+  - [ ] Durable adapter pattern for Workers (Durable Object / KV) — see 5.2.
+- [ ] Make context-bound + replay-protected APIs the **default** in `foctet-http`;
+      relabel raw `seal_body`/`open_body` as low-level/stateless.
+- [ ] Tests: replay of a captured request is rejected; cross-route substitution
+      rejected; expired context rejected; clock-skew window enforced.
+- **Gate:** block production HTTP/Workers recommendations until done.
+
+---
+
+## 2. P1 — Required for v1 (protocol & core)
+
+### 2.1 Native handshake authentication — **DONE (revisit at API-freeze)**
+- [x] Fail-closed default; explicit `unauthenticated_for_testing()` /
+      `allow_unauthenticated()`.
+- [x] Downgrade/MITM negative tests (`session.rs`).
+- [x] All transport convenience helpers route through explicit opt-in.
+- [ ] Introduce a typed `AuthenticatedPeer` / `ChannelBinding` abstraction so an
+      outer-channel binding (e.g. TLS exporter / channel id) can substitute for
+      Foctet identity auth, instead of the current boolean opt-in.
+- [ ] Consider removing/renaming the no-auth transport convenience constructors
+      at API-freeze (currently they call `unauthenticated_for_testing()`).
+
+### 2.2 Replay state after authentication — **DONE**
+- [x] Reordered in `io.rs` (`recv`, `recv_application_with_session`) and
+      `frame.rs::try_decode`.
+- [x] Forged-high-sequence-then-valid regression tests (sync + async).
+
+### 2.3 Rekey vs post-compromise security
+- [x] SPEC/README/SECURITY now state rekey = symmetric rotation, **no PCS**.
+- [ ] **Decide and document the target**: keep symmetric rekey (accurately
+      specified) *or* design an authenticated **ephemeral-DH ratchet** with:
+  - [ ] fresh forward-secret DH step per rekey
+  - [ ] transcript binding, concurrency/collision rules, rollback behavior
+  - [ ] out-of-order rekey delivery handling + vectors
+  - [ ] independent cryptographic review **before** shipping (do not improvise)
+
+### 2.4 Centralized protocol limits (P2 in review, do early)
+- [ ] One public `ProtocolLimits` covering: max ciphertext, max plaintext,
+      buffered bytes, distinct stream IDs, replay windows, retained keys, control
+      message size, handshake duration, outstanding work.
+- [ ] Apply consistently to sync, async, datagram, HTTP, archive APIs.
+- [x] Replay-window count cap (`DEFAULT_MAX_REPLAY_WINDOWS`) — first piece.
+- [ ] Bound outbound plaintext/frame length before `u32` ct_len conversion.
+- [ ] Handshake read **timeout** + connection-level rate limit + cancellation.
+
+### 2.5 Key-material ergonomics
+- [ ] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
+- [ ] Stop returning raw secret-key byte copies (`IdentityKeyPair::secret_key_bytes`,
+      HTTP `[u8;32]` recipient secrets in `foctet-http/src/config.rs`).
+- [ ] Key-provider / keystore abstraction: separate key *handles* from bytes;
+      key IDs with rotation policy; optional hardware-backed path.
+- [ ] Document that session state MUST NOT be restored with reset counters under
+      the same traffic key; gate persistence until designed safely.
+
+### 2.6 Negative / protocol tests (expand)
+- [ ] nonce exhaustion (have basic), malformed/forged frames, control/data flag
+      confusion, rekey collisions, out-of-order rekey, rollback, replay poisoning.
+
+---
+
+## 3. P1 — Transports (finish each; don't broaden claims)
+
+### 3.1 Byte-stream conformance suite
+- [ ] One shared conformance test suite run against **every** byte-stream adapter:
+      TCP, quinn bi-streams, WebTransport bi-streams, multiplexed WebSocket.
+- [ ] Currently only in-memory split I/O + a couple of adapters are tested; add
+      runnable integration tests per advertised adapter.
+- [ ] Publish an explicit **transport support matrix** (see `README`/`SPEC §5`).
+
+### 3.2 Transport shape split
+- [ ] Split APIs by shape: `ByteStream`, `MessageTransport` (raw WebSocket
+      messages), `DatagramTransport`. Define guarantees per shape.
+
+### 3.3 Datagram support (NOT implemented)
+- [ ] `DatagramTransport` trait + datagram encoder/decoder.
+- [ ] Exactly one bounded frame per datagram; app-configured max datagram size
+      below transport MTU; MTU/fragmentation policy.
+- [ ] Authenticate before committing replay state; replay-window resource caps;
+      anti-amplification.
+- [ ] Adapters: quinn datagrams, browser WebTransport datagrams; loss/reorder tests.
+
+### 3.4 WebSocket / WebTransport specifics
+- [ ] Test real WebSocket message framing + a browser client; define
+      mux/backpressure behavior.
+- [ ] Test native **and** browser WebTransport; document stream-only scope until
+      datagrams land.
+
+---
+
+## 4. P1 — HTTP & Workers (depends on §1.2)
+
+- [ ] Axum middleware/extractors that **require** verified protected context and
+      enforce body limits + backpressure (don't leave limits app-dependent).
+- [ ] Safe default body limits documented now (interim) — current default allows
+      64 MiB ciphertext with no framework limit set by the library.
+- [ ] Streaming HTTP mode (only after design + review): per-chunk AEAD, unique
+      nonces, final authenticated manifest/length, cancellation, context/replay
+      binding. Do not market whole-buffer envelope as streaming.
+- [ ] End-to-end Workers test under `wrangler`: key lookup, durable replay store,
+      failure handling, response binding, key rotation, operational guide.
+
+---
+
+## 5. P1 — WASM / TypeScript SDK (NOT implemented)
+
+- [ ] Choose supported JS environments: browser, Node, Workers (+ optional
+      Deno/Bun).
+- [ ] Minimal versioned WASM API via `wasm-bindgen` with `Uint8Array` values and
+      generated `.d.ts`; no accidental panics across the boundary; documented
+      ownership/zeroization limits; avoid exposing raw secret-key bytes where a
+      host-backed non-extractable key is possible.
+- [ ] Implement the full specified subset (sealed envelope + context/replay, or
+      framed sessions) — header-only decoding (`interop/minimal_decoder.ts`) is
+      not interoperability.
+- [ ] npm package published **only after** browser/Node/Workers integration tests
+      decrypt the **same canonical vectors** as Rust.
+- [ ] Random-source + panic-behavior tests on supported wasm targets.
+
+---
+
+## 6. P1 — Security assurance & supply chain (CI)
+
+- [ ] `cargo-audit` (advisory scan) in CI; fail on vulnerable deps.
+- [ ] License/source policy (`cargo-deny`).
+- [ ] Reproducible locked builds; committed `Cargo.lock` checks.
+- [ ] MSRV policy + CI job.
+- [ ] Miri / sanitizers where applicable.
+- [ ] Fuzzing in CI with a corpus + time budget. Add fuzz targets beyond
+      frame/archive: **body envelope, control messages, handshake state machine,
+      replay behavior, HTTP adapter parsing, transport framing**.
+- [ ] Coverage of all transport integrations; mutation/negative protocol tests.
+- [ ] Cross-implementation (independent decoder) interop tests.
+- [ ] Vulnerability disclosure policy + security contact (started in
+      `SECURITY.md`) — finalize contact + response SLA.
+- [ ] **Independent cryptographic design & implementation review** (mandatory
+      before v1; covers protocol, Rust impl, WASM/JS boundary, HTTP mode).
+
+---
+
+## 7. P2 — Stability, spec, scope
+
+- [ ] Complete **normative** spec matching code + vectors; version it.
+- [ ] Version-negotiation / compatibility / deprecation policy.
+- [ ] Canonical vector suite verified by an **independent** implementation (not
+      generated and checked within the same Rust workspace).
+- [ ] Full threat model doc: active MITM, endpoint compromise, relay compromise,
+      replay, rollback, metadata leakage, DoS, key loss.
+- [ ] Key lifecycle / rotation / incident-response / supported-version policy.
+- [ ] Observability hooks (without exposing secrets).
+
+---
+
+## 8. Release gates for "production-ready" / v1
+
+All must be true before using either phrase:
+
+- [ ] Every P0 and P1 finding fixed and regression-tested.
+- [ ] Spec complete, normative, versioned, and matches code + vectors.
+- [ ] Authenticated peer identity or explicit authenticated-channel binding is
+      mandatory for production constructors.
+- [ ] HTTP has authenticated protected context + replay defense, or is explicitly
+      excluded from the production promise.
+- [ ] Advertised transport matrix has real implementations + integration/
+      conformance tests.
+- [ ] WASM/TypeScript truly shipped + tested, or excluded from the claim.
+- [ ] Independent security review complete; findings resolved or publicly tracked.
+- [ ] cargo-audit/license checks, fuzzing, reproducible builds, CI coverage, and
+      a vulnerability-response process active.
+- [ ] Documented compatibility, deprecation, key-management, incident-response,
+      and supported-version policies.
+
+---
+
+## Suggested next step
+
+The highest-leverage P0 remaining is **§1.2 (HTTP protected-context schema +
+`ReplayStore` + axum/Workers integration)** — it turns the existing body-envelope
+primitive into safe, replay-resistant HTTP E2EE, which is the most-requested
+surface (axum, Cloudflare Workers). Recommended order:
+`§1.2 → §4 → §5 (WASM/TS) → §3.3 (datagrams) → §2.3 (ratchet decision) → §6 review`.

@@ -4,7 +4,8 @@ Foctet Protocol Specification (Draft v0)
 0\. Status
 ----------
 
-*   **Status**: Draft v0 (work-in-progress)
+*   **Status**: Draft v0 (work-in-progress). **Not production-ready.** See `SECURITY.md` for the current security posture, threat model, and known limitations.
+*   **Implementation status**: This specification describes the target protocol. Some sections describe behavior that is **specified but not yet implemented** in this repository. As of this revision, the implemented surface is **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket) plus the one-shot body envelope and archive formats. **Datagram operation (UDP, QUIC/WebTransport datagrams) is NOT implemented**, and there is **no TypeScript/WASM SDK** beyond compile checks and a header-only decoder. Such sections are marked "(not yet implemented)".
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
@@ -21,7 +22,7 @@ Foctet Protocol Specification (Draft v0)
 ### 1.1 Primary Goals
 
 *   **E2EE / Zero-Knowledge**: Intermediaries (relays, storage providers) MUST NOT be able to decrypt payloads.
-*   **Transport-agnostic**: Works over QUIC, WebTransport, TLS-TCP, WSS, plain TCP/UDP, or any byte stream / datagram.
+*   **Transport-agnostic**: Designed to work over QUIC, WebTransport, TLS-TCP, WSS, plain TCP, or any byte stream. Datagram transports (UDP, QUIC/WebTransport datagrams) are a design goal but are **not yet implemented** (see §5.1).
 *   **Thin core, strong invariants**: Minimal primitives with strict security guarantees.
 *   **Archiveable**: Encrypted data MUST be representable as a file (or multiple files) for offline distribution and later reassembly.
 
@@ -62,7 +63,8 @@ Normative keywords: **MUST**, **SHOULD**, **MAY**.
 *   **Confidentiality**: Payload plaintext not revealed to relays/storage.
 *   **Integrity & Authenticity**: Endpoints detect tampering/injection.
 *   **Replay protection**: Endpoints detect replayed frames within a session.
-*   **Forward secrecy**: Session compromise does not reveal past sessions (and ideally limits within-session exposure via rekey).
+*   **Forward secrecy (between sessions)**: A fresh ephemeral X25519 handshake per session means compromise of one session's keys does not reveal other sessions' traffic.
+*   **Within-session rekey is symmetric traffic-key rotation, NOT post-compromise security (PCS).** Rekey derives each new traffic key from the original handshake shared secret plus a public rekey salt via HKDF. It provides key separation and bounds the volume protected by any single key, but an adversary who compromises the live in-session shared secret can derive current and future traffic keys from observed rekey controls. A DH ratchet that provides PCS is **not implemented**; do not rely on rekey for post-compromise recovery.
 *   **Key separation**: Distinct keys for directions and purposes (data vs control).
 
 ### 3.3 Misuse Cases (Implementation Risks)
@@ -106,8 +108,8 @@ Relays forward frames without decryption and SHOULD NOT require any Foctet aware
 
 Foctet Core can run over:
 
-*   **Byte stream** transports (TCP, TLS-TCP, WSS): requires Foctet framing delimiter/length prefix.
-*   **Datagram** transports (UDP, QUIC datagram): each datagram MUST contain one or more complete frames.
+*   **Byte stream** transports (TCP, TLS-TCP, WSS, QUIC/WebTransport bidirectional streams): requires Foctet framing delimiter/length prefix. **This is the implemented surface.**
+*   **Datagram** transports (UDP, QUIC datagram, WebTransport datagram) — **(not yet implemented)**: each datagram MUST contain exactly one complete, bounded frame; the maximum datagram size MUST be configured below the transport MTU; replay state MUST be committed only after AEAD authentication; and anti-amplification limits MUST be applied. A dedicated datagram API (separate from the byte-stream API) is required before this is supported and MUST NOT be approximated by reusing the stream API.
 
 Transport MUST provide a method to send/receive bytes. Reliability is not required but affects upper-layer behavior.
 

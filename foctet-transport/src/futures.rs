@@ -86,7 +86,7 @@ impl FuturesTransportBuilder {
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let session =
-            run_initiator_handshake(&mut io, thresholds, SessionAuthConfig::default()).await?;
+            run_initiator_handshake(&mut io, thresholds, SessionAuthConfig::unauthenticated_for_testing()).await?;
         self.build(io, session)
     }
 
@@ -114,7 +114,7 @@ impl FuturesTransportBuilder {
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let session =
-            run_responder_handshake(&mut io, thresholds, SessionAuthConfig::default()).await?;
+            run_responder_handshake(&mut io, thresholds, SessionAuthConfig::unauthenticated_for_testing()).await?;
         self.build(io, session)
     }
 

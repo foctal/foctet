@@ -30,12 +30,16 @@
 //!
 //! # Authentication Guidance
 //!
+//! - The native handshake is authenticated by default: a default
+//!   [`SessionAuthConfig`] fails closed and will reject an unauthenticated peer.
 //! - For production use, prefer [`SessionAuthConfig`] with local identity keys,
 //!   pinned [`PeerIdentity`] values, and
 //!   `SessionAuthConfig::require_peer_authentication(true)`.
-//! - If Foctet runs inside an already-authenticated outer channel, you may use
-//!   the native handshake without identity signatures, but the outer channel
-//!   then carries the peer-authentication responsibility.
+//! - If Foctet runs inside an already-authenticated outer channel, you may run
+//!   the native handshake without identity signatures by explicitly opting in
+//!   with `SessionAuthConfig::unauthenticated_for_testing()` (or
+//!   `allow_unauthenticated(true)`); the outer channel then carries the
+//!   peer-authentication responsibility.
 //! - Sequence numbers and rekey identifiers fail closed on exhaustion; callers
 //!   should treat those errors as terminal and establish a fresh session.
 //!
@@ -84,7 +88,8 @@ pub use auth::{
 };
 pub use body::{
     BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,
-    open_body_for_key_id, open_body_for_key_id_with_limits, open_body_with_limits, seal_body,
+    open_body_for_key_id, open_body_for_key_id_with_context, open_body_for_key_id_with_limits,
+    open_body_with_context, open_body_with_limits, seal_body, seal_body_with_context,
     seal_body_with_limits,
 };
 pub use control::{ControlMessage, ControlMessageKind};
@@ -97,7 +102,9 @@ pub use frame::{
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
 };
 pub use payload::{Tlv, decode_tlvs, encode_tlvs, tlv_type};
-pub use replay::{DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow};
+pub use replay::{
+    DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow,
+};
 pub use secure_channel::{AsyncSecureChannel, SecureChannel};
 pub use session::{HandshakeRole, RekeyThresholds, Session, SessionState};
 
@@ -170,6 +177,9 @@ pub enum CoreError {
     /// Frame sequence is outside replay window.
     #[error("frame is outside replay window")]
     ReplayWindowExceeded,
+    /// Too many distinct `(key_id, stream_id)` replay windows are being tracked.
+    #[error("replay window capacity exceeded")]
+    ReplayCapacityExceeded,
     /// Frame exceeds configured size limits.
     #[error("frame exceeds configured limit")]
     FrameTooLarge,

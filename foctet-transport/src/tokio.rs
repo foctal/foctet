@@ -85,7 +85,7 @@ impl TokioTransportBuilder {
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let session =
-            run_initiator_handshake(&mut io, thresholds, SessionAuthConfig::default()).await?;
+            run_initiator_handshake(&mut io, thresholds, SessionAuthConfig::unauthenticated_for_testing()).await?;
         self.build(io, session)
     }
 
@@ -113,7 +113,7 @@ impl TokioTransportBuilder {
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let session =
-            run_responder_handshake(&mut io, thresholds, SessionAuthConfig::default()).await?;
+            run_responder_handshake(&mut io, thresholds, SessionAuthConfig::unauthenticated_for_testing()).await?;
         self.build(io, session)
     }
 
@@ -298,15 +298,21 @@ where
 
 #[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
-    use foctet_core::{RekeyThresholds, Session};
+    use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
 
     use super::TokioTransportBuilder;
     use crate::TransportConfig;
 
     fn make_session_pair() -> Result<(Session, Session), foctet_core::CoreError> {
         let thresholds = RekeyThresholds::default();
-        let (mut initiator, hello) = Session::new_initiator(thresholds.clone());
-        let mut responder = Session::new_responder(thresholds);
+        let (mut initiator, hello) = Session::new_initiator_with_auth(
+            thresholds.clone(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut responder = Session::new_responder_with_auth(
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
         let server_hello = responder
             .handle_control(&hello)?
             .expect("responder returns server hello");

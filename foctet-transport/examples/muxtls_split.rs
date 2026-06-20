@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ::muxtls::{ClientConfig, Endpoint, ServerConfig};
 use clap::Parser;
-use foctet_core::{RekeyThresholds, Session};
+use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
 use foctet_transport::{TokioTransportBuilder, TransportConfig};
 use rustls::pki_types::CertificateDer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,8 +26,16 @@ struct Args {
 
 fn make_session_pair() -> Result<(Session, Session), foctet_core::CoreError> {
     let thresholds = RekeyThresholds::default();
-    let (mut initiator, hello) = Session::new_initiator(thresholds.clone());
-    let mut responder = Session::new_responder(thresholds);
+    // The mutually authenticated muxtls/TLS transport authenticates the peer,
+    // so the inner Foctet handshake runs in explicit unauthenticated mode.
+    let (mut initiator, hello) = Session::new_initiator_with_auth(
+        thresholds.clone(),
+        SessionAuthConfig::unauthenticated_for_testing(),
+    );
+    let mut responder = Session::new_responder_with_auth(
+        thresholds,
+        SessionAuthConfig::unauthenticated_for_testing(),
+    );
 
     let server_hello = responder
         .handle_control(&hello)?

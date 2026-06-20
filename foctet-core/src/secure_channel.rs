@@ -307,7 +307,7 @@ mod tests {
         time::Duration,
     };
 
-    use crate::{ControlMessage, RekeyThresholds, Session};
+    use crate::{ControlMessage, RekeyThresholds, Session, SessionAuthConfig};
 
     use super::SecureChannel;
 
@@ -362,8 +362,14 @@ mod tests {
             max_previous_keys: 2,
         };
 
-        let (mut initiator, hello) = Session::new_initiator(thresholds.clone());
-        let mut responder = Session::new_responder(thresholds);
+        let (mut initiator, hello) = Session::new_initiator_with_auth(
+            thresholds.clone(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut responder = Session::new_responder_with_auth(
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
         let server_hello = responder
             .handle_control(&hello)
             .expect("responder handle client hello")
@@ -410,8 +416,14 @@ mod tests {
     #[test]
     fn handshake_exchange_is_control_messages() {
         let thresholds = RekeyThresholds::default();
-        let (_initiator, hello) = Session::new_initiator(thresholds.clone());
-        let mut responder = Session::new_responder(thresholds);
+        let (_initiator, hello) = Session::new_initiator_with_auth(
+            thresholds.clone(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut responder = Session::new_responder_with_auth(
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
         let response = responder
             .handle_control(&hello)
             .expect("valid client hello")

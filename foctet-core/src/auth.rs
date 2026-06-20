@@ -107,17 +107,48 @@ impl HandshakeAuth {
 }
 
 /// Session-level handshake authentication configuration.
+///
+/// # Safe by default
+///
+/// A default ([`SessionAuthConfig::new`]) configuration **fails closed**: the
+/// native handshake will not complete unless the peer presents a valid
+/// authenticated handshake. To run an intentionally unauthenticated handshake —
+/// for example inside an already-authenticated outer channel such as mutually
+/// authenticated TLS, or in tests — you must explicitly opt in with
+/// [`SessionAuthConfig::unauthenticated_for_testing`] (or
+/// [`SessionAuthConfig::allow_unauthenticated`]). This makes the active
+/// man-in-the-middle exposure of an unauthenticated ephemeral handshake an
+/// explicit, auditable choice rather than a silent default.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionAuthConfig {
     local_identity: Option<IdentityKeyPair>,
     peer_identity: Option<PeerIdentity>,
     require_peer_authentication: bool,
+    allow_unauthenticated: bool,
 }
 
 impl SessionAuthConfig {
-    /// Creates an empty authentication configuration.
+    /// Creates an empty, fail-closed authentication configuration.
+    ///
+    /// Without a pinned [`PeerIdentity`] or an explicit
+    /// [`SessionAuthConfig::allow_unauthenticated`] opt-in, the handshake will
+    /// reject a peer that does not authenticate.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a configuration that explicitly permits an unauthenticated
+    /// handshake.
+    ///
+    /// Only use this when peer authentication is guaranteed by an outer channel
+    /// (e.g. mutually authenticated TLS) or in tests. An unauthenticated Foctet
+    /// handshake on an untrusted transport is vulnerable to an active
+    /// man-in-the-middle.
+    pub fn unauthenticated_for_testing() -> Self {
+        Self {
+            allow_unauthenticated: true,
+            ..Self::default()
+        }
     }
 
     /// Attaches a local identity used to sign native handshake messages.
@@ -136,6 +167,21 @@ impl SessionAuthConfig {
     pub fn require_peer_authentication(mut self, require: bool) -> Self {
         self.require_peer_authentication = require;
         self
+    }
+
+    /// Explicitly permits (or forbids) completing an unauthenticated handshake.
+    ///
+    /// See [`SessionAuthConfig::unauthenticated_for_testing`] for the safety
+    /// implications. This is ignored when peer authentication is required or a
+    /// peer identity is pinned (those always demand authentication).
+    pub fn allow_unauthenticated(mut self, allow: bool) -> Self {
+        self.allow_unauthenticated = allow;
+        self
+    }
+
+    /// Returns whether an unauthenticated handshake is explicitly permitted.
+    pub fn allows_unauthenticated(&self) -> bool {
+        self.allow_unauthenticated
     }
 
     /// Returns the local identity, if configured.

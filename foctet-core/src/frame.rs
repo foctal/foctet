@@ -523,19 +523,23 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         let frame_bytes = self.rx.split_to(total);
         let frame = Frame::from_bytes(&frame_bytes)?;
 
-        self.replay.check_and_record(
-            frame.header.key_id,
-            frame.header.stream_id,
-            frame.header.seq,
-        )?;
-
         let keys = self
             .key_for_id(frame.header.key_id)
             .ok_or(CoreError::UnexpectedKeyId {
                 expected: self.active_key_id,
                 actual: frame.header.key_id,
             })?;
+
+        // Authenticate the ciphertext *before* committing replay-window state so
+        // an unauthenticated frame carrying an attacker-chosen sequence number
+        // cannot permanently advance the window and reject later legitimate
+        // frames (receive-side desynchronization / DoS).
         let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
+        self.replay.check_and_record(
+            frame.header.key_id,
+            frame.header.stream_id,
+            frame.header.seq,
+        )?;
 
         Ok(Some(DecodedFrame {
             header: frame.header,
@@ -753,7 +757,10 @@ mod tests {
     use futures_sink::Sink;
 
     use crate::{
-        crypto::{Direction, EphemeralKeyPair, derive_traffic_keys, random_session_salt},
+        CoreError,
+        crypto::{
+            Direction, EphemeralKeyPair, derive_traffic_keys, encrypt_frame, random_session_salt,
+        },
         io::{PollRead, PollWrite},
     };
 
@@ -842,5 +849,39 @@ mod tests {
         assert_eq!(item.plaintext, b"hello framed");
         assert_eq!(item.header.stream_id, 9);
         assert_eq!(item.header.flags, flags::IS_CONTROL);
+    }
+
+    #[test]
+    fn async_replay_state_committed_only_after_auth() {
+        let eph_a = EphemeralKeyPair::generate();
+        let eph_b = EphemeralKeyPair::generate();
+        let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
+        let salt = random_session_salt();
+        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+
+        let valid = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, b"hello").expect("valid frame");
+        let forged =
+            encrypt_frame(&keys, Direction::C2S, 0, 0, 1_000_000, b"forged").expect("forged frame");
+        let mut forged_bytes = forged.to_bytes();
+        let last = forged_bytes.len() - 1;
+        forged_bytes[last] ^= 0xff; // corrupt the AEAD tag
+
+        let io = MemoryIo::default();
+        let mut framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::S2C);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        framed.get_mut().push_inbound(&forged_bytes);
+        match Pin::new(&mut framed).poll_next(&mut cx) {
+            Poll::Ready(Some(Err(CoreError::Aead))) => {}
+            other => panic!("expected aead failure, got {other:?}"),
+        }
+
+        // The forged high sequence must not have advanced the replay window.
+        framed.get_mut().push_inbound(&valid.to_bytes());
+        match Pin::new(&mut framed).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => assert_eq!(frame.plaintext, b"hello"),
+            other => panic!("expected the genuine seq=0 frame, got {other:?}"),
+        }
     }
 }

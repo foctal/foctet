@@ -482,9 +482,17 @@ impl<T: Read + Write> SyncIo<T> {
             self.next_seq,
             plaintext,
         )?;
-        self.next_seq = self.next_seq.wrapping_add(1);
+        // Fail closed on sequence exhaustion: never wrap the counter, otherwise
+        // the `(key_id, stream_id, seq)` nonce would repeat under the same key.
+        // This mirrors the async `FoctetFramed` path exactly so the two
+        // implementations cannot diverge in their exhaustion policy.
+        let next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or(CoreError::SequenceExhausted)?;
         self.io.write_all(&frame.to_bytes())?;
         self.io.flush()?;
+        self.next_seq = next_seq;
         Ok(())
     }
 
@@ -530,9 +538,6 @@ impl<T: Read + Write> SyncIo<T> {
         let mut ciphertext = vec![0u8; ct_len];
         self.io.read_exact(&mut ciphertext)?;
 
-        self.replay
-            .check_and_record(header.key_id, header.stream_id, header.seq)?;
-
         let keys = self
             .key_for_id(header.key_id)
             .ok_or(CoreError::UnexpectedKeyId {
@@ -540,8 +545,18 @@ impl<T: Read + Write> SyncIo<T> {
                 actual: header.key_id,
             })?;
 
+        // Authenticate the ciphertext *before* committing replay-window state.
+        // Recording an attacker-chosen sequence number prior to AEAD
+        // verification would let a forged frame permanently advance the window
+        // and desynchronize/DoS the receiver. See replay.rs and SPEC.md.
         let frame = Frame { header, ciphertext };
-        decrypt_frame_with_key(keys, self.inbound_direction, &frame)
+        let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
+        self.replay.check_and_record(
+            frame.header.key_id,
+            frame.header.stream_id,
+            frame.header.seq,
+        )?;
+        Ok(plaintext)
     }
 
     /// Sends one control message.
@@ -628,9 +643,6 @@ impl<T: Read + Write> SyncIo<T> {
         let mut ciphertext = vec![0u8; ct_len];
         self.io.read_exact(&mut ciphertext)?;
 
-        self.replay
-            .check_and_record(header.key_id, header.stream_id, header.seq)?;
-
         let keys = self
             .key_for_id(header.key_id)
             .ok_or(CoreError::UnexpectedKeyId {
@@ -638,8 +650,14 @@ impl<T: Read + Write> SyncIo<T> {
                 actual: header.key_id,
             })?;
 
+        // Authenticate before committing replay state (see `recv`).
         let frame = Frame { header, ciphertext };
         let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
+        self.replay.check_and_record(
+            frame.header.key_id,
+            frame.header.stream_id,
+            frame.header.seq,
+        )?;
 
         if frame.header.flags & crate::frame::flags::IS_CONTROL != 0 {
             let msg = ControlMessage::decode(&plaintext)?;
@@ -658,5 +676,106 @@ impl<T: Read + Write> SyncIo<T> {
 impl From<CoreError> for std::io::Error {
     fn from(value: CoreError) -> Self {
         std::io::Error::other(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::io::{Read, Write};
+
+    use super::SyncIo;
+    use crate::CoreError;
+    use crate::crypto::{
+        Direction, EphemeralKeyPair, TrafficKeys, derive_traffic_keys, encrypt_frame,
+        random_session_salt,
+    };
+
+    #[derive(Default)]
+    struct MockIo {
+        inbound: VecDeque<u8>,
+        outbound: Vec<u8>,
+    }
+
+    impl Read for MockIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.inbound.is_empty() {
+                return Ok(0);
+            }
+            let n = buf.len().min(self.inbound.len());
+            for slot in buf.iter_mut().take(n) {
+                *slot = self.inbound.pop_front().expect("inbound byte");
+            }
+            Ok(n)
+        }
+    }
+
+    impl Write for MockIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.outbound.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_keys() -> TrafficKeys {
+        let a = EphemeralKeyPair::generate();
+        let b = EphemeralKeyPair::generate();
+        let ss = a.shared_secret(b.public).expect("shared secret");
+        let salt = random_session_salt();
+        derive_traffic_keys(&ss, &salt, 1).expect("traffic keys")
+    }
+
+    #[test]
+    fn sync_send_fails_closed_on_sequence_exhaustion() {
+        let keys = test_keys();
+        let mut io = SyncIo::new(MockIo::default(), keys, Direction::S2C, Direction::C2S);
+
+        // Drive the outbound counter to the last representable sequence.
+        io.next_seq = u64::MAX - 1;
+        io.send(b"last").expect("final valid frame must be emitted");
+        assert_eq!(io.next_seq, u64::MAX);
+        let emitted = io.io.outbound.len();
+        assert!(emitted > 0);
+
+        // The next send would have to reuse a nonce; it must fail closed and
+        // must NOT emit any wrapped frame.
+        let err = io.send(b"overflow").expect_err("must refuse to wrap the nonce");
+        assert!(matches!(err, CoreError::SequenceExhausted));
+        assert_eq!(io.io.outbound.len(), emitted, "no wrapped frame may be written");
+        assert_eq!(io.next_seq, u64::MAX);
+    }
+
+    #[test]
+    fn sync_replay_state_committed_only_after_auth() {
+        let keys = test_keys();
+
+        // Receiver treats inbound traffic as the C2S direction, so the peer
+        // encrypts with C2S keys.
+        let valid = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, b"hello").expect("valid frame");
+        let forged =
+            encrypt_frame(&keys, Direction::C2S, 0, 0, 1_000_000, b"forged").expect("forged frame");
+        let mut forged_bytes = forged.to_bytes();
+        let last = forged_bytes.len() - 1;
+        forged_bytes[last] ^= 0xff; // corrupt the AEAD tag -> authentication failure
+
+        let mut mock = MockIo::default();
+        mock.inbound.extend(forged_bytes.iter().copied());
+        mock.inbound.extend(valid.to_bytes().iter().copied());
+
+        let mut io = SyncIo::new(mock, keys, Direction::C2S, Direction::S2C);
+
+        // The forged high-sequence frame must fail authentication.
+        let err = io.recv().expect_err("forged frame must fail authentication");
+        assert!(matches!(err, CoreError::Aead));
+
+        // Because replay state is only committed after authentication, the
+        // forged seq=1_000_000 must NOT have advanced the window. The genuine
+        // seq=0 frame is therefore still accepted.
+        let plaintext = io.recv().expect("legitimate low-sequence frame after forgery");
+        assert_eq!(plaintext, b"hello");
     }
 }

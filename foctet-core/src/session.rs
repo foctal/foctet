@@ -450,12 +450,16 @@ impl Session {
                 }
                 Ok(true)
             }
+            // Peer presented no authentication. Fail closed unless the caller
+            // explicitly opted into an unauthenticated handshake. A pinned peer
+            // identity or an explicit requirement always demands authentication.
             None if self.auth.requires_peer_authentication()
                 || self.auth.peer_identity().is_some() =>
             {
                 Err(CoreError::MissingPeerAuthentication)
             }
-            None => Ok(false),
+            None if self.auth.allows_unauthenticated() => Ok(false),
+            None => Err(CoreError::MissingPeerAuthentication),
         }
     }
 }
@@ -531,8 +535,14 @@ mod tests {
 
     #[test]
     fn session_handshake_and_rekey() {
-        let (mut client, hello) = Session::new_initiator(RekeyThresholds::default());
-        let mut server = Session::new_responder(RekeyThresholds::default());
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
 
         let server_hello = server
             .handle_control(&hello)
@@ -581,5 +591,65 @@ mod tests {
 
         assert!(client.peer_authenticated());
         assert!(server.peer_authenticated());
+    }
+
+    #[test]
+    fn responder_rejects_unauthenticated_hello_by_default() {
+        // A default (fail-closed) responder must refuse a ClientHello that
+        // carries no authentication, even though the transcript binding is
+        // valid. This is the baseline downgrade/MITM defense.
+        let (_client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut server = Session::new_responder(RekeyThresholds::default());
+        let err = server
+            .handle_control(&hello)
+            .expect_err("default responder must reject unauthenticated hello");
+        assert!(matches!(err, CoreError::MissingPeerAuthentication));
+        assert_eq!(server.state(), SessionState::WaitingPeerHello);
+    }
+
+    #[test]
+    fn initiator_rejects_unauthenticated_server_hello_by_default() {
+        // The initiator is fail-closed: an unauthenticated ServerHello is
+        // rejected unless the caller explicitly allowed unauthenticated mode.
+        let (mut client, hello) = Session::new_initiator(RekeyThresholds::default());
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("responder accepts hello in unauthenticated test mode")
+            .expect("server hello");
+        let err = client
+            .handle_control(&server_hello)
+            .expect_err("default initiator must reject unauthenticated server hello");
+        assert!(matches!(err, CoreError::MissingPeerAuthentication));
+    }
+
+    #[test]
+    fn unauthenticated_handshake_requires_explicit_opt_in_on_both_sides() {
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handle hello")
+            .expect("server hello");
+        client
+            .handle_control(&server_hello)
+            .expect("client handle server hello");
+        assert_eq!(client.state(), SessionState::Active);
+        assert_eq!(server.state(), SessionState::Active);
+        // No identities were configured, so neither side is authenticated.
+        assert!(!client.peer_authenticated());
+        assert!(!server.peer_authenticated());
     }
 }
