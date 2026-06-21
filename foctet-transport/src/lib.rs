@@ -74,6 +74,8 @@ pub mod quinn;
 pub mod websock;
 #[cfg(feature = "transport-webtrans")]
 pub mod webtrans;
+#[cfg(feature = "runtime-tokio")]
+pub mod udp;
 
 pub use adapter::SplitIo;
 pub use config::TransportConfig;

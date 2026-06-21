@@ -223,8 +223,17 @@ enforcement remain.
       roundtrip test; core loss/reorder/duplicate/oversize/forgery tests.
 - [x] Generic `DatagramTransport` trait + `SecureDatagramChannel<T>` (§3.2) so
       non-quinn datagram backends share one interface.
-- [ ] Browser WebTransport datagram adapter; raw-UDP adapter + session/discovery
-      guidance (implement `DatagramTransport` for each).
+- [x] Raw-UDP adapter: `UdpDatagramTransport` (`foctet-transport/src/udp.rs`,
+      `runtime-tokio` feature) implements `DatagramTransport` over a
+      *connected* `tokio::net::UdpSocket`. Session negotiation, peer
+      discovery/pinning (via `UdpSocket::connect`, since the trait carries no
+      destination address), MTU/fragmentation, and anti-amplification are
+      documented as the caller's responsibility in the module docs — this
+      adapter only moves bytes, unlike QUIC/WebTransport which provide
+      connection + peer auth for free. Verified with a real-socket roundtrip
+      test (`udp::tests::roundtrip_over_real_udp_sockets`).
+- [ ] Browser WebTransport datagram adapter (implement `DatagramTransport`
+      for it).
 - [ ] MTU/path-change handling and fragmentation policy for payloads above the
       datagram limit (currently fail-closed `FrameTooLarge`).
 - [ ] Rekey-over-datagram story (control frames are stream-oriented today).

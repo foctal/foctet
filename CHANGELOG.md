@@ -65,6 +65,11 @@ All notable changes to this project are documented in this file.
   instead of calling the opener and replay store manually in every handler.
   `AxumError` now implements `IntoResponse`, mapping to a status code without
   ever echoing the source error's detail in the response body.
+- **Raw-UDP datagram adapter.** `UdpDatagramTransport`
+  (`foctet-transport/src/udp.rs`, `runtime-tokio` feature) implements the
+  generic `DatagramTransport` trait over a connected `tokio::net::UdpSocket`,
+  so `SecureDatagramChannel` works over plain UDP the same way it already
+  does over QUIC datagrams. Verified with a real-socket roundtrip test.
 
 ### Added
 
