@@ -1,5 +1,6 @@
 use foctet_http::{
-    HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer,
+    ContextBinding, ContextCarrier, DEFAULT_CONTEXT_TTL_SECS, HttpOpenOptions, HttpOpener,
+    HttpSealOptions, HttpSealer,
     http::{self},
 };
 use reqwest::Client;
@@ -19,13 +20,19 @@ async fn main() {
     let opener = HttpOpener::new(HttpOpenOptions::new(CLIENT_SECRET_KEY));
 
     let plaintext_request = b"hello workers".to_vec();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs();
     let encrypted_request = sealer
-        .seal_request(
+        .seal_request_with_context(
             http::Request::builder()
                 .method("POST")
                 .uri(WORKERS_URL)
                 .body(plaintext_request)
                 .expect("build request"),
+            ContextCarrier::generate(now_secs, DEFAULT_CONTEXT_TTL_SECS),
+            ContextBinding::default(),
         )
         .expect("seal request");
 
@@ -61,6 +68,24 @@ async fn main() {
         "plaintext body: {}",
         String::from_utf8_lossy(decrypted_response.body())
     );
+
+    let mut replay_builder = client.post(WORKERS_URL);
+    for (name, value) in encrypted_request.headers() {
+        replay_builder = replay_builder.header(name, value);
+    }
+    let replay = replay_builder
+        .body(encrypted_request.body().clone())
+        .send()
+        .await
+        .expect("replay request");
+    let replay_status = replay.status();
+    let replay_body = replay.bytes().await.expect("read replay response");
+    assert_eq!(
+        replay_status,
+        reqwest::StatusCode::CONFLICT,
+        "{replay_body:?}"
+    );
+    println!("replay status: {replay_status}");
 }
 
 fn demo_public_key(secret_key: [u8; 32]) -> [u8; 32] {

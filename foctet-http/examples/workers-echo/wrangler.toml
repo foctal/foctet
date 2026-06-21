@@ -2,5 +2,13 @@ name = "foctet-http-workers-echo"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-03-08"
 
+[[durable_objects.bindings]]
+name = "FOCTET_REPLAY"
+class_name = "FoctetReplay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FoctetReplay"]
+
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+command = "cargo install -q worker-build@^0.7 && worker-build --release"

@@ -9,8 +9,143 @@ use thiserror::Error;
 
 use crate::{
     AsyncReplayStore, BODY_ONLY_SCOPE, CONTENT_TYPE, ContextBinding, ContextCarrier, HttpError,
-    HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayStore, SCOPE_HEADER,
+    HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayCheck, ReplayStore,
+    ReplayStoreError, SCOPE_HEADER,
 };
+
+/// Durable Object path used by [`DurableObjectReplayStore`] and
+/// [`check_and_insert_in_durable_object`]. This endpoint is internal to a
+/// Worker-to-Durable-Object binding and must not be exposed by the public fetch
+/// handler.
+pub const DURABLE_REPLAY_PATH: &str = "/foctet/replay/v1";
+const DURABLE_REPLAY_URL: &str = "https://foctet.internal/foctet/replay/v1";
+
+/// Atomic Durable Object-backed replay store for production Workers deployments.
+///
+/// Each message ID is routed to its own deterministically named Durable Object,
+/// whose strongly consistent storage makes the check-and-insert operation
+/// atomic. Its alarm deletes the one retained entry at expiry. The Durable
+/// Object class must delegate its fetch and alarm handlers to
+/// [`check_and_insert_in_durable_object`] and
+/// [`expire_durable_object_replay_entry`].
+#[derive(Clone, Debug)]
+pub struct DurableObjectReplayStore {
+    namespace: worker::ObjectNamespace,
+    object_name: String,
+}
+
+impl DurableObjectReplayStore {
+    /// Creates a replay store backed by the named Durable Object instance.
+    pub fn new(namespace: worker::ObjectNamespace, object_name: impl Into<String>) -> Self {
+        Self {
+            namespace,
+            object_name: object_name.into(),
+        }
+    }
+}
+
+impl AsyncReplayStore for DurableObjectReplayStore {
+    async fn check_and_insert(
+        &self,
+        message_id: &[u8; crate::MESSAGE_ID_LEN],
+        expires_at_secs: u64,
+        now_secs: u64,
+    ) -> Result<ReplayCheck, ReplayStoreError> {
+        let mut payload = [0u8; crate::MESSAGE_ID_LEN + 16];
+        payload[..crate::MESSAGE_ID_LEN].copy_from_slice(message_id);
+        payload[crate::MESSAGE_ID_LEN..crate::MESSAGE_ID_LEN + 8]
+            .copy_from_slice(&expires_at_secs.to_be_bytes());
+        payload[crate::MESSAGE_ID_LEN + 8..].copy_from_slice(&now_secs.to_be_bytes());
+        let bytes = worker::js_sys::Uint8Array::new_with_length(payload.len() as u32);
+        bytes.copy_from(&payload);
+        let mut init = worker::RequestInit::new();
+        init.with_method(worker::Method::Post)
+            .with_body(Some(bytes.into()));
+        let request = worker::Request::new_with_init(DURABLE_REPLAY_URL, &init)
+            .map_err(|error| ReplayStoreError::Backend(error.to_string()))?;
+        let response = self
+            .namespace
+            .get_by_name(&format!("{}:{}", self.object_name, hex_id(message_id)))
+            .map_err(|error| ReplayStoreError::Backend(error.to_string()))?
+            .fetch_with_request(request)
+            .await
+            .map_err(|error| ReplayStoreError::Backend(error.to_string()))?;
+        match response.status_code() {
+            201 => Ok(ReplayCheck::Accepted),
+            409 => Ok(ReplayCheck::Replay),
+            status => Err(ReplayStoreError::Backend(format!(
+                "Durable Object replay endpoint returned HTTP {status}"
+            ))),
+        }
+    }
+}
+
+/// Handles one internal Durable Object replay-store request.
+///
+/// Call this from a `worker::DurableObject` fetch method. Durable Object
+/// storage input gates serialize the read-then-write sequence, so exactly one
+/// concurrent request for a message ID can receive `201 Created`; later calls
+/// receive `409 Conflict`.
+pub async fn check_and_insert_in_durable_object(
+    storage: &worker::Storage,
+    mut request: worker::Request,
+) -> worker::Result<worker::Response> {
+    if request.method() != worker::Method::Post || request.path() != DURABLE_REPLAY_PATH {
+        return worker::Response::error("Not Found", 404);
+    }
+    let payload = request.bytes().await?;
+    if payload.len() != crate::MESSAGE_ID_LEN + 16 {
+        return worker::Response::error("Bad Request", 400);
+    }
+    let mut id = [0u8; crate::MESSAGE_ID_LEN];
+    id.copy_from_slice(&payload[..crate::MESSAGE_ID_LEN]);
+    let mut expiry = [0u8; 8];
+    expiry.copy_from_slice(&payload[crate::MESSAGE_ID_LEN..crate::MESSAGE_ID_LEN + 8]);
+    let expires_at_secs = u64::from_be_bytes(expiry);
+    let mut now = [0u8; 8];
+    now.copy_from_slice(&payload[crate::MESSAGE_ID_LEN + 8..]);
+    let now_secs = u64::from_be_bytes(now);
+    if expires_at_secs <= now_secs {
+        return worker::Response::error("Bad Request", 400);
+    }
+    // The client deterministically routes a message ID to this one object. The
+    // ID is retained in the request format as defense in depth and to make the
+    // internal protocol self-describing.
+    let key = "foctet-replay-expiry";
+    if let Some(existing_expiry) = storage.get::<String>(key).await? {
+        let existing_expiry = existing_expiry
+            .parse::<u64>()
+            .map_err(|_| worker::Error::RustError("invalid Durable Object replay expiry".into()))?;
+        if existing_expiry > now_secs {
+            return worker::Response::empty().map(|response| response.with_status(409));
+        }
+    }
+    storage.put(key, expires_at_secs.to_string()).await?;
+    storage
+        .set_alarm(expires_at_secs.saturating_mul(1_000).min(i64::MAX as u64) as i64)
+        .await?;
+    worker::Response::empty().map(|response| response.with_status(201))
+}
+
+/// Removes the one replay entry held by a per-message Durable Object.
+///
+/// Call this from the Durable Object's `alarm` handler. An alarm is at-least
+/// once, so deleting all state is intentionally idempotent.
+pub async fn expire_durable_object_replay_entry(
+    storage: &worker::Storage,
+) -> worker::Result<worker::Response> {
+    storage.delete_all().await?;
+    worker::Response::empty()
+}
+
+fn hex_id(message_id: &[u8; crate::MESSAGE_ID_LEN]) -> String {
+    use core::fmt::Write;
+    let mut out = String::with_capacity(crate::MESSAGE_ID_LEN * 2);
+    for byte in message_id {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
 
 /// Lightweight request metadata extracted before body decryption.
 #[derive(Debug, Clone, PartialEq, Eq)]
