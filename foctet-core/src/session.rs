@@ -652,4 +652,112 @@ mod tests {
         assert!(!client.peer_authenticated());
         assert!(!server.peer_authenticated());
     }
+
+    fn active_pair() -> (Session, Session) {
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handle client hello")
+            .expect("server hello response");
+        client
+            .handle_control(&server_hello)
+            .expect("client handle server hello");
+        (client, server)
+    }
+
+    #[test]
+    fn replayed_rekey_message_is_rejected_after_a_real_rekey() {
+        // A Rekey control message names the `old_key_id` it rotates away
+        // from. Once that rotation has happened, the same message replayed
+        // (e.g. captured off the wire) must be rejected: `old_key_id` no
+        // longer matches the active key, so it cannot be re-applied or roll
+        // the session back to the previous key.
+        let (mut client, mut server) = active_pair();
+
+        let rekey = client.force_rekey().expect("client force rekey");
+        server
+            .handle_control(&rekey)
+            .expect("server applies first rekey");
+
+        let err = server
+            .handle_control(&rekey)
+            .expect_err("replaying the same rekey message must be rejected");
+        assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
+
+    #[test]
+    fn rekey_message_with_stale_old_key_id_is_rejected() {
+        // A rekey collision/out-of-order scenario: the responder is still on
+        // key 0, but receives a `Rekey` claiming to rotate away from a key it
+        // never activated. It must reject this instead of silently
+        // installing a derived key the two sides disagree about.
+        let (_client, mut server) = active_pair();
+        let forged_rekey = ControlMessage::Rekey {
+            old_key_id: 99,
+            new_key_id: 100,
+            rekey_salt: [0x42; 32],
+            transcript_binding: [0u8; 32],
+        };
+        let err = server
+            .handle_control(&forged_rekey)
+            .expect_err("rekey from an unrecognized old_key_id must be rejected");
+        assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
+
+    #[test]
+    fn rekey_message_with_forged_transcript_binding_is_rejected() {
+        // Even with a correct `old_key_id`, a `Rekey` whose transcript
+        // binding doesn't match the recomputed hash (tampered `rekey_salt`,
+        // wrong `new_key_id`, or wrong binding outright) must be rejected
+        // rather than installing an attacker-influenced key.
+        let (mut client, mut server) = active_pair();
+        let mut forged_rekey = client.force_rekey().expect("client force rekey");
+        if let ControlMessage::Rekey {
+            transcript_binding, ..
+        } = &mut forged_rekey
+        {
+            transcript_binding[0] ^= 0xff;
+        }
+        let err = server
+            .handle_control(&forged_rekey)
+            .expect_err("tampered rekey transcript binding must be rejected");
+        assert!(matches!(err, CoreError::InvalidControlMessage));
+    }
+
+    #[test]
+    fn control_message_unexpected_for_current_state_is_rejected() {
+        // A ClientHello/ServerHello replayed onto an already-Active session
+        // (or any control message that doesn't match the (role, state)
+        // dispatch table) must be rejected rather than reprocessed as a new
+        // handshake, which would let a captured hello desynchronize or
+        // downgrade an established session.
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handle client hello")
+            .expect("server hello response");
+        client
+            .handle_control(&server_hello)
+            .expect("client handle server hello");
+        assert_eq!(server.state(), SessionState::Active);
+
+        let err = server
+            .handle_control(&hello)
+            .expect_err("replayed ClientHello onto an active session must be rejected");
+        assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
 }

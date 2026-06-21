@@ -44,6 +44,12 @@ All notable changes to this project are documented in this file.
   via `rustsec/audit-check`) that fails the build on any future vulnerability
   finding; it scans advisories only, not licenses (that's `cargo-deny`,
   still open below).
+- **Negative protocol test coverage: control/data flag confusion and rekey
+  collisions (P1).** New regression tests proving the `IS_CONTROL` header
+  flag (not payload shape) is authoritative for control-vs-data dispatch, and
+  that the rekey state machine rejects a stale `old_key_id`, a replayed
+  `Rekey` message, a forged transcript binding, and a handshake message
+  replayed onto an already-active session.
 
 ### Added
 

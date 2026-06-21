@@ -757,14 +757,16 @@ mod tests {
     use futures_sink::Sink;
 
     use crate::{
-        CoreError,
+        ControlMessage, CoreError,
         crypto::{
             Direction, EphemeralKeyPair, derive_traffic_keys, encrypt_frame, random_session_salt,
         },
         io::{PollRead, PollWrite},
     };
 
-    use super::{FoctetFramed, flags};
+    use super::{
+        DecodedFrame, FoctetFramed, FrameHeader, PROFILE_X25519_HKDF_XCHACHA20POLY1305, flags,
+    };
 
     #[derive(Default, Debug)]
     struct MemoryIo {
@@ -883,5 +885,60 @@ mod tests {
             Poll::Ready(Some(Ok(frame))) => assert_eq!(frame.plaintext, b"hello"),
             other => panic!("expected the genuine seq=0 frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_control_rejects_a_frame_without_the_control_flag() {
+        // A data frame whose plaintext happens to look like a valid encoded
+        // `ControlMessage` must still be rejected by `decode_control`: the
+        // `IS_CONTROL` header flag, not the payload shape, is the sole
+        // authority over how a frame is interpreted.
+        let msg = ControlMessage::Error { code: 1 };
+        let frame = DecodedFrame {
+            header: FrameHeader::new(0, PROFILE_X25519_HKDF_XCHACHA20POLY1305, 0, 0, 0, 0),
+            plaintext: msg.encode(),
+        };
+        let err = FoctetFramed::<MemoryIo>::decode_control(&frame)
+            .expect_err("must reject a frame without IS_CONTROL set");
+        assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
+
+    #[test]
+    fn handle_incoming_with_session_ignores_control_shaped_bytes_without_the_flag() {
+        // Same flag-confusion property, exercised through the session-aware
+        // dispatcher: control-shaped bytes delivered as a *data* frame
+        // (IS_CONTROL unset) must surface as plain application data, never be
+        // parsed and acted on as a control message.
+        let eph_a = EphemeralKeyPair::generate();
+        let eph_b = EphemeralKeyPair::generate();
+        let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
+        let salt = random_session_salt();
+        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+
+        let (mut session, _hello) = crate::Session::new_initiator_with_auth(
+            crate::RekeyThresholds::default(),
+            crate::SessionAuthConfig::unauthenticated_for_testing(),
+        );
+
+        let control_shaped_bytes = ControlMessage::Error { code: 7 }.encode();
+        let frame = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, &control_shaped_bytes)
+            .expect("encrypt frame");
+
+        let io = MemoryIo::default();
+        let mut framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::S2C);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        framed.get_mut().push_inbound(&frame.to_bytes());
+
+        let decoded = match Pin::new(&mut framed).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => frame,
+            other => panic!("expected decoded data frame, got {other:?}"),
+        };
+        assert_eq!(decoded.header.flags & flags::IS_CONTROL, 0);
+
+        let result = Pin::new(&mut framed)
+            .handle_incoming_with_session(&mut session, decoded)
+            .expect("data frame must not be treated as control");
+        assert_eq!(result, Some(control_shaped_bytes));
     }
 }

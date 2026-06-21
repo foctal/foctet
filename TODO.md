@@ -165,8 +165,25 @@ enforcement remain.
       the same traffic key; gate persistence until designed safely.
 
 ### 2.6 Negative / protocol tests (expand)
-- [ ] nonce exhaustion (have basic), malformed/forged frames, control/data flag
-      confusion, rekey collisions, out-of-order rekey, rollback, replay poisoning.
+- [x] nonce exhaustion (have basic), malformed/forged frames.
+- [x] Control/data flag confusion: `decode_control` rejects a data frame whose
+      plaintext happens to be valid `ControlMessage` bytes
+      (`frame::tests::decode_control_rejects_a_frame_without_the_control_flag`);
+      `handle_incoming_with_session` surfaces the same bytes as application
+      data rather than acting on them
+      (`...handle_incoming_with_session_ignores_control_shaped_bytes_without_the_flag`)
+      — the `IS_CONTROL` header flag, not payload shape, is authoritative.
+- [x] Rekey collision / stale `old_key_id` / replayed rekey / forged transcript
+      binding / unexpected control message for current state, all in
+      `session.rs::tests`:
+      `replayed_rekey_message_is_rejected_after_a_real_rekey`,
+      `rekey_message_with_stale_old_key_id_is_rejected`,
+      `rekey_message_with_forged_transcript_binding_is_rejected`,
+      `control_message_unexpected_for_current_state_is_rejected`.
+- [ ] Out-of-order rekey delivery (a `Rekey` for the *next* expected
+      `old_key_id`, not just a stale one), and rollback at the ratchet-design
+      level — these depend on §2.3's ratchet decision, not just test coverage
+      of the current symmetric-rekey state machine.
 
 ---
 
