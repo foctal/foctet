@@ -58,6 +58,13 @@ All notable changes to this project are documented in this file.
   fails authentication instead of silently reattributing the request. Purely
   additive: empty by default, byte-identical associated data to before when
   unused. Response-side header binding is not covered yet.
+- **Ready-made Axum extractor for protected, replay-checked requests.**
+  `ProtectedHttpState` trait + `ProtectedRequest` (`foctet-http/src/axum.rs`)
+  let a handler take a decrypted, context-authenticated, single-use-checked
+  `http::Request<Vec<u8>>` directly as a parameter via Axum's `FromRequest`,
+  instead of calling the opener and replay store manually in every handler.
+  `AxumError` now implements `IntoResponse`, mapping to a status code without
+  ever echoing the source error's detail in the response body.
 
 ### Added
 

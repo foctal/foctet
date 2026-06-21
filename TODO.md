@@ -240,9 +240,21 @@ enforcement remain.
 
 ## 4. P1 — HTTP & Workers (depends on §1.2)
 
-- [~] Axum adapter that requires verified protected context + bounds body size:
+- [x] Axum adapter that requires verified protected context + bounds body size:
       `AxumOpener::open_request_with_context` (+ async-store variant) done, bounded
-      by `max_body_bytes`; a ready-made middleware/extractor layer is still TODO.
+      by `max_body_bytes`. Ready-made extractor layer added:
+      `ProtectedHttpState` trait + `ProtectedRequest` (`axum::extract::FromRequest`)
+      in `foctet-http/src/axum.rs` — implement the trait on your Axum `State` and
+      handlers take `ProtectedRequest` directly, no manual opener/store
+      plumbing per handler. `AxumError` now implements `IntoResponse` (maps to
+      a status code only — `Replayed` → 409, `OpenFailed`/`ContextExpired` →
+      401, malformed context → 400 — never echoes the source error's detail
+      back to the caller). Scoped to the synchronous `ReplayStore` only:
+      axum's `FromRequest` requires the extraction future to be `Send`, which
+      `AsyncReplayStore`'s future is deliberately not (so it stays usable from
+      `!Send` Workers); a durable/networked store like `RedisReplayStore`
+      still needs the existing manual
+      `AxumOpener::open_request_with_async_store` call in the handler.
 - [x] Durable replay store interface (`AsyncReplayStore`) + Redis backend for
       multi-instance deployments (see §1.2).
 - [~] Safe default body limits: Axum opener bounds via `max_body_bytes`; document

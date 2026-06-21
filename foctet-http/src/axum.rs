@@ -225,6 +225,111 @@ fn http_response_vec_to_axum(response: http::Response<Vec<u8>>) -> AxumResponse 
     AxumResponse::from_parts(parts, Body::from(body))
 }
 
+impl ::axum::response::IntoResponse for AxumError {
+    /// Maps to a status code only; never includes the source error's detail
+    /// in the response body, so an opening/replay failure cannot leak
+    /// ciphertext, key, or internal-state information to the caller.
+    fn into_response(self) -> AxumResponse {
+        use ::axum::http::StatusCode;
+        let status = match &self {
+            AxumError::BodyRead(_) => StatusCode::BAD_REQUEST,
+            AxumError::Http(HttpError::MissingContentType | HttpError::InvalidContentType) => {
+                StatusCode::BAD_REQUEST
+            }
+            AxumError::Http(
+                HttpError::MissingContext(_)
+                | HttpError::InvalidContext(_)
+                | HttpError::ContextTimestampInFuture,
+            ) => StatusCode::BAD_REQUEST,
+            AxumError::Http(HttpError::ContextExpired) => StatusCode::UNAUTHORIZED,
+            AxumError::Http(HttpError::OpenFailed(_)) => StatusCode::UNAUTHORIZED,
+            AxumError::Http(HttpError::Replayed) => StatusCode::CONFLICT,
+            AxumError::Http(HttpError::SealFailed(_) | HttpError::ReplayStore(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        status.into_response()
+    }
+}
+
+/// Application state required to use the [`ProtectedRequest`] extractor.
+///
+/// Implement this on your Axum `State` type to wire up a ready-made,
+/// `FromRequest`-based extractor that authenticates the protected context,
+/// enforces single use against a replay store, and hands the handler a
+/// decrypted `http::Request<Vec<u8>>` — without per-handler boilerplate.
+///
+/// Scoped to the synchronous [`ReplayStore`] trait, not [`AsyncReplayStore`]:
+/// axum's `FromRequest` requires the extraction future to be `Send`, but
+/// `AsyncReplayStore`'s future is intentionally *not* required to be `Send`
+/// (so it stays usable from `!Send` runtimes such as Cloudflare Workers),
+/// so a durable/networked store (e.g. [`crate::RedisReplayStore`]) can't be
+/// plugged into this extractor in general. Use
+/// [`AxumOpener::open_request_with_async_store`] directly in the handler for
+/// that case.
+pub trait ProtectedHttpState: Send + Sync {
+    /// The anti-replay store backing this state.
+    type Store: ReplayStore + Send + Sync;
+
+    /// Returns the opener used to authenticate and decrypt request bodies.
+    fn protected_opener(&self) -> &AxumOpener;
+
+    /// Returns the anti-replay store consulted after authentication.
+    fn protected_replay_store(&self) -> &Self::Store;
+
+    /// Returns the current time in Unix seconds, used for freshness checks.
+    fn protected_now_secs(&self) -> u64;
+
+    /// Returns the tolerated clock skew, in seconds. Defaults to
+    /// [`crate::DEFAULT_MAX_CLOCK_SKEW_SECS`].
+    fn protected_max_skew_secs(&self) -> u64 {
+        crate::DEFAULT_MAX_CLOCK_SKEW_SECS
+    }
+
+    /// Returns the context-binding policy to enforce. Defaults to
+    /// [`ContextBinding::default`] (method/path/query/message-id/expiry, no
+    /// authority or extra headers).
+    fn protected_context_binding(&self) -> ContextBinding {
+        ContextBinding::default()
+    }
+}
+
+/// Axum extractor that authenticates a context-bound, replay-protected
+/// request body and yields the decrypted `http::Request<Vec<u8>>`.
+///
+/// Requires the application's `State` to implement [`ProtectedHttpState`]:
+///
+/// ```ignore
+/// async fn handler(ProtectedRequest(request): ProtectedRequest) -> impl IntoResponse {
+///     let plaintext = request.body();
+///     // ...
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ProtectedRequest(pub http::Request<Vec<u8>>);
+
+impl<S> ::axum::extract::FromRequest<S> for ProtectedRequest
+where
+    S: ProtectedHttpState,
+{
+    type Rejection = AxumError;
+
+    async fn from_request(req: AxumRequest, state: &S) -> Result<Self, Self::Rejection> {
+        let now = state.protected_now_secs();
+        let opened = state
+            .protected_opener()
+            .open_request_with_context(
+                req,
+                state.protected_replay_store(),
+                now,
+                state.protected_max_skew_secs(),
+                state.protected_context_binding(),
+            )
+            .await?;
+        Ok(ProtectedRequest(opened))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +446,75 @@ mod tests {
         let sealer =
             AxumSealer::from_http_sealer(HttpSealer::new(HttpSealOptions::new([1u8; 32], b"kid")));
         assert_eq!(sealer.sealer().options().recipient_key_id(), b"kid");
+    }
+
+    struct TestAppState {
+        opener: AxumOpener,
+        store: crate::InMemoryReplayStore,
+        now: std::sync::atomic::AtomicU64,
+    }
+
+    impl ProtectedHttpState for TestAppState {
+        type Store = crate::InMemoryReplayStore;
+
+        fn protected_opener(&self) -> &AxumOpener {
+            &self.opener
+        }
+
+        fn protected_replay_store(&self) -> &Self::Store {
+            &self.store
+        }
+
+        fn protected_now_secs(&self) -> u64 {
+            self.now.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_request_extractor_authenticates_and_rejects_replay() {
+        use ::axum::extract::FromRequest;
+
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let now = 1_000_000u64;
+
+        let state = TestAppState {
+            opener: AxumOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()), 1024 * 1024),
+            store: crate::InMemoryReplayStore::new(),
+            now: std::sync::atomic::AtomicU64::new(now),
+        };
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let plain = Request::builder()
+            .method("POST")
+            .uri("https://example.com/extractor")
+            .body(b"via extractor".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, 300);
+        let sealed = sealer
+            .seal_request_with_context(plain, carrier, ContextBinding::default())
+            .expect("seal");
+
+        let make_axum = |req: &Request<Vec<u8>>| {
+            let mut builder = Request::builder()
+                .method(req.method().clone())
+                .uri(req.uri().clone());
+            for (name, value) in req.headers() {
+                builder = builder.header(name, value);
+            }
+            let r = builder.body(req.body().clone()).expect("clone");
+            let (parts, body) = r.into_parts();
+            AxumRequest::from_parts(parts, Body::from(body))
+        };
+
+        let ProtectedRequest(opened) = ProtectedRequest::from_request(make_axum(&sealed), &state)
+            .await
+            .expect("extractor authenticates first delivery");
+        assert_eq!(opened.body(), b"via extractor");
+
+        let err = ProtectedRequest::from_request(make_axum(&sealed), &state)
+            .await
+            .expect_err("extractor must reject replay");
+        assert!(matches!(err, AxumError::Http(HttpError::Replayed)));
     }
 }
