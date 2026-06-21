@@ -30,6 +30,7 @@ use crate::{
     crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
     replay::{DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector},
+    sequence::OutboundSequence,
 };
 
 /// AEAD tag length added to every frame ciphertext.
@@ -88,7 +89,7 @@ pub struct DatagramEndpoint {
     max_retained_keys: usize,
     inbound_direction: Direction,
     outbound_direction: Direction,
-    next_seq: HashMap<(u8, u32), u64>,
+    next_seq: HashMap<(u8, u32), OutboundSequence>,
     replay: ReplayProtector,
     max_datagram_size: usize,
 }
@@ -184,7 +185,12 @@ impl DatagramEndpoint {
     ) -> Result<Vec<u8>, CoreError> {
         let keys = self.active_keys()?.clone();
         let key_id = keys.key_id;
-        let seq = *self.next_seq.get(&(key_id, stream_id)).unwrap_or(&0);
+        let sequence = self
+            .next_seq
+            .get(&(key_id, stream_id))
+            .copied()
+            .unwrap_or_default();
+        let seq = sequence.current();
 
         let frame = encrypt_frame(
             &keys,
@@ -201,7 +207,7 @@ impl DatagramEndpoint {
 
         // Reserve the next sequence only after the datagram is known to be
         // emittable, so a rejected datagram never consumes a nonce.
-        let next = seq.checked_add(1).ok_or(CoreError::SequenceExhausted)?;
+        let next = sequence.prepared_next()?;
         self.next_seq.insert((key_id, stream_id), next);
         Ok(bytes)
     }

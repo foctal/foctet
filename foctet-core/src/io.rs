@@ -12,6 +12,7 @@ use crate::{
     limits::ProtocolLimits,
     payload::{self, Tlv},
     replay::ReplayProtector,
+    sequence::OutboundSequence,
     session::Session,
 };
 
@@ -362,7 +363,7 @@ pub struct SyncIo<T> {
     outbound_direction: Direction,
     default_stream_id: u32,
     default_flags: u8,
-    next_seq: u64,
+    next_seq: OutboundSequence,
     replay: ReplayProtector,
 }
 
@@ -383,7 +384,7 @@ impl<T> SyncIo<T> {
             outbound_direction,
             default_stream_id: 0,
             default_flags: 0,
-            next_seq: 0,
+            next_seq: OutboundSequence::default(),
             replay: limits.replay_protector(),
             limits,
         }
@@ -495,20 +496,17 @@ impl<T: Read + Write> SyncIo<T> {
             self.outbound_direction,
             flags,
             stream_id,
-            self.next_seq,
+            self.next_seq.current(),
             plaintext,
         )?;
         // Fail closed on sequence exhaustion: never wrap the counter, otherwise
         // the `(key_id, stream_id, seq)` nonce would repeat under the same key.
         // This mirrors the async `FoctetFramed` path exactly so the two
         // implementations cannot diverge in their exhaustion policy.
-        let next_seq = self
-            .next_seq
-            .checked_add(1)
-            .ok_or(CoreError::SequenceExhausted)?;
+        let next_seq = self.next_seq.prepared_next()?;
         self.io.write_all(&frame.to_bytes())?;
         self.io.flush()?;
-        self.next_seq = next_seq;
+        self.next_seq.commit(next_seq);
         Ok(())
     }
 
@@ -751,18 +749,24 @@ mod tests {
         let mut io = SyncIo::new(MockIo::default(), keys, Direction::S2C, Direction::C2S);
 
         // Drive the outbound counter to the last representable sequence.
-        io.next_seq = u64::MAX - 1;
+        io.next_seq.set_for_test(u64::MAX - 1);
         io.send(b"last").expect("final valid frame must be emitted");
-        assert_eq!(io.next_seq, u64::MAX);
+        assert_eq!(io.next_seq.current(), u64::MAX);
         let emitted = io.io.outbound.len();
         assert!(emitted > 0);
 
         // The next send would have to reuse a nonce; it must fail closed and
         // must NOT emit any wrapped frame.
-        let err = io.send(b"overflow").expect_err("must refuse to wrap the nonce");
+        let err = io
+            .send(b"overflow")
+            .expect_err("must refuse to wrap the nonce");
         assert!(matches!(err, CoreError::SequenceExhausted));
-        assert_eq!(io.io.outbound.len(), emitted, "no wrapped frame may be written");
-        assert_eq!(io.next_seq, u64::MAX);
+        assert_eq!(
+            io.io.outbound.len(),
+            emitted,
+            "no wrapped frame may be written"
+        );
+        assert_eq!(io.next_seq.current(), u64::MAX);
     }
 
     #[test]
@@ -785,13 +789,17 @@ mod tests {
         let mut io = SyncIo::new(mock, keys, Direction::C2S, Direction::S2C);
 
         // The forged high-sequence frame must fail authentication.
-        let err = io.recv().expect_err("forged frame must fail authentication");
+        let err = io
+            .recv()
+            .expect_err("forged frame must fail authentication");
         assert!(matches!(err, CoreError::Aead));
 
         // Because replay state is only committed after authentication, the
         // forged seq=1_000_000 must NOT have advanced the window. The genuine
         // seq=0 frame is therefore still accepted.
-        let plaintext = io.recv().expect("legitimate low-sequence frame after forgery");
+        let plaintext = io
+            .recv()
+            .expect("legitimate low-sequence frame after forgery");
         assert_eq!(plaintext, b"hello");
     }
 

@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Security
 
+- **Centralize fail-closed outbound sequence allocation (P0 follow-up).** The
+  blocking stream, async framed stream, datagram, and discrete-message paths now
+  share one internal sequence allocator, so `SequenceExhausted` behavior cannot
+  drift between transport shapes. Session-state restoration is explicitly
+  unsupported until a design can preserve every outbound counter atomically.
+
 - **Fix nonce reuse on synchronous sequence exhaustion (P0).** `SyncIo` now fails
   closed with `SequenceExhausted` instead of wrapping the sequence counter, so it
   can no longer reuse an XChaCha20-Poly1305 `(key_id, stream_id, seq)` nonce. This

@@ -167,6 +167,7 @@ impl ReplayStore for InMemoryReplayStore {
 }
 
 /// Encodes a replay-store key as `{prefix}{hex(message_id)}`.
+#[cfg(any(feature = "redis", test))]
 fn replay_key(prefix: &str, message_id: &[u8; MESSAGE_ID_LEN]) -> String {
     use std::fmt::Write;
     let mut key = String::with_capacity(prefix.len() + MESSAGE_ID_LEN * 2);

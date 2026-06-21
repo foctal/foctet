@@ -77,6 +77,13 @@ Implementations MUST document and defend against at least:
 *   disabling replay checks in production paths
 *   using unbounded allocations from attacker-controlled lengths
 
+Session persistence is not currently specified or supported. An implementation
+MUST NOT restore a session, traffic key, or outbound sequence allocator with a
+reset or uncertain sequence value under the same traffic key. After a crash or
+restart, it MUST establish a fresh session unless a future, versioned
+persistence design can atomically preserve every outbound sequence allocator
+and its key-generation state across durable storage.
+
 * * *
 
 4\. Architecture Overview
@@ -450,7 +457,9 @@ Operational guidance:
     *   `1 GiB` outbound plaintext, OR
     *   `10 minutes` elapsed
 *   Replay window SHOULD default to `4096` and MAY be increased for high-reordering networks.
-*   Implementations SHOULD persist or monotonic-track sender sequence state when process restarts are possible.
+*   Until a versioned session-persistence format is specified, implementations
+    MUST establish a fresh session after a process restart. They MUST NOT reuse
+    a traffic key with reset or uncertain sender sequence state.
 
 ### 12.4 Side-channel & Implementation Safety
 

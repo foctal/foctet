@@ -120,6 +120,9 @@ See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and reporti
 - Both the async (`FoctetFramed`) and synchronous (`SyncIo`) paths **fail closed on
   sequence/key-id exhaustion** — a frame is never emitted with a reused nonce — and
   reject invalid all-zero X25519 shared secrets.
+- **Do not persist and restore live session state.** No persistence format exists
+  yet; after a restart, establish a fresh session rather than reusing traffic keys
+  with reset or uncertain outbound sequence state.
 - **Replay state is committed only after AEAD authentication**, so a forged frame
   cannot desynchronize or DoS the receiver; the replay-window map is bounded.
 - The native handshake is **authenticated by default**: an unauthenticated handshake

@@ -40,6 +40,10 @@ supported-version policy will accompany the first `v1` release.
 - **Fail-closed sequence and key-id exhaustion** on both the async (`FoctetFramed`)
   and synchronous (`SyncIo`) paths — a frame is never emitted with a reused
   `(key_id, stream_id, seq)` nonce.
+- **No session-state restoration.** Foctet does not provide a session-persistence
+  format. After a crash or restart, applications must establish a fresh session;
+  restoring traffic keys with reset or uncertain outbound sequence state can reuse
+  a nonce and is unsafe.
 - **Replay protection** via per-`(key_id, stream_id)` sliding windows, committed
   **only after AEAD authentication** so a forged frame cannot desynchronize or
   DoS the receiver. The number of tracked windows is bounded

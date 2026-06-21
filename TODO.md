@@ -54,9 +54,9 @@ reviewed.** Do not use "production-ready" / "v1 stable" wording before
       (`foctet-core/src/io.rs`).
 - [x] Regression test at counter near `u64::MAX` proving no wrapped frame
       emitted (`io.rs::sync_send_fails_closed_on_sequence_exhaustion`).
-- [ ] Follow-up: unify sequence allocation into one shared internal type so sync
-      and async cannot diverge again (currently duplicated logic, kept in sync
-      by tests).
+- [x] Follow-up: unify sequence allocation into one shared internal type so sync
+      and async cannot diverge again (`OutboundSequence` is also used by the
+      datagram and message endpoints).
 
 ### 1.2 HTTP body envelopes — replay protection & HTTP-context binding
 Core schema + replay store + axum integration done; durable store + default-
@@ -197,7 +197,7 @@ enforcement remain.
 - [ ] Key-provider / keystore abstraction: separate key *handles* from bytes;
       key IDs with rotation policy; optional hardware-backed path. (Prereq for
       making `TrafficKeys` non-`Clone`.)
-- [ ] Document that session state MUST NOT be restored with reset counters under
+- [x] Document that session state MUST NOT be restored with reset counters under
       the same traffic key; gate persistence until designed safely.
 
 ### 2.6 Negative / protocol tests (expand)

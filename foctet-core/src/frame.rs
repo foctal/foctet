@@ -15,6 +15,7 @@ use crate::{
     limits::ProtocolLimits,
     payload::{self, Tlv},
     replay::ReplayProtector,
+    sequence::OutboundSequence,
     session::Session,
 };
 
@@ -209,7 +210,7 @@ pub struct FoctetFramed<T> {
     outbound_direction: Direction,
     default_stream_id: u32,
     default_flags: u8,
-    next_seq: u64,
+    next_seq: OutboundSequence,
     rx: BytesMut,
     tx: BytesMut,
     replay: ReplayProtector,
@@ -233,7 +234,7 @@ impl<T> FoctetFramed<T> {
             outbound_direction,
             default_stream_id: 0,
             default_flags: 0,
-            next_seq: 0,
+            next_seq: OutboundSequence::default(),
             rx: BytesMut::with_capacity(8 * 1024),
             tx: BytesMut::new(),
             replay: limits.replay_protector(),
@@ -363,13 +364,11 @@ impl<T> FoctetFramed<T> {
             self.outbound_direction,
             flags,
             stream_id,
-            self.next_seq,
+            self.next_seq.current(),
             plaintext,
         )?;
-        self.next_seq = self
-            .next_seq
-            .checked_add(1)
-            .ok_or(CoreError::SequenceExhausted)?;
+        let next_seq = self.next_seq.prepared_next()?;
+        self.next_seq.commit(next_seq);
         self.tx.extend_from_slice(&frame.to_bytes());
         Ok(())
     }
@@ -404,13 +403,11 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
             this.outbound_direction,
             flags,
             stream_id,
-            this.next_seq,
+            this.next_seq.current(),
             plaintext,
         )?;
-        this.next_seq = this
-            .next_seq
-            .checked_add(1)
-            .ok_or(CoreError::SequenceExhausted)?;
+        let next_seq = this.next_seq.prepared_next()?;
+        this.next_seq.commit(next_seq);
         this.tx.extend_from_slice(&frame.to_bytes());
         Ok(())
     }
@@ -635,13 +632,11 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
             this.outbound_direction,
             this.default_flags,
             this.default_stream_id,
-            this.next_seq,
+            this.next_seq.current(),
             &item,
         )?;
-        this.next_seq = this
-            .next_seq
-            .checked_add(1)
-            .ok_or(CoreError::SequenceExhausted)?;
+        let next_seq = this.next_seq.prepared_next()?;
+        this.next_seq.commit(next_seq);
         this.tx.extend_from_slice(&frame.to_bytes());
         Ok(())
     }
