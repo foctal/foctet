@@ -8,8 +8,8 @@ use foctet_core::BodyEnvelopeLimits;
 use thiserror::Error;
 
 use crate::{
-    BODY_ONLY_SCOPE, CONTENT_TYPE, HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions,
-    HttpSealer, SCOPE_HEADER,
+    AsyncReplayStore, BODY_ONLY_SCOPE, CONTENT_TYPE, ContextBinding, ContextCarrier, HttpError,
+    HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayStore, SCOPE_HEADER,
 };
 
 /// Lightweight request metadata extracted before body decryption.
@@ -97,6 +97,53 @@ impl WorkersOpener {
             plaintext,
         })
     }
+
+    /// Opens an encrypted Workers request, enforcing the bound HTTP protected
+    /// context, freshness, and single use against `store`.
+    ///
+    /// This is the recommended path for production Workers deployments: pair
+    /// it with a durable [`AsyncReplayStore`] (e.g. Cloudflare KV) when more
+    /// than one Worker instance may see the same request.
+    pub async fn open_request_with_context<S>(
+        &self,
+        mut request: worker::Request,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<http::Request<Vec<u8>>, WorkersError>
+    where
+        S: ReplayStore + ?Sized,
+    {
+        let parts = worker_request_to_http_parts(&request)?;
+        let body = request.bytes().await?;
+        let http_request = http::Request::from_parts(parts, body);
+        self.opener
+            .open_request_with_context(http_request, store, now_secs, max_skew_secs, binding)
+            .map_err(WorkersError::Http)
+    }
+
+    /// Opens an encrypted Workers request using a durable [`AsyncReplayStore`]
+    /// (Cloudflare KV, a Durable Object, or any other shared backend).
+    pub async fn open_request_with_async_store<S>(
+        &self,
+        mut request: worker::Request,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<http::Request<Vec<u8>>, WorkersError>
+    where
+        S: AsyncReplayStore + ?Sized,
+    {
+        let parts = worker_request_to_http_parts(&request)?;
+        let body = request.bytes().await?;
+        let http_request = http::Request::from_parts(parts, body);
+        self.opener
+            .open_request_with_async_store(http_request, store, now_secs, max_skew_secs, binding)
+            .await
+            .map_err(WorkersError::Http)
+    }
 }
 
 impl WorkersSealer {
@@ -123,6 +170,31 @@ impl WorkersSealer {
         let mut response = worker::Response::from_bytes(sealed)?;
         response.headers_mut().set("content-type", CONTENT_TYPE)?;
         response.headers_mut().set(SCOPE_HEADER, BODY_ONLY_SCOPE)?;
+        Ok(response)
+    }
+
+    /// Seals a plaintext response with bound protected context (status,
+    /// message ID, timestamp, expiry, answered request message ID) into a
+    /// Workers response.
+    pub fn seal_response_with_context(
+        &self,
+        status: u16,
+        plaintext: Vec<u8>,
+        carrier: ContextCarrier,
+    ) -> Result<worker::Response, WorkersError> {
+        let response = http::Response::builder()
+            .status(status)
+            .body(plaintext)
+            .expect("status and empty header map always build a valid response");
+        let sealed = self.sealer.seal_response_with_context(response, carrier)?;
+        let (parts, body) = sealed.into_parts();
+        let mut response = worker::Response::from_bytes(body)?;
+        response = response.with_status(parts.status.as_u16());
+        for (name, value) in parts.headers.iter() {
+            response
+                .headers_mut()
+                .set(name.as_str(), value.to_str().unwrap_or_default())?;
+        }
         Ok(response)
     }
 }
@@ -193,6 +265,32 @@ fn extract_worker_request_metadata(
         url,
         headers,
     })
+}
+
+/// Builds `http::request::Parts` (method, URI, headers) from a `worker::Request`
+/// so the protected-context binding sees the same routing metadata the Worker
+/// runtime dispatched on.
+fn worker_request_to_http_parts(
+    request: &worker::Request,
+) -> Result<http::request::Parts, WorkersError> {
+    let method = http::Method::from_bytes(request.method().to_string().as_bytes())
+        .map_err(|err| worker::Error::RustError(err.to_string()))?;
+    let url = request.url()?;
+    let uri = url
+        .as_str()
+        .parse::<http::Uri>()
+        .map_err(|err| worker::Error::RustError(err.to_string()))?;
+    let headers = worker_headers_to_http(request)?;
+
+    let mut builder = http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers.iter() {
+        builder = builder.header(name, value);
+    }
+    let (parts, _) = builder
+        .body(())
+        .map_err(|err| worker::Error::RustError(err.to_string()))?
+        .into_parts();
+    Ok(parts)
 }
 
 fn worker_headers_to_http(request: &worker::Request) -> Result<http::HeaderMap, worker::Error> {

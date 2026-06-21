@@ -89,10 +89,18 @@ enforcement remain.
 - [x] **Redis durable backend** (`RedisReplayStore`, `redis` feature) via atomic
       `SET NX PX`; compile-checked (needs a live Redis to run).
 - [ ] Cloudflare KV / Durable Object adapter (implement `AsyncReplayStore` in the
-      Worker; shipped trait makes this app-side today).
+      Worker; shipped trait makes this app-side today). **Not done deliberately:**
+      raw KV `get`-then-`put` cannot satisfy the trait's atomic check-and-insert
+      contract (no conditional/NX write), so a naive KV-only store would silently
+      reintroduce a replay race; needs a Durable Object (or KV + DO lock) before
+      shipping.
 - [ ] Make context-bound APIs the **enforced default**; consider deprecating the
       stateless `seal_request`/`open_request` for production use.
-- [ ] Workers adapter parity (`open_request_with_context` for `worker::Request`).
+- [x] Workers adapter parity (`WorkersOpener::open_request_with_context` /
+      `open_request_with_async_store`, `WorkersSealer::seal_response_with_context`
+      in `foctet-http/src/workers.rs`), reconstructing `http::request::Parts`
+      (method/URI/headers) from `worker::Request` so the same protected-context
+      binding used by Axum applies to Workers.
 - [ ] Optional selected-header binding + authority normalization guidance.
 - **Gate:** block production HTTP/Workers recommendations until durable store +
   default-enforcement land.

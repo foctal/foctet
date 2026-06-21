@@ -59,6 +59,12 @@ All notable changes to this project are documented in this file.
   (and response variants), and an Axum adapter
   (`AxumOpener::open_request_with_context`, `AxumSealer::seal_response_with_context`).
   A captured envelope can no longer be replayed or moved onto a different route.
+- **Cloudflare Workers context-binding parity.** `WorkersOpener::open_request_with_context`
+  / `open_request_with_async_store` and `WorkersSealer::seal_response_with_context`
+  bring the `worker::Request` / `worker::Response` adapters up to the same
+  protected-context + anti-replay coverage as the Axum adapter (method, path,
+  query, and headers are read from the real Worker request before the body is
+  authenticated).
 - `seal_body_with_context` / `open_body_with_context` /
   `open_body_for_key_id_with_context`: bind an application-supplied context into the
   body-envelope AEAD as associated data (foundation for HTTP context binding /
