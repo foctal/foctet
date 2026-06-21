@@ -1,0 +1,348 @@
+//! Message-oriented Foctet endpoint (one frame per discrete message).
+//!
+//! This is the codec for **reliable, ordered, message-bounded** transports —
+//! most importantly raw WebSocket messages, where each WebSocket frame is a
+//! discrete unit and the application wants to preserve those boundaries instead
+//! of treating the connection as an opaque byte stream
+//! ([`crate::frame::FoctetFramed`]).
+//!
+//! It sits between the two existing shapes:
+//!
+//! - Unlike [`crate::frame::FoctetFramed`] (byte stream), there is **exactly one
+//!   complete frame per message** with no cross-message reassembly and no
+//!   length prefix — the transport already preserves message boundaries.
+//! - Unlike [`crate::datagram::DatagramEndpoint`] (datagram), the transport is
+//!   reliable and ordered, so the default maximum message size is large
+//!   ([`DEFAULT_MAX_MESSAGE_SIZE`]) rather than MTU-bounded. The replay window is
+//!   still used, so duplicate or reordered messages (e.g. from a buggy or hostile
+//!   peer) are rejected, and **replay state is committed only after AEAD
+//!   authentication**.
+//!
+//! Outbound sequence numbers are tracked per `(key_id, stream_id)` and fail
+//! closed on exhaustion, so a `(key_id, stream_id, seq)` nonce is never reused.
+
+use std::collections::HashMap;
+
+use crate::{
+    CoreError,
+    crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
+    frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
+    limits::DEFAULT_MAX_RETAINED_KEYS,
+    replay::{DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector},
+};
+
+/// AEAD tag length added to every frame ciphertext.
+const TAG_LEN: usize = 16;
+
+/// Per-frame wire overhead (fixed header + AEAD tag).
+pub const MESSAGE_FRAME_OVERHEAD: usize = FRAME_HEADER_LEN + TAG_LEN;
+
+/// Default maximum on-wire message (single frame) size in bytes (16 MiB).
+///
+/// Matches [`crate::limits::DEFAULT_MAX_CIPHERTEXT_LEN`] so the message shape and
+/// the byte-stream shape accept the same maximum frame by default. Tune to the
+/// transport's own message-size limit (for example a WebSocket server's
+/// `max_message_size`).
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = crate::limits::DEFAULT_MAX_CIPHERTEXT_LEN;
+
+/// Configuration for a [`MessageEndpoint`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageConfig {
+    /// Maximum on-wire message (single frame) size in bytes.
+    pub max_message_size: usize,
+    /// Per-`(key_id, stream_id)` replay window span.
+    pub replay_window: u64,
+    /// Maximum number of distinct replay windows tracked simultaneously.
+    pub max_replay_windows: usize,
+    /// Number of previous keys retained for inbound decryption after rekey.
+    pub max_retained_keys: usize,
+}
+
+impl Default for MessageConfig {
+    fn default() -> Self {
+        Self {
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+            replay_window: DEFAULT_REPLAY_WINDOW,
+            max_replay_windows: DEFAULT_MAX_REPLAY_WINDOWS,
+            max_retained_keys: DEFAULT_MAX_RETAINED_KEYS,
+        }
+    }
+}
+
+/// One decrypted inbound message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodedMessage {
+    /// Authenticated frame header.
+    pub header: FrameHeader,
+    /// Decrypted payload bytes.
+    pub plaintext: Vec<u8>,
+}
+
+/// Seals and opens individual Foctet messages (one frame each).
+///
+/// This type performs no I/O; pair it with a message transport adapter (for
+/// example a raw WebSocket connection) that moves the returned bytes preserving
+/// message boundaries.
+#[derive(Clone, Debug)]
+pub struct MessageEndpoint {
+    keys: Vec<TrafficKeys>,
+    active_key_id: u8,
+    max_retained_keys: usize,
+    inbound_direction: Direction,
+    outbound_direction: Direction,
+    next_seq: HashMap<(u8, u32), u64>,
+    replay: ReplayProtector,
+    max_message_size: usize,
+}
+
+impl MessageEndpoint {
+    /// Creates a message endpoint with default configuration.
+    pub fn new(
+        keys: TrafficKeys,
+        inbound_direction: Direction,
+        outbound_direction: Direction,
+    ) -> Self {
+        Self::with_config(
+            keys,
+            inbound_direction,
+            outbound_direction,
+            MessageConfig::default(),
+        )
+    }
+
+    /// Creates a message endpoint with explicit configuration.
+    pub fn with_config(
+        keys: TrafficKeys,
+        inbound_direction: Direction,
+        outbound_direction: Direction,
+        config: MessageConfig,
+    ) -> Self {
+        Self {
+            active_key_id: keys.key_id,
+            keys: vec![keys],
+            max_retained_keys: config.max_retained_keys.max(1),
+            inbound_direction,
+            outbound_direction,
+            next_seq: HashMap::new(),
+            replay: ReplayProtector::new(config.replay_window)
+                .with_max_windows(config.max_replay_windows),
+            max_message_size: config.max_message_size.max(MESSAGE_FRAME_OVERHEAD + 1),
+        }
+    }
+
+    /// Returns the configured maximum message size in bytes.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
+    /// Returns the maximum plaintext bytes that fit in one message.
+    pub fn max_plaintext_len(&self) -> usize {
+        self.max_message_size - MESSAGE_FRAME_OVERHEAD
+    }
+
+    /// Returns the active key identifier.
+    pub fn active_key_id(&self) -> u8 {
+        self.active_key_id
+    }
+
+    /// Returns known key IDs, active first.
+    pub fn known_key_ids(&self) -> Vec<u8> {
+        self.keys.iter().map(|k| k.key_id).collect()
+    }
+
+    /// Installs new active keys and retains a bounded set of previous keys.
+    pub fn install_active_keys(&mut self, keys: TrafficKeys) {
+        self.keys.retain(|k| k.key_id != keys.key_id);
+        self.keys.insert(0, keys.clone());
+        self.active_key_id = keys.key_id;
+        let keep = self.max_retained_keys + 1;
+        if self.keys.len() > keep {
+            self.keys.truncate(keep);
+        }
+    }
+
+    fn active_keys(&self) -> Result<&TrafficKeys, CoreError> {
+        self.keys
+            .iter()
+            .find(|k| k.key_id == self.active_key_id)
+            .ok_or(CoreError::MissingSessionSecret)
+    }
+
+    fn key_for_id(&self, key_id: u8) -> Option<&TrafficKeys> {
+        self.keys.iter().find(|k| k.key_id == key_id)
+    }
+
+    /// Seals plaintext into a single message using the active key.
+    ///
+    /// Fails closed with [`CoreError::FrameTooLarge`] when the resulting frame
+    /// would exceed [`MessageConfig::max_message_size`], and with
+    /// [`CoreError::SequenceExhausted`] when the per-stream sequence space is
+    /// exhausted. In both cases no sequence number is consumed.
+    pub fn seal(
+        &mut self,
+        stream_id: u32,
+        flags: u8,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CoreError> {
+        let keys = self.active_keys()?.clone();
+        let key_id = keys.key_id;
+        let seq = *self.next_seq.get(&(key_id, stream_id)).unwrap_or(&0);
+
+        let frame = encrypt_frame(
+            &keys,
+            self.outbound_direction,
+            flags,
+            stream_id,
+            seq,
+            plaintext,
+        )?;
+        let bytes = frame.to_bytes();
+        if bytes.len() > self.max_message_size {
+            return Err(CoreError::FrameTooLarge);
+        }
+
+        // Reserve the next sequence only after the message is known to be
+        // emittable, so a rejected message never consumes a nonce.
+        let next = seq.checked_add(1).ok_or(CoreError::SequenceExhausted)?;
+        self.next_seq.insert((key_id, stream_id), next);
+        Ok(bytes)
+    }
+
+    /// Opens one message into its decrypted payload.
+    ///
+    /// The message MUST contain exactly one complete frame and no trailing
+    /// bytes. The ciphertext is authenticated before replay state is committed.
+    pub fn open(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
+        if message.len() > self.max_message_size {
+            return Err(CoreError::FrameTooLarge);
+        }
+        if message.len() < FRAME_HEADER_LEN {
+            return Err(CoreError::InvalidHeaderLength(message.len()));
+        }
+
+        // `Frame::from_bytes` requires the ciphertext length to match the header
+        // exactly, enforcing one complete frame per message with no trailing
+        // bytes and no truncation.
+        let frame = Frame::from_bytes(message)?;
+        frame.header.validate_v0()?;
+
+        let keys = self
+            .key_for_id(frame.header.key_id)
+            .ok_or(CoreError::UnexpectedKeyId {
+                expected: self.active_key_id,
+                actual: frame.header.key_id,
+            })?;
+
+        let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
+        self.replay.check_and_record(
+            frame.header.key_id,
+            frame.header.stream_id,
+            frame.header.seq,
+        )?;
+
+        Ok(DecodedMessage {
+            header: frame.header,
+            plaintext,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{EphemeralKeyPair, derive_traffic_keys, random_session_salt};
+
+    fn endpoints() -> (MessageEndpoint, MessageEndpoint) {
+        let a = EphemeralKeyPair::generate();
+        let b = EphemeralKeyPair::generate();
+        let ss = a.shared_secret(b.public).expect("shared secret");
+        let salt = random_session_salt();
+        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+        // Client seals C2S / opens S2C; server is the mirror.
+        let client = MessageEndpoint::new(keys.clone(), Direction::S2C, Direction::C2S);
+        let server = MessageEndpoint::new(keys, Direction::C2S, Direction::S2C);
+        (client, server)
+    }
+
+    #[test]
+    fn message_roundtrip() {
+        let (mut client, mut server) = endpoints();
+        let msg = client.seal(0, 0, b"hello message").expect("seal");
+        let opened = server.open(&msg).expect("open");
+        assert_eq!(opened.plaintext, b"hello message");
+        assert_eq!(opened.header.seq, 0);
+    }
+
+    #[test]
+    fn large_message_above_datagram_mtu_roundtrips() {
+        // A message much larger than a datagram MTU is accepted by default,
+        // which is the whole point of the message shape versus the datagram one.
+        let (mut client, mut server) = endpoints();
+        let payload = vec![0x5Au8; 64 * 1024];
+        let msg = client.seal(0, 0, &payload).expect("seal large");
+        let opened = server.open(&msg).expect("open large");
+        assert_eq!(opened.plaintext, payload);
+    }
+
+    #[test]
+    fn duplicate_message_is_rejected_as_replay() {
+        let (mut client, mut server) = endpoints();
+        let m0 = client.seal(0, 0, b"zero").expect("m0");
+        let m1 = client.seal(0, 0, b"one").expect("m1");
+
+        assert_eq!(server.open(&m0).expect("m0").plaintext, b"zero");
+        assert_eq!(server.open(&m1).expect("m1").plaintext, b"one");
+
+        let err = server.open(&m1).expect_err("duplicate rejected");
+        assert!(matches!(err, CoreError::Replay));
+    }
+
+    #[test]
+    fn rejects_oversized_outbound_and_keeps_sequence() {
+        let a = EphemeralKeyPair::generate();
+        let b = EphemeralKeyPair::generate();
+        let ss = a.shared_secret(b.public).expect("shared secret");
+        let salt = random_session_salt();
+        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+        let config = MessageConfig {
+            max_message_size: MESSAGE_FRAME_OVERHEAD + 4,
+            ..MessageConfig::default()
+        };
+        let mut small =
+            MessageEndpoint::with_config(keys, Direction::S2C, Direction::C2S, config);
+
+        let ok = small.seal(0, 0, b"abcd").expect("fits");
+        assert!(ok.len() <= small.max_message_size());
+        let err = small.seal(0, 0, b"abcde").expect_err("too large");
+        assert!(matches!(err, CoreError::FrameTooLarge));
+        // The next valid message still uses seq 1 (only the first succeeded).
+        let next = small.seal(0, 0, b"efgh").expect("next");
+        let frame = Frame::from_bytes(&next).expect("parse");
+        assert_eq!(frame.header.seq, 1);
+    }
+
+    #[test]
+    fn replay_state_committed_only_after_auth() {
+        let (mut client, mut server) = endpoints();
+        let mut forged = client.seal(0, 0, b"forged").expect("seal");
+        let last = forged.len() - 1;
+        forged[last] ^= 0xff;
+
+        let err = server.open(&forged).expect_err("forged must fail auth");
+        assert!(matches!(err, CoreError::Aead));
+
+        // The forged message must not have advanced the replay window, so a
+        // genuine message on a fresh stream is still accepted.
+        let m = client.seal(1, 0, b"genuine").expect("seal new stream");
+        assert_eq!(server.open(&m).expect("genuine").plaintext, b"genuine");
+    }
+
+    #[test]
+    fn rejects_trailing_bytes() {
+        let (mut client, mut server) = endpoints();
+        let mut msg = client.seal(0, 0, b"payload").expect("seal");
+        msg.push(0x00);
+        let err = server.open(&msg).expect_err("trailing bytes rejected");
+        assert!(matches!(err, CoreError::CiphertextLengthMismatch { .. }));
+    }
+}

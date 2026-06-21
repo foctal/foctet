@@ -236,8 +236,17 @@ enforcement remain.
 - [x] `DatagramTransport` trait + generic `SecureDatagramChannel<T>`
       (`foctet_transport::datagram`); `quinn::Connection` implements it
       (verified over a real connection).
-- [ ] `ByteStream` / `MessageTransport` (raw WebSocket messages) shape traits
-      with per-shape guarantees and a shared conformance suite.
+- [x] `MessageTransport` (raw WebSocket messages) shape trait + generic
+      `SecureMessageChannel<T>` (`foctet_transport::message`), backed by
+      `foctet_core::message::MessageEndpoint` (reliable, ordered, message-bounded;
+      not MTU-capped; replay-after-auth; per-`(key_id, stream_id)` fail-closed
+      sequence). In-memory `MessageTransport` roundtrip/replay/key-rotation tests.
+      **Still open:** a concrete `MessageTransport` impl over the `websock` crate
+      and a browser binding (see §3.4), plus the `ByteStream` marker shape below.
+- [~] `ByteStream` shape trait. The byte-stream secure path already exists
+      (`FoctetFramed`/`FoctetStream` over `PollIo`, plus the Tokio/Futures
+      builders); a thin `ByteStream` marker trait unifying it with the other two
+      shapes under a shared conformance suite is still open (ties into §3.1).
 
 ### 3.3 Datagram support
 - [x] Datagram encoder/decoder: `foctet_core::datagram::DatagramEndpoint`
@@ -267,8 +276,11 @@ enforcement remain.
 - [ ] Anti-amplification guidance/limits documented for datagram adapters.
 
 ### 3.4 WebSocket / WebTransport specifics
-- [ ] Test real WebSocket message framing + a browser client; define
-      mux/backpressure behavior.
+- [~] Test real WebSocket message framing + a browser client; define
+      mux/backpressure behavior. The message *shape* now exists
+      (`foctet_transport::message::{MessageTransport, SecureMessageChannel}`, §3.2);
+      what remains is a concrete `MessageTransport` impl over the `websock` crate's
+      connection, a browser binding, and the mux/backpressure definition.
 - [ ] Test native **and** browser WebTransport; document stream-only scope until
       datagrams land.
 

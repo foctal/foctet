@@ -1,7 +1,7 @@
 //! Raw UDP [`DatagramTransport`] adapter.
 //!
 //! This wraps a connected `tokio::net::UdpSocket` so it implements
-//! [`DatagramTransport`] and can be used with [`SecureDatagramChannel`].
+//! [`DatagramTransport`] and can be used with [`crate::SecureDatagramChannel`].
 //!
 //! Unlike QUIC/WebTransport datagrams, raw UDP has no built-in connection or
 //! peer authentication. This adapter only moves bytes; *you* are responsible
@@ -9,7 +9,7 @@
 //!
 //! - **Session setup.** Negotiate Foctet traffic keys out of band (e.g. a
 //!   Foctet handshake over a TCP/TLS control connection, or any other secure
-//!   channel) before constructing the [`SecureDatagramChannel`], exactly as
+//!   channel) before constructing the [`crate::SecureDatagramChannel`], exactly as
 //!   for the QUIC datagram adapter.
 //! - **Peer discovery / pinning.** Call [`tokio::net::UdpSocket::connect`] on
 //!   the socket before wrapping it here: this trait carries no destination

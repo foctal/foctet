@@ -61,6 +61,7 @@ pub mod adapter;
 mod config;
 pub mod datagram;
 mod error;
+pub mod message;
 #[cfg(feature = "runtime-futures")]
 mod futures;
 #[cfg(feature = "runtime-tokio")]
@@ -81,7 +82,8 @@ pub use adapter::SplitIo;
 pub use config::TransportConfig;
 pub use datagram::{DatagramChannelError, DatagramTransport, SecureDatagramChannel};
 pub use error::TransportChannelError;
+pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
 #[cfg(feature = "runtime-tokio")]
-pub use tokio::{TokioTransportBuilder, TokioTransportChannel};
+pub use tokio::{DEFAULT_HANDSHAKE_TIMEOUT, TokioTransportBuilder, TokioTransportChannel};

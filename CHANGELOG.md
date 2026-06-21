@@ -73,6 +73,21 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Message transport shape: secure discrete-message channels (P1, §3.2).**
+  Completes the transport-shape matrix (byte stream + datagram + message). New
+  `foctet_core::message::MessageEndpoint` (`MessageConfig`, `DecodedMessage`,
+  `DEFAULT_MAX_MESSAGE_SIZE` = 16 MiB) seals exactly one Foctet frame per
+  *reliable, ordered, message-bounded* unit — the right shape for **raw
+  WebSocket messages**, where each message is a discrete frame rather than a
+  byte in an opaque stream. Unlike the datagram endpoint it is not MTU-bounded;
+  unlike the byte-stream framing it preserves message boundaries with no length
+  prefix or reassembly. Replay state is committed only after AEAD
+  authentication, and per-`(key_id, stream_id)` sequence allocation fails closed
+  on exhaustion. `foctet_transport` adds the generic `MessageTransport` trait
+  (`!Send`-friendly for browser bindings) and `SecureMessageChannel<T>` that
+  layers `MessageEndpoint` over any message backend, mirroring
+  `DatagramTransport` / `SecureDatagramChannel`. Covered by core codec tests and
+  an in-memory secure-channel roundtrip/replay/key-rotation test.
 - **Centralized `ProtocolLimits` for the stream transports (P1, §2.4).** A new
   `foctet_core::limits::ProtocolLimits` gathers the DoS-relevant stream bounds
   (max inbound ciphertext length, retained previous keys, replay-window size,
