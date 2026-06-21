@@ -50,6 +50,14 @@ All notable changes to this project are documented in this file.
   that the rekey state machine rejects a stale `old_key_id`, a replayed
   `Rekey` message, a forged transcript binding, and a handshake message
   replayed onto an already-active session.
+- **Optional selected-header binding for HTTP protected contexts (request
+  side).** `ContextBinding::with_bound_headers` authenticates the presence
+  and exact value bytes of named headers (e.g. a tenant ID) into the same
+  AEAD associated data as method/path/query, so an on-path party swapping a
+  bound header — without touching the ciphertext, route, or carrier headers —
+  fails authentication instead of silently reattributing the request. Purely
+  additive: empty by default, byte-identical associated data to before when
+  unused. Response-side header binding is not covered yet.
 
 ### Added
 

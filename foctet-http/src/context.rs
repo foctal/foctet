@@ -89,6 +89,15 @@ pub struct ContextBinding {
     /// authorities. Method, path, query, message ID, and expiry already prevent
     /// route substitution and replay without it.
     pub bind_authority: bool,
+    /// Header names to additionally bind into the request context, in this
+    /// order. Each header's presence and raw value bytes are authenticated,
+    /// so adding, removing, or modifying a bound header fails authentication.
+    /// Only the header's *first* value is bound (multi-value headers are not
+    /// disambiguated). Empty by default — preserves the exact associated-data
+    /// bytes of a [`ContextBinding`] that doesn't bind any headers, so this is
+    /// purely opt-in. Currently applies to **requests only**; see
+    /// [`ProtectedContext::for_request`].
+    pub bound_headers: &'static [&'static str],
 }
 
 impl ContextBinding {
@@ -100,6 +109,12 @@ impl ContextBinding {
     /// Sets whether the authority is bound.
     pub fn with_authority(mut self, bind_authority: bool) -> Self {
         self.bind_authority = bind_authority;
+        self
+    }
+
+    /// Sets the additional header names to bind into the request context.
+    pub fn with_bound_headers(mut self, headers: &'static [&'static str]) -> Self {
+        self.bound_headers = headers;
         self
     }
 }
@@ -211,6 +226,10 @@ pub struct ProtectedContext {
     query: Option<String>,
     status: Option<u16>,
     carrier: ContextCarrier,
+    /// `(header name, value bytes)` for each name in `binding.bound_headers`
+    /// that was present on the message; absent headers are still bound (as a
+    /// "not present" marker) so a header's removal also fails authentication.
+    bound_headers: Vec<(&'static str, Option<Vec<u8>>)>,
 }
 
 impl ProtectedContext {
@@ -225,6 +244,11 @@ impl ProtectedContext {
         } else {
             None
         };
+        let bound_headers = binding
+            .bound_headers
+            .iter()
+            .map(|&name| (name, parts.headers.get(name).map(|v| v.as_bytes().to_vec())))
+            .collect();
         Self {
             direction: ContextDirection::Request,
             method: Some(parts.method.as_str().to_ascii_uppercase()),
@@ -233,6 +257,7 @@ impl ProtectedContext {
             query: parts.uri.query().map(|q| q.to_string()),
             status: None,
             carrier,
+            bound_headers,
         }
     }
 
@@ -251,6 +276,7 @@ impl ProtectedContext {
             query: None,
             status: Some(parts.status.as_u16()),
             carrier,
+            bound_headers: Vec::new(),
         }
     }
 
@@ -310,6 +336,12 @@ impl ProtectedContext {
             b'I',
             self.carrier.idempotency_key.as_deref().map(str::as_bytes),
         );
+
+        for (name, value) in &self.bound_headers {
+            out.push(b'H');
+            push_field(&mut out, b'N', name.as_bytes());
+            push_optional(&mut out, b'V', value.as_deref());
+        }
 
         out
     }
@@ -455,6 +487,59 @@ mod tests {
             ctx.validate_freshness(900, 5),
             Err(HttpError::ContextTimestampInFuture)
         ));
+    }
+
+    #[test]
+    fn bound_header_change_produces_distinct_aad() {
+        let carrier = ContextCarrier::generate(1000, 60);
+        let binding = ContextBinding::default().with_bound_headers(&["x-tenant-id"]);
+
+        let tenant_a = Request::builder()
+            .uri("/x")
+            .header("x-tenant-id", "tenant-a")
+            .body(())
+            .expect("request");
+        let tenant_b = Request::builder()
+            .uri("/x")
+            .header("x-tenant-id", "tenant-b")
+            .body(())
+            .expect("request");
+        let no_header = Request::builder().uri("/x").body(()).expect("request");
+
+        let (a_parts, _) = tenant_a.into_parts();
+        let (b_parts, _) = tenant_b.into_parts();
+        let (none_parts, _) = no_header.into_parts();
+
+        let a_aad = ProtectedContext::for_request(&a_parts, carrier.clone(), binding).to_aad_bytes();
+        let b_aad = ProtectedContext::for_request(&b_parts, carrier.clone(), binding).to_aad_bytes();
+        let none_aad = ProtectedContext::for_request(&none_parts, carrier, binding).to_aad_bytes();
+
+        assert_ne!(a_aad, b_aad, "different header values must diverge");
+        assert_ne!(a_aad, none_aad, "missing the bound header must diverge");
+    }
+
+    #[test]
+    fn unbound_header_changes_do_not_affect_aad() {
+        // Without `with_bound_headers`, an arbitrary header is not part of the
+        // protected context at all.
+        let carrier = ContextCarrier::generate(1000, 60);
+        let binding = ContextBinding::default();
+
+        let with_header = Request::builder()
+            .uri("/x")
+            .header("x-tenant-id", "tenant-a")
+            .body(())
+            .expect("request");
+        let without_header = Request::builder().uri("/x").body(()).expect("request");
+
+        let (with_parts, _) = with_header.into_parts();
+        let (without_parts, _) = without_header.into_parts();
+
+        let with_aad =
+            ProtectedContext::for_request(&with_parts, carrier.clone(), binding).to_aad_bytes();
+        let without_aad =
+            ProtectedContext::for_request(&without_parts, carrier, binding).to_aad_bytes();
+        assert_eq!(with_aad, without_aad);
     }
 
     #[test]

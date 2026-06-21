@@ -72,7 +72,14 @@ enforcement remain.
   - [x] timestamp + expiry with clock-skew validation
   - [x] cryptographically random 16-byte message ID
   - [x] optional idempotency key; response→request message-id binding
-  - [ ] selected-header binding (optional, not yet)
+  - [x] selected-header binding, **requests only**: `ContextBinding::with_bound_headers`
+        (`foctet-http/src/context.rs`) authenticates the presence and raw value
+        bytes of named headers; absent headers are bound too, so removing one
+        also fails authentication. Purely additive — empty by default,
+        byte-identical AAD to before when unused. Responses not covered yet
+        (`ProtectedContext::for_response` doesn't take a `ContextBinding`;
+        threading one through would mean changing `seal_response_with_context`
+        / `open_response_with_context` and their Axum/Workers wrappers).
 - [x] Build context bytes from `http::Request`/`Response` parts and feed through
       `*_with_context` (`HttpSealer::seal_request_with_context` /
       `HttpOpener::open_request_with_context`, + response variants).
@@ -101,7 +108,9 @@ enforcement remain.
       in `foctet-http/src/workers.rs`), reconstructing `http::request::Parts`
       (method/URI/headers) from `worker::Request` so the same protected-context
       binding used by Axum applies to Workers.
-- [ ] Optional selected-header binding + authority normalization guidance.
+- [~] Optional selected-header binding + authority normalization guidance.
+      Header binding done for requests (see §1.2 above); authority
+      normalization guidance still open.
 - **Gate:** block production HTTP/Workers recommendations until durable store +
   default-enforcement land.
 

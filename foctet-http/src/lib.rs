@@ -577,6 +577,49 @@ mod tests {
         assert!(matches!(err, HttpError::Replayed));
     }
 
+    #[test]
+    fn context_bound_request_with_bound_header_rejects_header_tamper() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default().with_bound_headers(&["x-tenant-id"]);
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .header("x-tenant-id", "tenant-a")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        // Genuine request opens fine.
+        let opened = opener
+            .open_request_with_context(clone_request(&sealed), &store, now, 30, binding)
+            .expect("open with matching bound header");
+        assert_eq!(opened.headers()["x-tenant-id"], "tenant-a");
+
+        // An on-path party swapping the tenant header (but leaving the
+        // ciphertext, route, and carrier headers untouched) must fail
+        // authentication rather than silently reattributing the request.
+        let (mut parts, body) = sealed.into_parts();
+        parts
+            .headers
+            .insert("x-tenant-id", "tenant-b".parse().expect("header value"));
+        let tampered = Request::from_parts(parts, body);
+
+        let err = opener
+            .open_request_with_context(tampered, &store, now, 30, binding)
+            .expect_err("tampered bound header must fail authentication");
+        assert!(matches!(err, HttpError::OpenFailed(_)));
+    }
+
     #[tokio::test]
     async fn context_bound_request_async_store_roundtrip_and_replay() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
