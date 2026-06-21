@@ -144,11 +144,24 @@ enforcement remain.
   - [ ] independent cryptographic review **before** shipping (do not improvise)
 
 ### 2.4 Centralized protocol limits (P2 in review, do early)
-- [ ] One public `ProtocolLimits` covering: max ciphertext, max plaintext,
-      buffered bytes, distinct stream IDs, replay windows, retained keys, control
-      message size, handshake duration, outstanding work.
-- [ ] Apply consistently to sync, async, datagram, HTTP, archive APIs.
-- [x] Replay-window count cap (`DEFAULT_MAX_REPLAY_WINDOWS`) — first piece.
+- [~] One public `ProtocolLimits`. Done for the **stream** shape:
+      `foctet_core::limits::ProtocolLimits` (`foctet-core/src/limits.rs`) covers
+      max inbound ciphertext length, retained previous keys, replay-window size,
+      and the distinct-replay-window cap, with documented defaults
+      (`DEFAULT_MAX_CIPHERTEXT_LEN`, `DEFAULT_MAX_RETAINED_KEYS`) and a
+      `replay_protector()` constructor. **Still open:** max plaintext, buffered
+      (outbound `tx`) bytes, distinct stream IDs, control-message size, handshake
+      duration, and outstanding-work bounds are not yet part of the struct.
+- [~] Apply consistently. `FoctetFramed` + `SyncIo` now take `with_limits(...)` /
+      expose `limits()`, routing their old `with_max_ciphertext_len` /
+      `with_max_retained_keys` setters through `ProtocolLimits`; the replay
+      window/cap are now configurable on these paths. **Still open:** datagram
+      (`DatagramConfig`) and HTTP/body (`BodyEnvelopeLimits`) keep their own
+      shape-specific limit types (different in kind — MTU-bounded / whole-buffer);
+      archive APIs not yet wired. A future step may unify them under one umbrella
+      type or have them share more constants.
+- [x] Replay-window count cap (`DEFAULT_MAX_REPLAY_WINDOWS`) — first piece, now
+      configurable on the stream paths via `ProtocolLimits::max_replay_windows`.
 - [x] Bound outbound plaintext/frame length before `u32` ct_len conversion
       (`crypto::checked_ciphertext_len` in `foctet-core/src/crypto.rs`,
       shared by `encrypt_frame`, used by every sync/async send path).

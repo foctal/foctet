@@ -75,6 +75,8 @@ pub mod crypto;
 pub mod frame;
 /// Runtime adapters and blocking I/O wrappers.
 pub mod io;
+/// Centralized protocol resource limits for the stream-oriented transports.
+pub mod limits;
 /// TLV payload encoding/decoding helpers for encrypted application bytes.
 pub mod payload;
 /// Replay-window tracking and duplicate-frame protection.
@@ -107,6 +109,7 @@ pub use frame::{
     DRAFT_MAGIC, FRAME_HEADER_LEN, FoctetFramed, FoctetStream, Frame, FrameHeader,
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
 };
+pub use limits::{DEFAULT_MAX_CIPHERTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS, ProtocolLimits};
 pub use payload::{Tlv, decode_tlvs, encode_tlvs, tlv_type};
 pub use replay::{
     DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow,

@@ -73,6 +73,19 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Centralized `ProtocolLimits` for the stream transports (P1, §2.4).** A new
+  `foctet_core::limits::ProtocolLimits` gathers the DoS-relevant stream bounds
+  (max inbound ciphertext length, retained previous keys, replay-window size,
+  and the distinct-replay-window cap) that `FoctetFramed` and `SyncIo` had
+  hardcoded as scattered magic numbers. Both expose `with_limits(...)` and a
+  `limits()` accessor; the existing `with_max_ciphertext_len` /
+  `with_max_retained_keys` setters now route through it. This also makes the
+  replay-window size and window cap configurable on the stream paths for the
+  first time (previously fixed at the defaults). Defaults are unchanged
+  (`DEFAULT_MAX_CIPHERTEXT_LEN` = 16 MiB, `DEFAULT_MAX_RETAINED_KEYS` = 2,
+  `DEFAULT_REPLAY_WINDOW`, `DEFAULT_MAX_REPLAY_WINDOWS`), so behavior is
+  identical unless explicitly overridden. Datagram (`DatagramConfig`) and body
+  (`BodyEnvelopeLimits`) keep their shape-specific limit types.
 - **Generic datagram transport abstraction.** `foctet_transport::datagram`:
   a backend-agnostic `DatagramTransport` trait and `SecureDatagramChannel<T>`
   that layers the core datagram endpoint over any datagram backend.

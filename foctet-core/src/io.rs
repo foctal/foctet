@@ -9,8 +9,9 @@ use crate::{
     control::ControlMessage,
     crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
+    limits::ProtocolLimits,
     payload::{self, Tlv},
-    replay::{DEFAULT_REPLAY_WINDOW, ReplayProtector},
+    replay::ReplayProtector,
     session::Session,
 };
 
@@ -356,13 +357,12 @@ pub struct SyncIo<T> {
     io: T,
     keys: Vec<TrafficKeys>,
     active_key_id: u8,
-    max_retained_keys: usize,
+    limits: ProtocolLimits,
     inbound_direction: Direction,
     outbound_direction: Direction,
     default_stream_id: u32,
     default_flags: u8,
     next_seq: u64,
-    max_ciphertext_len: usize,
     replay: ReplayProtector,
 }
 
@@ -374,18 +374,18 @@ impl<T> SyncIo<T> {
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
+        let limits = ProtocolLimits::default();
         Self {
             io,
             active_key_id: keys.key_id,
             keys: vec![keys],
-            max_retained_keys: 2,
             inbound_direction,
             outbound_direction,
             default_stream_id: 0,
             default_flags: 0,
             next_seq: 0,
-            max_ciphertext_len: 16 * 1024 * 1024,
-            replay: ReplayProtector::new(DEFAULT_REPLAY_WINDOW),
+            replay: limits.replay_protector(),
+            limits,
         }
     }
 
@@ -401,15 +401,31 @@ impl<T> SyncIo<T> {
         self
     }
 
+    /// Applies a complete set of [`ProtocolLimits`], rebuilding the replay
+    /// protector from the new replay-window size and window cap.
+    ///
+    /// Intended to be called immediately after [`SyncIo::new`], before any
+    /// frames are processed; it resets replay-window state.
+    pub fn with_limits(mut self, limits: ProtocolLimits) -> Self {
+        self.replay = limits.replay_protector();
+        self.limits = limits;
+        self
+    }
+
+    /// Returns the active protocol limits.
+    pub fn limits(&self) -> ProtocolLimits {
+        self.limits
+    }
+
     /// Sets inbound ciphertext size limit.
     pub fn with_max_ciphertext_len(mut self, max_len: usize) -> Self {
-        self.max_ciphertext_len = max_len;
+        self.limits.max_ciphertext_len = max_len;
         self
     }
 
     /// Sets number of retained previous keys.
     pub fn with_max_retained_keys(mut self, max: usize) -> Self {
-        self.max_retained_keys = max.max(1);
+        self.limits.max_retained_keys = max.max(1);
         self
     }
 
@@ -428,7 +444,7 @@ impl<T> SyncIo<T> {
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
-        let keep = self.max_retained_keys + 1;
+        let keep = self.limits.max_retained_keys + 1;
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
@@ -458,7 +474,7 @@ impl<T> SyncIo<T> {
             .first()
             .map(|k| k.key_id)
             .ok_or(CoreError::InvalidSessionState)?;
-        let keep = self.max_retained_keys + 1;
+        let keep = self.limits.max_retained_keys + 1;
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
@@ -531,7 +547,7 @@ impl<T: Read + Write> SyncIo<T> {
         header.validate_v0()?;
 
         let ct_len = header.ct_len as usize;
-        if ct_len > self.max_ciphertext_len {
+        if ct_len > self.limits.max_ciphertext_len {
             return Err(CoreError::FrameTooLarge);
         }
 
@@ -636,7 +652,7 @@ impl<T: Read + Write> SyncIo<T> {
         header.validate_v0()?;
 
         let ct_len = header.ct_len as usize;
-        if ct_len > self.max_ciphertext_len {
+        if ct_len > self.limits.max_ciphertext_len {
             return Err(CoreError::FrameTooLarge);
         }
 
@@ -777,5 +793,52 @@ mod tests {
         // seq=0 frame is therefore still accepted.
         let plaintext = io.recv().expect("legitimate low-sequence frame after forgery");
         assert_eq!(plaintext, b"hello");
+    }
+
+    #[test]
+    fn with_limits_enforces_max_ciphertext_len_on_receive() {
+        use crate::limits::ProtocolLimits;
+
+        let keys = test_keys();
+        let frame = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, b"a slightly longer payload")
+            .expect("frame");
+
+        let mut mock = MockIo::default();
+        mock.inbound.extend(frame.to_bytes().iter().copied());
+
+        // Configure an inbound ciphertext ceiling far below this frame's length.
+        let mut io = SyncIo::new(mock, keys, Direction::C2S, Direction::S2C)
+            .with_limits(ProtocolLimits::default().with_max_ciphertext_len(4));
+        assert_eq!(io.limits().max_ciphertext_len, 4);
+
+        let err = io
+            .recv()
+            .expect_err("frame exceeding the configured ciphertext limit must be rejected");
+        assert!(matches!(err, CoreError::FrameTooLarge));
+    }
+
+    #[test]
+    fn with_limits_configures_replay_window_size() {
+        use crate::limits::ProtocolLimits;
+
+        let keys = test_keys();
+        // seq=0, then seq=8: with a window of 4, the older seq=0 falls outside
+        // the window once seq=8 advances it.
+        let first = encrypt_frame(&keys, Direction::C2S, 0, 0, 8, b"newer").expect("first");
+        let stale = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, b"older").expect("stale");
+
+        let mut mock = MockIo::default();
+        mock.inbound.extend(first.to_bytes().iter().copied());
+        mock.inbound.extend(stale.to_bytes().iter().copied());
+
+        let mut io = SyncIo::new(mock, keys, Direction::C2S, Direction::S2C)
+            .with_limits(ProtocolLimits::default().with_replay_window(4));
+        assert_eq!(io.limits().replay_window, 4);
+
+        assert_eq!(io.recv().expect("newer seq accepted"), b"newer");
+        let err = io
+            .recv()
+            .expect_err("seq outside the small replay window must be rejected");
+        assert!(matches!(err, CoreError::ReplayWindowExceeded));
     }
 }

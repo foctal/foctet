@@ -12,8 +12,9 @@ use crate::{
     control::ControlMessage,
     crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
     io::PollIo,
+    limits::ProtocolLimits,
     payload::{self, Tlv},
-    replay::{DEFAULT_REPLAY_WINDOW, ReplayProtector},
+    replay::ReplayProtector,
     session::Session,
 };
 
@@ -203,13 +204,12 @@ pub struct FoctetFramed<T> {
     io: T,
     keys: Vec<TrafficKeys>,
     active_key_id: u8,
-    max_retained_keys: usize,
+    limits: ProtocolLimits,
     inbound_direction: Direction,
     outbound_direction: Direction,
     default_stream_id: u32,
     default_flags: u8,
     next_seq: u64,
-    max_ciphertext_len: usize,
     rx: BytesMut,
     tx: BytesMut,
     replay: ReplayProtector,
@@ -224,20 +224,20 @@ impl<T> FoctetFramed<T> {
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
+        let limits = ProtocolLimits::default();
         Self {
             io,
             active_key_id: keys.key_id,
             keys: vec![keys],
-            max_retained_keys: 2,
             inbound_direction,
             outbound_direction,
             default_stream_id: 0,
             default_flags: 0,
             next_seq: 0,
-            max_ciphertext_len: 16 * 1024 * 1024,
             rx: BytesMut::with_capacity(8 * 1024),
             tx: BytesMut::new(),
-            replay: ReplayProtector::new(DEFAULT_REPLAY_WINDOW),
+            replay: limits.replay_protector(),
+            limits,
             eof: false,
         }
     }
@@ -254,15 +254,31 @@ impl<T> FoctetFramed<T> {
         self
     }
 
+    /// Applies a complete set of [`ProtocolLimits`], rebuilding the replay
+    /// protector from the new replay-window size and window cap.
+    ///
+    /// Intended to be called immediately after [`FoctetFramed::new`], before any
+    /// frames are processed; it resets replay-window state.
+    pub fn with_limits(mut self, limits: ProtocolLimits) -> Self {
+        self.replay = limits.replay_protector();
+        self.limits = limits;
+        self
+    }
+
+    /// Returns the active protocol limits.
+    pub fn limits(&self) -> ProtocolLimits {
+        self.limits
+    }
+
     /// Sets inbound ciphertext size limit.
     pub fn with_max_ciphertext_len(mut self, max_len: usize) -> Self {
-        self.max_ciphertext_len = max_len;
+        self.limits.max_ciphertext_len = max_len;
         self
     }
 
     /// Sets number of retained previous keys.
     pub fn with_max_retained_keys(mut self, max: usize) -> Self {
-        self.max_retained_keys = max.max(1);
+        self.limits.max_retained_keys = max.max(1);
         self
     }
 
@@ -296,7 +312,7 @@ impl<T> FoctetFramed<T> {
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
-        let keep = self.max_retained_keys + 1;
+        let keep = self.limits.max_retained_keys + 1;
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
@@ -321,7 +337,7 @@ impl<T> FoctetFramed<T> {
             .first()
             .map(|k| k.key_id)
             .ok_or(CoreError::InvalidSessionState)?;
-        let keep = self.max_retained_keys + 1;
+        let keep = self.limits.max_retained_keys + 1;
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
@@ -511,7 +527,7 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         header.validate_v0()?;
 
         let ct_len = header.ct_len as usize;
-        if ct_len > self.max_ciphertext_len {
+        if ct_len > self.limits.max_ciphertext_len {
             return Err(CoreError::FrameTooLarge);
         }
 
