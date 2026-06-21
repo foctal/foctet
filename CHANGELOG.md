@@ -25,6 +25,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **WASM / TypeScript SDK (`foctet-wasm`).** New crate exposing a small,
+  versioned `wasm-bindgen` API over the body envelope (`sealBody` / `openBody`,
+  `sealBodyWithContext` / `openBodyWithContext`, `KeyPair`) with generated
+  TypeScript declarations and `Uint8Array` values. Builds for Node, browser, and
+  bundler targets via `wasm-pack`. A Node interop test opens Rust-produced
+  envelopes (`tests/interop_vector.json`), proving cross-language wire
+  compatibility.
 - **Datagram API.** `foctet_core::datagram` (`DatagramEndpoint`, `DatagramConfig`,
   `DecodedDatagram`): one complete bounded frame per datagram, configurable max
   datagram size, per-`(key_id, stream_id)` fail-closed sequence allocation,

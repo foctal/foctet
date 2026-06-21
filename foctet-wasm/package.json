@@ -1,0 +1,12 @@
+{
+  "name": "@foctet/wasm-dev",
+  "private": true,
+  "version": "0.2.0",
+  "description": "Development harness for building and testing the Foctet WASM SDK",
+  "scripts": {
+    "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
+    "build:web": "wasm-pack build --target web --out-dir pkg-web",
+    "build:bundler": "wasm-pack build --target bundler --out-dir pkg",
+    "test": "npm run build:node && node tests/node_interop.cjs"
+  }
+}

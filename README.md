@@ -21,6 +21,7 @@ Transport-agnostic end-to-end encryption layer for secure data transfer.
 - `foctet-http`: Thin HTTP adapter for `application/foctet` body envelopes.
 - `foctet-archive`: Encrypted single-file and split archives with recipient key wrapping.
 - `foctet-transport`: Layered transport integration helpers.
+- `foctet-wasm`: WebAssembly / TypeScript bindings for the body envelope.
 - `foctet`: Top-level re-export crate.
 
 ## Stability
@@ -46,6 +47,9 @@ Implemented and tested today:
   transports (TCP, QUIC/WebTransport bidirectional streams, multiplexed WebSocket).
 - A **datagram API** (`foctet_core::datagram`, one frame per datagram) with a QUIC
   datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`).
+- A **WASM/TypeScript SDK** (`foctet-wasm`) for the body envelope, with generated
+  `.d.ts` and Node/browser/bundler builds (verified against Rust-produced
+  envelopes).
 - Encrypted body envelopes for HTTP integrations such as `axum` and Cloudflare
   Workers (body-only; optional context binding via `seal_body_with_context`).
 - Encrypted archive formats for files and split-file delivery.
@@ -55,7 +59,8 @@ Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
 
 - Raw-UDP and browser-WebTransport datagram adapters (a datagram API and a QUIC
   datagram adapter are implemented).
-- A TypeScript/WASM client SDK (the core compiles to WASM; there is no JS API yet).
+- A published npm package and browser-runner CI for the WASM SDK (the SDK and a
+  Node interop test exist; framed-session APIs over WASM are still pending).
 - A versioned HTTP protected-context + replay-store integration (the cryptographic
   primitive exists; the full HTTP schema and replay defense do not).
 - Streaming (chunked) HTTP bodies; adapters are whole-buffer.

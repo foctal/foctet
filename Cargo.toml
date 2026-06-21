@@ -6,6 +6,7 @@ members = [
   "foctet-http",
   "foctet-archive",
   "foctet-transport",
+  "foctet-wasm",
   "fuzz"
 ]
 

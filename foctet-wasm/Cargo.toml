@@ -1,0 +1,26 @@
+[package]
+name = "foctet-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly bindings for Foctet end-to-end encryption (body envelopes)"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+foctet-core = { path = "../foctet-core", version = "0.2.0", default-features = false }
+wasm-bindgen = "0.2"
+x25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `OsRng` flows through `rand_core -> getrandom`; wasm32 needs explicit JS support.
+getrandom = { version = "0.2", features = ["js"] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

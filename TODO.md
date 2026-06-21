@@ -199,20 +199,25 @@ enforcement remain.
 
 ---
 
-## 5. P1 — WASM / TypeScript SDK (NOT implemented)
+## 5. P1 — WASM / TypeScript SDK (`foctet-wasm`)
 
-- [ ] Choose supported JS environments: browser, Node, Workers (+ optional
-      Deno/Bun).
-- [ ] Minimal versioned WASM API via `wasm-bindgen` with `Uint8Array` values and
-      generated `.d.ts`; no accidental panics across the boundary; documented
-      ownership/zeroization limits; avoid exposing raw secret-key bytes where a
-      host-backed non-extractable key is possible.
-- [ ] Implement the full specified subset (sealed envelope + context/replay, or
-      framed sessions) — header-only decoding (`interop/minimal_decoder.ts`) is
-      not interoperability.
-- [ ] npm package published **only after** browser/Node/Workers integration tests
-      decrypt the **same canonical vectors** as Rust.
-- [ ] Random-source + panic-behavior tests on supported wasm targets.
+- [x] Supported JS environments: Node, browser (web), bundler targets via
+      `wasm-pack` (`build:node` / `build:web` / `build:bundler`). Workers uses the
+      Node/bundler output.
+- [x] Minimal versioned WASM API via `wasm-bindgen` with `Uint8Array` values and
+      generated `.d.ts`; fallible calls throw instead of panicking
+      (errors constructed only on the wasm side; native tests cover inner logic).
+- [x] Body envelope subset incl. context binding (`sealBody`/`openBody`,
+      `sealBodyWithContext`/`openBodyWithContext`, `KeyPair`).
+- [x] Node interop test decrypts the **same Rust-produced envelopes**
+      (`tests/interop_vector.json`) — real cross-language wire compatibility.
+- [ ] Publish the npm package (currently a private dev harness;
+      `pkg-*` are build artifacts).
+- [ ] Browser-runner integration test in CI (wasm-bindgen-test / headless).
+- [ ] Framed-session / handshake APIs over WASM (today: body envelope only).
+- [ ] Host-backed / non-extractable key handling where the platform allows it;
+      document zeroization limits across the boundary.
+- [ ] Replace `interop/minimal_decoder.ts` (header-only) references with the SDK.
 
 ---
 

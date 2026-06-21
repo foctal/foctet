@@ -80,9 +80,12 @@ tested, and independently reviewed:
    datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`). Raw-UDP and
    browser-WebTransport datagram adapters, plus a session/rekey story over
    datagrams, are still pending.
-4. **No TypeScript/WASM SDK.** The core compiles to `wasm32-unknown-unknown`, but
-   there is no `wasm-bindgen` API, npm package, generated `.d.ts`, or browser/Node
-   crypto interop. `interop/minimal_decoder.ts` decodes a frame header only.
+4. **WASM/TypeScript SDK (partial).** The `foctet-wasm` crate ships a
+   `wasm-bindgen` API for the body envelope (seal/open, context-bound variants,
+   `KeyPair`) with generated `.d.ts`, Node/browser/bundler builds, and a Node
+   interop test that opens Rust-produced envelopes. Still pending: a published
+   npm package, browser-runner CI, framed-session/handshake APIs over WASM, and
+   host-backed (non-extractable) key handling.
 5. **HTTP adapters are whole-buffer**, not streaming; large uploads/downloads are
    not yet handled as bounded streams.
 6. **Wire format is unstable** (`0.x`, Draft v0) and has not been validated by an
