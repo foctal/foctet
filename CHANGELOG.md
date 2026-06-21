@@ -25,6 +25,18 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Generic datagram transport abstraction.** `foctet_transport::datagram`:
+  a backend-agnostic `DatagramTransport` trait and `SecureDatagramChannel<T>`
+  that layers the core datagram endpoint over any datagram backend.
+  `quinn::Connection` implements `DatagramTransport` (verified over a real
+  connection), so the same secure-datagram code path works for future
+  WebTransport/UDP backends.
+- **Durable HTTP replay store interface.** `foctet-http` gains an
+  `AsyncReplayStore` trait (intentionally `!Send`-friendly for Cloudflare
+  Workers) with a blanket impl over the sync `ReplayStore`, async opener paths
+  (`HttpOpener::open_request_with_async_store`, `AxumOpener` variant), and a
+  Redis-backed `RedisReplayStore` (`redis` feature) using an atomic `SET NX PX`
+  for multi-instance deployments.
 - **WASM / TypeScript SDK (`foctet-wasm`).** New crate exposing a small,
   versioned `wasm-bindgen` API over the body envelope (`sealBody` / `openBody`,
   `sealBodyWithContext` / `openBodyWithContext`, `KeyPair`) with generated

@@ -66,10 +66,13 @@ tested, and independently reviewed:
    `ReplayStore` with atomic check-and-insert (`InMemoryReplayStore`), and
    context-bound APIs (`seal_request_with_context` / `open_request_with_context`,
    plus an Axum adapter) that bind method/path/query/message-id/timestamp/expiry
-   into the AEAD and enforce single use. Still required before this is considered
-   production-complete: a **durable** replay store for multi-instance / serverless
-   (Cloudflare Workers) deployments, making the context-bound path the enforced
-   default, and authority/idempotency-key guidance. The low-level `seal_body` /
+   into the AEAD and enforce single use. For multi-instance / serverless
+   deployments there is an `AsyncReplayStore` trait (`!Send`-friendly for
+   Cloudflare Workers) with a Redis backend (`RedisReplayStore`, `redis` feature)
+   using atomic `SET NX PX`. Still required before this is considered
+   production-complete: a Cloudflare KV / Durable Object adapter, making the
+   context-bound path the enforced default, and authority/idempotency-key
+   guidance. The low-level `seal_body` /
    `open_body` and `seal_request` / `open_request` paths remain stateless and
    replayable by design — use the `*_with_context` APIs in production.
 2. **No post-compromise security.** In-session rekey is symmetric traffic-key

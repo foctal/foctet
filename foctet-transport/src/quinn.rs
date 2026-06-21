@@ -12,6 +12,38 @@ use crate::{
     adapter::SplitIo,
 };
 
+/// Error returned by the [`crate::DatagramTransport`] implementation for
+/// [`quinn::Connection`].
+#[derive(Debug, Error)]
+pub enum QuinnDatagramTransportError {
+    /// Quinn refused to send the datagram (too large, disabled, or closed).
+    #[error("quinn send datagram error: {0}")]
+    Send(#[from] quinn::SendDatagramError),
+    /// The Quinn connection failed while receiving a datagram.
+    #[error("quinn connection error: {0}")]
+    Connection(#[from] quinn::ConnectionError),
+}
+
+/// Generic datagram-transport view of a [`quinn::Connection`], usable with
+/// [`crate::SecureDatagramChannel`].
+impl crate::DatagramTransport for quinn::Connection {
+    type Error = QuinnDatagramTransportError;
+
+    async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
+        quinn::Connection::send_datagram(self, Bytes::from(datagram))?;
+        Ok(())
+    }
+
+    async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
+        let bytes = quinn::Connection::read_datagram(self).await?;
+        Ok(bytes.to_vec())
+    }
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        quinn::Connection::max_datagram_size(self)
+    }
+}
+
 /// Error returned by [`QuinnDatagramChannel`] operations.
 #[derive(Debug, Error)]
 pub enum QuinnDatagramError {
@@ -294,11 +326,11 @@ mod datagram_tests {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::Arc;
 
-    use foctet_core::RekeyThresholds;
+    use foctet_core::{RekeyThresholds, Session};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
     use super::QuinnDatagramChannel;
-    use crate::TokioTransportBuilder;
+    use crate::{SecureDatagramChannel, TokioTransportBuilder};
 
     fn server_endpoint() -> (quinn::Endpoint, Vec<CertificateDer<'static>>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
@@ -326,13 +358,13 @@ mod datagram_tests {
         endpoint
     }
 
-    #[tokio::test]
-    async fn quinn_datagram_roundtrip_over_real_connection() {
+    /// Establishes a QUIC connection pair and runs the Foctet handshake over a
+    /// bi-directional stream, returning both connections and their sessions.
+    async fn establish() -> (quinn::Connection, Session, quinn::Connection, Session) {
         let (server_ep, cert_chain) = server_endpoint();
         let server_addr = server_ep.local_addr().expect("server addr");
         let client_ep = client_endpoint(&cert_chain);
 
-        // Establish the QUIC connection.
         let server_task = tokio::spawn(async move {
             let incoming = server_ep.accept().await.expect("incoming");
             incoming.await.expect("server connection")
@@ -344,7 +376,6 @@ mod datagram_tests {
             .expect("client connection");
         let server_conn = server_task.await.expect("server join");
 
-        // Run the Foctet handshake over a bi-directional stream to derive keys.
         let client_conn_hs = client_conn.clone();
         let client_hs = tokio::spawn(async move {
             let (send, recv) = client_conn_hs.open_bi().await.expect("open_bi");
@@ -363,26 +394,49 @@ mod datagram_tests {
         let (_server_io, server_session) = server_channel.into_transport_and_session();
         let (_client_io, client_session) = client_hs.await.expect("client hs join");
 
-        // Bind the datagram channels to the negotiated sessions.
+        (client_conn, client_session, server_conn, server_session)
+    }
+
+    #[tokio::test]
+    async fn quinn_datagram_roundtrip_over_real_connection() {
+        let (client_conn, client_session, server_conn, server_session) = establish().await;
+
         let mut client_dgram =
-            QuinnDatagramChannel::from_active_session(client_conn.clone(), &client_session)
+            QuinnDatagramChannel::from_active_session(client_conn, &client_session)
                 .expect("client datagram channel");
         let mut server_dgram =
-            QuinnDatagramChannel::from_active_session(server_conn.clone(), &server_session)
+            QuinnDatagramChannel::from_active_session(server_conn, &server_session)
                 .expect("server datagram channel");
 
-        // Client -> server datagram.
         client_dgram
             .send_datagram(0, 0, b"datagram payload")
             .expect("send datagram");
         let received = server_dgram.recv_datagram().await.expect("recv datagram");
         assert_eq!(received.plaintext, b"datagram payload");
 
-        // Server -> client datagram (reverse direction keys).
         server_dgram
             .send_datagram(0, 0, b"reply payload")
             .expect("send reply");
         let reply = client_dgram.recv_datagram().await.expect("recv reply");
         assert_eq!(reply.plaintext, b"reply payload");
+    }
+
+    #[tokio::test]
+    async fn generic_secure_datagram_channel_over_quinn() {
+        // The same QUIC connection works through the backend-agnostic
+        // `DatagramTransport` / `SecureDatagramChannel` interface (§3.2).
+        let (client_conn, client_session, server_conn, server_session) = establish().await;
+
+        let mut client = SecureDatagramChannel::from_active_session(client_conn, &client_session)
+            .expect("client secure datagram channel");
+        let mut server = SecureDatagramChannel::from_active_session(server_conn, &server_session)
+            .expect("server secure datagram channel");
+
+        client
+            .send_datagram(0, 0, b"generic datagram")
+            .await
+            .expect("send");
+        let received = server.recv_datagram().await.expect("recv");
+        assert_eq!(received.plaintext, b"generic datagram");
     }
 }

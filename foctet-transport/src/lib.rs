@@ -59,6 +59,7 @@
 
 pub mod adapter;
 mod config;
+pub mod datagram;
 mod error;
 #[cfg(feature = "runtime-futures")]
 mod futures;
@@ -76,6 +77,7 @@ pub mod webtrans;
 
 pub use adapter::SplitIo;
 pub use config::TransportConfig;
+pub use datagram::{DatagramChannelError, DatagramTransport, SecureDatagramChannel};
 pub use error::TransportChannelError;
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};

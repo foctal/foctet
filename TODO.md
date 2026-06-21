@@ -83,8 +83,13 @@ enforcement remain.
       `AxumSealer::seal_response_with_context` (body bounded by `max_body_bytes`).
 - [x] Tests: replay rejected, route substitution rejected, expired rejected,
       response roundtrip, carrier header roundtrip, store capacity/eviction.
-- [ ] **Durable `ReplayStore`** for multi-instance / Workers (KV / Durable
-      Object / Redis) — `InMemoryReplayStore` is single-process only.
+- [x] **Async/durable store interface:** `AsyncReplayStore` trait (`!Send`-friendly
+      for Workers) + blanket impl over sync `ReplayStore`; async opener path
+      (`HttpOpener::open_request_with_async_store`, `AxumOpener` variant).
+- [x] **Redis durable backend** (`RedisReplayStore`, `redis` feature) via atomic
+      `SET NX PX`; compile-checked (needs a live Redis to run).
+- [ ] Cloudflare KV / Durable Object adapter (implement `AsyncReplayStore` in the
+      Worker; shipped trait makes this app-side today).
 - [ ] Make context-bound APIs the **enforced default**; consider deprecating the
       stateless `seal_request`/`open_request` for production use.
 - [ ] Workers adapter parity (`open_request_with_context` for `worker::Request`).
@@ -155,8 +160,11 @@ enforcement remain.
 - [ ] Publish an explicit **transport support matrix** (see `README`/`SPEC §5`).
 
 ### 3.2 Transport shape split
-- [ ] Split APIs by shape: `ByteStream`, `MessageTransport` (raw WebSocket
-      messages), `DatagramTransport`. Define guarantees per shape.
+- [x] `DatagramTransport` trait + generic `SecureDatagramChannel<T>`
+      (`foctet_transport::datagram`); `quinn::Connection` implements it
+      (verified over a real connection).
+- [ ] `ByteStream` / `MessageTransport` (raw WebSocket messages) shape traits
+      with per-shape guarantees and a shared conformance suite.
 
 ### 3.3 Datagram support
 - [x] Datagram encoder/decoder: `foctet_core::datagram::DatagramEndpoint`
@@ -167,10 +175,10 @@ enforcement remain.
       per-`(key_id, stream_id)` fail-closed sequence allocation.
 - [x] quinn datagram adapter (`QuinnDatagramChannel`) + real-connection
       roundtrip test; core loss/reorder/duplicate/oversize/forgery tests.
-- [ ] Generic `DatagramTransport` trait (transport-shape abstraction, §3.2) so
+- [x] Generic `DatagramTransport` trait + `SecureDatagramChannel<T>` (§3.2) so
       non-quinn datagram backends share one interface.
 - [ ] Browser WebTransport datagram adapter; raw-UDP adapter + session/discovery
-      guidance.
+      guidance (implement `DatagramTransport` for each).
 - [ ] MTU/path-change handling and fragmentation policy for payloads above the
       datagram limit (currently fail-closed `FrameTooLarge`).
 - [ ] Rekey-over-datagram story (control frames are stream-oriented today).
@@ -187,8 +195,10 @@ enforcement remain.
 ## 4. P1 — HTTP & Workers (depends on §1.2)
 
 - [~] Axum adapter that requires verified protected context + bounds body size:
-      `AxumOpener::open_request_with_context` (bounded by `max_body_bytes`) done;
-      a ready-made middleware/extractor layer is still TODO.
+      `AxumOpener::open_request_with_context` (+ async-store variant) done, bounded
+      by `max_body_bytes`; a ready-made middleware/extractor layer is still TODO.
+- [x] Durable replay store interface (`AsyncReplayStore`) + Redis backend for
+      multi-instance deployments (see §1.2).
 - [~] Safe default body limits: Axum opener bounds via `max_body_bytes`; document
       recommended values and add backpressure guidance.
 - [ ] Streaming HTTP mode (only after design + review): per-chunk AEAD, unique
