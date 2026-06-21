@@ -79,6 +79,21 @@ All notable changes to this project are documented in this file.
   `quinn::Connection` implements `DatagramTransport` (verified over a real
   connection), so the same secure-datagram code path works for future
   WebTransport/UDP backends.
+
+### Security
+
+- **Secret-material hygiene for key types (P1, §2.5).** Long-term and traffic
+  secrets no longer leak through `Debug` or non-constant-time comparison:
+  - `TrafficKeys`, `EphemeralKeyPair`, `IdentityKeyPair`
+    (`foctet-core`) and `HttpOpenOptions` (`foctet-http`) now have hand-written
+    `Debug` impls that render secret bytes as `<redacted>` instead of the raw
+    array, so a stray `{:?}` in application logs can no longer disclose a
+    traffic key, ephemeral scalar, identity secret, or recipient secret key.
+  - `TrafficKeys` and `IdentityKeyPair` equality is now **constant-time** over
+    the secret bytes (via `subtle::ConstantTimeEq`), replacing the derived
+    `PartialEq`/`Eq` that short-circuited on the first differing byte.
+  - `HttpOpenOptions` stores the recipient secret in a `Zeroizing` wrapper so it
+    is wiped on drop, and no longer derives `PartialEq`/`Eq`.
 - **Durable HTTP replay store interface.** `foctet-http` gains an
   `AsyncReplayStore` trait (intentionally `!Send`-friendly for Cloudflare
   Workers) with a blanket impl over the sync `ReplayStore`, async opener paths
@@ -129,3 +144,11 @@ All notable changes to this project are documented in this file.
 - README and SPEC corrected to reflect the implemented surface: stream-oriented
   only; UDP/datagram and TypeScript/WASM SDK are not implemented; in-session rekey
   is symmetric traffic-key rotation, not post-compromise security.
+- **Breaking:** raw secret-key extraction is now explicitly named and zeroizing.
+  `IdentityKeyPair::secret_key_bytes() -> [u8; 32]` is renamed to
+  `expose_secret_key_bytes() -> Zeroizing<[u8; 32]>`, and
+  `HttpOpenOptions::recipient_secret_key() -> [u8; 32]` to
+  `expose_recipient_secret_key() -> Zeroizing<[u8; 32]>`. The `expose_` prefix
+  makes secret extraction greppable, and the `Zeroizing` return type wipes the
+  caller's copy on drop. Callers that need the raw array can dereference
+  (`*opts.expose_recipient_secret_key()`).

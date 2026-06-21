@@ -142,12 +142,12 @@ fn main() {
     hs_json.push_str(&json_line("server_public_hex", &hex(&server_pub), true));
     hs_json.push_str(&json_line(
         "client_identity_private_hex",
-        &hex(&client_identity.secret_key_bytes()),
+        &hex(&client_identity.expose_secret_key_bytes()[..]),
         true,
     ));
     hs_json.push_str(&json_line(
         "server_identity_private_hex",
-        &hex(&server_identity.secret_key_bytes()),
+        &hex(&server_identity.expose_secret_key_bytes()[..]),
         true,
     ));
     hs_json.push_str(&json_line(

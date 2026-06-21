@@ -165,11 +165,25 @@ enforcement remain.
       connection-level rate limit, and cancellation.
 
 ### 2.5 Key-material ergonomics
-- [ ] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
-- [ ] Stop returning raw secret-key byte copies (`IdentityKeyPair::secret_key_bytes`,
-      HTTP `[u8;32]` recipient secrets in `foctet-http/src/config.rs`).
+- [~] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
+      Secret-leak hardening done: `TrafficKeys`, `EphemeralKeyPair`,
+      `IdentityKeyPair` (`foctet-core`) and `HttpOpenOptions` (`foctet-http`)
+      now redact secret bytes in `Debug` (no more raw key arrays in logs);
+      `TrafficKeys`/`IdentityKeyPair` equality is constant-time via
+      `subtle::ConstantTimeEq`; `HttpOpenOptions` keeps its recipient secret in
+      a `Zeroizing` wrapper. **Still open:** these types remain `Clone` because
+      the session key ring, `previous_keys`, and the sync/async/datagram I/O
+      paths all hold owned `TrafficKeys` copies — making them non-`Clone` needs
+      a key-handle refactor (the bullet below), not just a derive change.
+- [x] Stop returning raw secret-key byte copies.
+      `IdentityKeyPair::secret_key_bytes()` → `expose_secret_key_bytes()` and
+      `HttpOpenOptions::recipient_secret_key()` → `expose_recipient_secret_key()`
+      now return `Zeroizing<[u8; 32]>` (wiped on drop) under an `expose_`-prefixed,
+      greppable name. The internal `key_for`-style raw copies are immediately
+      wrapped in `Zeroizing` at the AEAD call sites (`crypto.rs`).
 - [ ] Key-provider / keystore abstraction: separate key *handles* from bytes;
-      key IDs with rotation policy; optional hardware-backed path.
+      key IDs with rotation policy; optional hardware-backed path. (Prereq for
+      making `TrafficKeys` non-`Clone`.)
 - [ ] Document that session state MUST NOT be restored with reset counters under
       the same traffic key; gate persistence until designed safely.
 

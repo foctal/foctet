@@ -5,6 +5,7 @@ use chacha20poly1305::{
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -23,7 +24,17 @@ pub enum Direction {
 }
 
 /// Bidirectional traffic keys bound to a single `key_id`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// # Secret material
+///
+/// The `c2s` / `s2c` fields are live XChaCha20-Poly1305 keys. They are
+/// **not** printed by the [`Debug`] implementation (which redacts them), are
+/// compared in constant time (see the [`PartialEq`] impl), and are zeroized on
+/// drop. Reading the raw bytes directly via the public fields is an explicit,
+/// auditable exposure — prefer [`TrafficKeys::key_for`], and only copy the
+/// bytes out when you immediately wrap the copy (e.g. in
+/// [`zeroize::Zeroizing`]).
+#[derive(Clone)]
 pub struct TrafficKeys {
     /// Active key identifier carried in frame headers.
     pub key_id: u8,
@@ -42,6 +53,32 @@ impl TrafficKeys {
         }
     }
 }
+
+impl core::fmt::Debug for TrafficKeys {
+    /// Redacts the directional key bytes so they cannot leak into logs.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TrafficKeys")
+            .field("key_id", &self.key_id)
+            .field("c2s", &"<redacted>")
+            .field("s2c", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PartialEq for TrafficKeys {
+    /// Compares the directional keys in constant time.
+    ///
+    /// The `key_id` is a public frame-header byte and is compared normally; the
+    /// secret key bytes are compared with [`subtle::ConstantTimeEq`] so that
+    /// equality checks do not leak key material through timing.
+    fn eq(&self, other: &Self) -> bool {
+        let c2s_eq = self.c2s.ct_eq(&other.c2s);
+        let s2c_eq = self.s2c.ct_eq(&other.s2c);
+        self.key_id == other.key_id && (c2s_eq & s2c_eq).into()
+    }
+}
+
+impl Eq for TrafficKeys {}
 
 impl Drop for TrafficKeys {
     fn drop(&mut self) {
@@ -113,11 +150,21 @@ pub fn random_session_salt() -> [u8; 32] {
 }
 
 /// Ephemeral X25519 key pair used during native handshake.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EphemeralKeyPair {
     private: Zeroizing<[u8; 32]>,
     /// Public key bytes.
     pub public: [u8; 32],
+}
+
+impl core::fmt::Debug for EphemeralKeyPair {
+    /// Redacts the private scalar so it cannot leak into logs.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EphemeralKeyPair")
+            .field("private", &"<redacted>")
+            .field("public", &self.public)
+            .finish()
+    }
 }
 
 impl EphemeralKeyPair {
@@ -307,5 +354,66 @@ mod tests {
         let max_plaintext = (u32::MAX as usize) - AEAD_TAG_LEN;
         let err = checked_ciphertext_len(max_plaintext + 1).expect_err("must not truncate");
         assert!(matches!(err, CoreError::FrameTooLarge));
+    }
+
+    #[test]
+    fn traffic_keys_debug_redacts_key_bytes() {
+        let keys = TrafficKeys {
+            key_id: 9,
+            c2s: [0xAB; 32],
+            s2c: [0xCD; 32],
+        };
+        let rendered = format!("{keys:?}");
+        assert!(rendered.contains("key_id: 9"));
+        assert!(rendered.contains("<redacted>"));
+        // No raw key byte should appear in the debug output.
+        assert!(!rendered.contains("ab"));
+        assert!(!rendered.contains("171")); // 0xAB as decimal
+        assert!(!rendered.contains("205")); // 0xCD as decimal
+    }
+
+    #[test]
+    fn traffic_keys_equality_is_value_based() {
+        let a = TrafficKeys {
+            key_id: 1,
+            c2s: [0x01; 32],
+            s2c: [0x02; 32],
+        };
+        let b = TrafficKeys {
+            key_id: 1,
+            c2s: [0x01; 32],
+            s2c: [0x02; 32],
+        };
+        let c = TrafficKeys {
+            key_id: 1,
+            c2s: [0x01; 32],
+            s2c: [0x03; 32],
+        };
+        let d = TrafficKeys {
+            key_id: 2,
+            c2s: [0x01; 32],
+            s2c: [0x02; 32],
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn ephemeral_key_pair_debug_redacts_private_scalar() {
+        // Use a fixed private scalar so we can assert its rendered array form is
+        // absent from the Debug output.
+        let private = Zeroizing::new([0x5A_u8; 32]);
+        let public = PublicKey::from(&StaticSecret::from(*private)).to_bytes();
+        let pair = EphemeralKeyPair { private, public };
+
+        let rendered = format!("{pair:?}");
+        assert!(rendered.contains("<redacted>"));
+        // The private scalar's array representation must never appear.
+        let leaked = format!("{:?}", [0x5A_u8; 32]);
+        assert!(
+            !rendered.contains(&leaked),
+            "private scalar leaked into Debug output: {rendered}"
+        );
     }
 }

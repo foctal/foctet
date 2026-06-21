@@ -264,10 +264,10 @@ impl HttpOpener {
         match self.options.limits() {
             Some(limits) => raw::open_http_body_with_limits(
                 envelope,
-                self.options.recipient_secret_key(),
+                *self.options.expose_recipient_secret_key(),
                 limits,
             ),
-            None => raw::open_http_body(envelope, self.options.recipient_secret_key()),
+            None => raw::open_http_body(envelope, *self.options.expose_recipient_secret_key()),
         }
     }
 
@@ -281,8 +281,13 @@ impl HttpOpener {
                 &default_limits
             }
         };
-        open_body_with_context(envelope, self.options.recipient_secret_key(), aad, limits)
-            .map_err(HttpError::OpenFailed)
+        open_body_with_context(
+            envelope,
+            *self.options.expose_recipient_secret_key(),
+            aad,
+            limits,
+        )
+        .map_err(HttpError::OpenFailed)
     }
 
     /// Opens a request sealed with [`HttpSealer::seal_request_with_context`],

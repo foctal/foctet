@@ -12,6 +12,7 @@ readme = "../README.md"
 foctet-core = { workspace = true }
 http = "1.4"
 thiserror.workspace = true
+zeroize.workspace = true
 axum = { version = "0.8", optional = true }
 redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp"] }
 

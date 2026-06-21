@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::CoreError;
@@ -10,19 +11,32 @@ pub const HANDSHAKE_AUTH_NONE: u8 = 0;
 pub const HANDSHAKE_AUTH_ED25519: u8 = 1;
 
 /// Local long-term identity key pair used to sign handshake transcripts.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct IdentityKeyPair {
     secret_key: Zeroizing<[u8; 32]>,
     public_key: [u8; 32],
 }
 
 impl core::fmt::Debug for IdentityKeyPair {
+    /// Prints only the public key; the secret scalar is never formatted.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IdentityKeyPair")
             .field("public_key", &self.public_key)
+            .field("secret_key", &"<redacted>")
             .finish()
     }
 }
+
+impl PartialEq for IdentityKeyPair {
+    /// Compares identity key pairs in constant time over the secret scalar.
+    fn eq(&self, other: &Self) -> bool {
+        let secret_eq = self.secret_key.ct_eq(other.secret_key.as_ref());
+        let public_eq = self.public_key.ct_eq(&other.public_key);
+        (secret_eq & public_eq).into()
+    }
+}
+
+impl Eq for IdentityKeyPair {}
 
 impl IdentityKeyPair {
     /// Generates a fresh Ed25519 identity key pair.
@@ -46,9 +60,16 @@ impl IdentityKeyPair {
         self.public_key
     }
 
-    /// Returns the Ed25519 secret key bytes.
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        *self.secret_key
+    /// Exposes a zeroizing copy of the Ed25519 secret key bytes.
+    ///
+    /// This is a deliberate, auditable extraction of long-term secret material
+    /// (for persistence or serialization). The returned [`Zeroizing`] wrapper
+    /// wipes its copy on drop, but callers are responsible for not spreading
+    /// further unprotected copies. Named with an `expose_` prefix so secret
+    /// extraction is greppable and obvious at the call site.
+    #[must_use]
+    pub fn expose_secret_key_bytes(&self) -> Zeroizing<[u8; 32]> {
+        self.secret_key.clone()
     }
 
     /// Signs handshake transcript bytes.
@@ -197,5 +218,42 @@ impl SessionAuthConfig {
     /// Returns whether remote handshake authentication is mandatory.
     pub fn requires_peer_authentication(&self) -> bool {
         self.require_peer_authentication
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_debug_redacts_secret_key() {
+        let identity = IdentityKeyPair::from_secret_key_bytes([0x37; 32]);
+        let rendered = format!("{identity:?}");
+        assert!(rendered.contains("<redacted>"));
+        // The secret scalar's array form must never appear.
+        let leaked = format!("{:?}", [0x37_u8; 32]);
+        assert!(
+            !rendered.contains(&leaked),
+            "secret key leaked into Debug output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn identity_equality_is_value_based() {
+        let a = IdentityKeyPair::from_secret_key_bytes([0x11; 32]);
+        let b = IdentityKeyPair::from_secret_key_bytes([0x11; 32]);
+        let c = IdentityKeyPair::from_secret_key_bytes([0x22; 32]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn expose_secret_key_bytes_round_trips() {
+        let secret = [0x9C; 32];
+        let identity = IdentityKeyPair::from_secret_key_bytes(secret);
+        let exposed = identity.expose_secret_key_bytes();
+        assert_eq!(*exposed, secret);
+        // Rebuilding from the exposed bytes yields the same identity.
+        assert_eq!(IdentityKeyPair::from_secret_key_bytes(*exposed), identity);
     }
 }

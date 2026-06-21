@@ -1,4 +1,5 @@
 use foctet_core::BodyEnvelopeLimits;
+use zeroize::Zeroizing;
 
 /// Shared HTTP behavior configuration for high-level opener/sealer helpers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,17 +87,32 @@ impl HttpSealOptions {
 }
 
 /// High-level options used to construct an [`crate::HttpOpener`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Holds the recipient X25519 secret key. The key is stored in a zeroizing
+/// wrapper (wiped on drop), is **not** printed by [`Debug`] (which redacts it),
+/// and is only retrievable through the explicitly named
+/// [`HttpOpenOptions::expose_recipient_secret_key`].
+#[derive(Clone)]
 pub struct HttpOpenOptions {
-    recipient_secret_key: [u8; 32],
+    recipient_secret_key: Zeroizing<[u8; 32]>,
     limits: Option<BodyEnvelopeLimits>,
+}
+
+impl core::fmt::Debug for HttpOpenOptions {
+    /// Redacts the recipient secret key so it cannot leak into logs.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HttpOpenOptions")
+            .field("recipient_secret_key", &"<redacted>")
+            .field("limits", &self.limits)
+            .finish()
+    }
 }
 
 impl HttpOpenOptions {
     /// Creates opening options for a recipient secret key.
     pub fn new(recipient_secret_key: [u8; 32]) -> Self {
         Self {
-            recipient_secret_key,
+            recipient_secret_key: Zeroizing::new(recipient_secret_key),
             limits: None,
         }
     }
@@ -107,13 +123,42 @@ impl HttpOpenOptions {
         self
     }
 
-    /// Returns the recipient secret key.
-    pub fn recipient_secret_key(&self) -> [u8; 32] {
-        self.recipient_secret_key
+    /// Exposes a zeroizing copy of the recipient secret key.
+    ///
+    /// Named with an `expose_` prefix so secret extraction is greppable and
+    /// obvious at the call site. The returned [`Zeroizing`] wipes its copy on
+    /// drop.
+    #[must_use]
+    pub fn expose_recipient_secret_key(&self) -> Zeroizing<[u8; 32]> {
+        self.recipient_secret_key.clone()
     }
 
     /// Returns explicit opening limits, if configured.
     pub fn limits(&self) -> Option<&BodyEnvelopeLimits> {
         self.limits.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_options_debug_redacts_secret_key() {
+        let options = HttpOpenOptions::new([0x4D; 32]);
+        let rendered = format!("{options:?}");
+        assert!(rendered.contains("<redacted>"));
+        let leaked = format!("{:?}", [0x4D_u8; 32]);
+        assert!(
+            !rendered.contains(&leaked),
+            "recipient secret leaked into Debug output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn open_options_expose_round_trips() {
+        let secret = [0x7E; 32];
+        let options = HttpOpenOptions::new(secret);
+        assert_eq!(*options.expose_recipient_secret_key(), secret);
     }
 }

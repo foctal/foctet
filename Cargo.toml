@@ -27,6 +27,7 @@ hkdf = "0.12"
 rand_core = "0.6"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 sha2 = "0.10"
+subtle = "2.6"
 thiserror = "2.0"
 x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = "1.8"
