@@ -1,4 +1,4 @@
-use std::{future::poll_fn, pin::Pin};
+use std::{future::poll_fn, pin::Pin, time::Duration};
 
 use foctet_core::{
     AsyncSecureChannel, ControlMessage, CoreError, FoctetFramed, RekeyThresholds, Session,
@@ -10,6 +10,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::{TransportConfig, adapter::SplitIo};
 
 const HANDSHAKE_CONTROL_MAX_LEN: usize = 1024;
+
+/// Default deadline for [`TokioTransportBuilder::establish_initiator_with_timeout`]
+/// and the responder/auth variants: enough for a two-message round trip over a
+/// slow network, short enough to bound a stalled or hostile peer's hold on
+/// server resources.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builder for the recommended Tokio-based transport integration path.
 #[derive(Clone, Copy, Debug, Default)]
@@ -129,6 +135,120 @@ impl TokioTransportBuilder {
     {
         let session = run_responder_handshake(&mut io, thresholds, auth).await?;
         self.build(io, session)
+    }
+
+    /// Runs the native Foctet handshake as initiator with an explicit deadline,
+    /// failing with [`CoreError::HandshakeTimeout`] if the peer does not
+    /// complete it in time. Bounds how long a stalled or hostile peer can hold
+    /// a connection open before authentication completes.
+    pub async fn establish_initiator_with_auth_and_timeout<T>(
+        self,
+        mut io: T,
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+        timeout: Duration,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let session = tokio::time::timeout(
+            timeout,
+            run_initiator_handshake(&mut io, thresholds, auth),
+        )
+        .await
+        .map_err(|_| CoreError::HandshakeTimeout)??;
+        self.build(io, session)
+    }
+
+    /// Convenience wrapper using [`DEFAULT_HANDSHAKE_TIMEOUT`] and the
+    /// unauthenticated-for-testing auth config; see
+    /// [`Self::establish_initiator_with_auth_and_timeout`].
+    pub async fn establish_initiator_with_timeout<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        timeout: Duration,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_initiator_with_auth_and_timeout(
+            io,
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+            timeout,
+        )
+        .await
+    }
+
+    /// Runs the native Foctet handshake as responder with an explicit
+    /// deadline; see [`Self::establish_initiator_with_auth_and_timeout`].
+    pub async fn establish_responder_with_auth_and_timeout<T>(
+        self,
+        mut io: T,
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+        timeout: Duration,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let session = tokio::time::timeout(
+            timeout,
+            run_responder_handshake(&mut io, thresholds, auth),
+        )
+        .await
+        .map_err(|_| CoreError::HandshakeTimeout)??;
+        self.build(io, session)
+    }
+
+    /// Convenience wrapper using [`DEFAULT_HANDSHAKE_TIMEOUT`] and the
+    /// unauthenticated-for-testing auth config; see
+    /// [`Self::establish_responder_with_auth_and_timeout`].
+    pub async fn establish_responder_with_timeout<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        timeout: Duration,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_responder_with_auth_and_timeout(
+            io,
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+            timeout,
+        )
+        .await
+    }
+
+    /// Convenience wrapper using [`DEFAULT_HANDSHAKE_TIMEOUT`]; see
+    /// [`Self::establish_initiator_with_timeout`].
+    pub async fn establish_initiator_with_default_timeout<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_initiator_with_timeout(io, thresholds, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
+    }
+
+    /// Convenience wrapper using [`DEFAULT_HANDSHAKE_TIMEOUT`]; see
+    /// [`Self::establish_responder_with_timeout`].
+    pub async fn establish_responder_with_default_timeout<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_responder_with_timeout(io, thresholds, DEFAULT_HANDSHAKE_TIMEOUT)
+            .await
     }
 
     /// Runs the native Foctet handshake as initiator on split transport halves, then builds a secure channel.
@@ -376,5 +496,62 @@ mod tests {
         let msg = server.recv_application().await.expect("server recv");
         assert_eq!(msg, b"hello");
         assert_eq!(client.config().app_stream_id(), 9);
+    }
+
+    #[tokio::test]
+    async fn establish_with_timeout_succeeds_when_peer_responds_in_time() {
+        let thresholds = RekeyThresholds::default();
+        let (client_recv, server_send) = tokio::io::duplex(1024);
+        let (server_recv, client_send) = tokio::io::duplex(1024);
+
+        let builder = TokioTransportBuilder::new();
+        let client_task = tokio::spawn({
+            let thresholds = thresholds.clone();
+            async move {
+                builder
+                    .establish_initiator_with_timeout(
+                        crate::adapter::SplitIo::from_split(client_recv, client_send),
+                        thresholds,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+            }
+        });
+
+        let server = builder
+            .establish_responder_with_timeout(
+                crate::adapter::SplitIo::from_split(server_recv, server_send),
+                thresholds,
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(server.is_ok());
+        let client = client_task.await.expect("client join");
+        assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn establish_with_timeout_fails_closed_when_peer_never_responds() {
+        let thresholds = RekeyThresholds::default();
+        // The responder side is never driven, so the initiator's "wait for
+        // server hello" read never resolves; the handshake must time out
+        // rather than hang forever.
+        let (client_recv, _server_send) = tokio::io::duplex(1024);
+        let (_server_recv, client_send) = tokio::io::duplex(1024);
+
+        let builder = TokioTransportBuilder::new();
+        let result = builder
+            .establish_initiator_with_timeout(
+                crate::adapter::SplitIo::from_split(client_recv, client_send),
+                thresholds,
+                std::time::Duration::from_millis(50),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(foctet_core::CoreError::HandshakeTimeout)
+                | Err(foctet_core::CoreError::Io(_))
+                | Err(foctet_core::CoreError::UnexpectedEof)
+        ));
     }
 }

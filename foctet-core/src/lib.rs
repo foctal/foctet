@@ -213,4 +213,7 @@ pub enum CoreError {
     /// Peer identity did not match the pinned expectation.
     #[error("peer identity mismatch")]
     PeerIdentityMismatch,
+    /// The handshake did not complete within the configured deadline.
+    #[error("handshake timed out")]
+    HandshakeTimeout,
 }

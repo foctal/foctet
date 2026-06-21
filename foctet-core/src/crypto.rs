@@ -143,6 +143,19 @@ impl EphemeralKeyPair {
     }
 }
 
+/// XChaCha20-Poly1305 authentication tag length, in bytes.
+const AEAD_TAG_LEN: usize = 16;
+
+/// Computes the ciphertext length (plaintext + AEAD tag) for a given plaintext
+/// length, failing closed instead of silently truncating if it would not fit
+/// in the frame header's `u32 ct_len` field.
+fn checked_ciphertext_len(plaintext_len: usize) -> Result<u32, CoreError> {
+    if plaintext_len > (u32::MAX as usize) - AEAD_TAG_LEN {
+        return Err(CoreError::FrameTooLarge);
+    }
+    Ok((plaintext_len + AEAD_TAG_LEN) as u32)
+}
+
 /// Encrypts plaintext into a Foctet frame using AEAD profile `0x01`.
 pub fn encrypt_frame(
     keys: &TrafficKeys,
@@ -152,6 +165,12 @@ pub fn encrypt_frame(
     seq: u64,
     plaintext: &[u8],
 ) -> Result<Frame, CoreError> {
+    // Reject plaintext that would make the ciphertext length (plaintext + AEAD
+    // tag) overflow the header's `u32 ct_len` field. Without this check the
+    // cast below would silently truncate, producing a frame whose declared
+    // length doesn't match its actual ciphertext.
+    let expected_ct_len = checked_ciphertext_len(plaintext.len())?;
+
     let key = Zeroizing::new(keys.key_for(direction));
     let cipher =
         XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| CoreError::InvalidKeyLength)?;
@@ -169,7 +188,7 @@ pub fn encrypt_frame(
     let nonce = XNonce::from_slice(&nonce_raw);
 
     let mut aad_header = header.clone();
-    aad_header.ct_len = (plaintext.len() + 16) as u32;
+    aad_header.ct_len = expected_ct_len;
     let aad = aad_header.encode();
 
     let ciphertext = cipher
@@ -272,5 +291,21 @@ mod tests {
             &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         );
         assert_eq!(&nonce[13..], &[0u8; 11]);
+    }
+
+    #[test]
+    fn checked_ciphertext_len_fits_just_below_overflow() {
+        let max_plaintext = (u32::MAX as usize) - AEAD_TAG_LEN;
+        assert_eq!(
+            checked_ciphertext_len(max_plaintext).expect("fits"),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn checked_ciphertext_len_fails_closed_on_overflow() {
+        let max_plaintext = (u32::MAX as usize) - AEAD_TAG_LEN;
+        let err = checked_ciphertext_len(max_plaintext + 1).expect_err("must not truncate");
+        assert!(matches!(err, CoreError::FrameTooLarge));
     }
 }

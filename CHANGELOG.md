@@ -22,6 +22,28 @@ All notable changes to this project are documented in this file.
 - **Bounded replay-window map (P2).** `ReplayProtector` caps the number of distinct
   `(key_id, stream_id)` windows (`DEFAULT_MAX_REPLAY_WINDOWS`), returning
   `ReplayCapacityExceeded` rather than growing unbounded.
+- **Fail closed on outbound plaintext length overflow (P1).** `encrypt_frame`
+  now rejects plaintext whose ciphertext length (plaintext + AEAD tag) would
+  overflow the frame header's `u32 ct_len` field, instead of silently
+  truncating it. Shared by every sync (`SyncIo`) and async (`FoctetFramed`)
+  send path via a new internal `checked_ciphertext_len` helper.
+- **Handshake read timeout for the Tokio transport path (P1).**
+  `TokioTransportBuilder::establish_initiator_with_timeout` /
+  `establish_responder_with_timeout` (plus `_with_auth_and_timeout` and
+  `_with_default_timeout` convenience variants, `DEFAULT_HANDSHAKE_TIMEOUT`)
+  bound how long the native handshake can block on a stalled or hostile peer,
+  failing with the new `CoreError::HandshakeTimeout` instead of hanging
+  forever. The `quinn`/`websock`/`webtrans`/`muxtls` adapters all build on
+  `TokioTransportBuilder`, so they can opt in by switching call sites.
+- **`cargo-audit` advisory scan in CI; fixed the vulnerabilities it found.**
+  Bumped `quinn-proto` (0.11.13 → 0.11.14, fixes a high-severity Quinn DoS,
+  RUSTSEC-2026-0037), `rustls-webpki` (0.103.9 → 0.103.13, fixes several
+  certificate-validation advisories), `rand` (0.9.2 → 0.9.4), and `rkyv`
+  (0.8.15 → 0.8.16) in `Cargo.lock` — all compatible patch/minor bumps, no API
+  changes. Added a `security-audit` CI job (`.github/workflows/rust.yml`,
+  via `rustsec/audit-check`) that fails the build on any future vulnerability
+  finding; it scans advisories only, not licenses (that's `cargo-deny`,
+  still open below).
 
 ### Added
 

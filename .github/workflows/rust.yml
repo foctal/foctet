@@ -31,3 +31,15 @@ jobs:
         cargo test -p foctet-core --no-default-features
         cargo test -p foctet-core --no-default-features --features runtime-futures
         cargo test -p foctet-core --no-default-features --features runtime-tokio
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    # Vulnerability/advisory scan only (no license checks) via the official
+    # RustSec action, which uses a prebuilt `cargo-audit` instead of compiling
+    # it from source, so this job stays fast.
+    steps:
+    - uses: actions/checkout@v4
+    - uses: rustsec/audit-check@v2.0.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}

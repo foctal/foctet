@@ -23,7 +23,7 @@ pin-project-lite = "0.2"
 futures-io = { version = "0.3", optional = true }
 futures-sink = { version = "0.3", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
-tokio = { version = "1.48", features = ["io-util"], optional = true }
+tokio = { version = "1.48", features = ["io-util", "time"], optional = true }
 muxtls = { version = "0.1.0", default-features = false, optional = true }
 webtrans = { version = "0.4.0", default-features = false, optional = true }
 websock = { version = "0.4.0", default-features = false, optional = true }

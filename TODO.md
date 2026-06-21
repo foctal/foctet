@@ -140,8 +140,20 @@ enforcement remain.
       message size, handshake duration, outstanding work.
 - [ ] Apply consistently to sync, async, datagram, HTTP, archive APIs.
 - [x] Replay-window count cap (`DEFAULT_MAX_REPLAY_WINDOWS`) — first piece.
-- [ ] Bound outbound plaintext/frame length before `u32` ct_len conversion.
-- [ ] Handshake read **timeout** + connection-level rate limit + cancellation.
+- [x] Bound outbound plaintext/frame length before `u32` ct_len conversion
+      (`crypto::checked_ciphertext_len` in `foctet-core/src/crypto.rs`,
+      shared by `encrypt_frame`, used by every sync/async send path).
+      Still pending: the broader `ProtocolLimits` unification above.
+- [~] Handshake read **timeout** + connection-level rate limit + cancellation.
+      Timeout done for the Tokio path: `TokioTransportBuilder::establish_*_with_timeout`
+      / `establish_*_with_auth_and_timeout` / `establish_*_with_default_timeout`
+      (`DEFAULT_HANDSHAKE_TIMEOUT` = 10s) in `foctet-transport/src/tokio.rs`,
+      using `tokio::time::timeout` and a new `CoreError::HandshakeTimeout`;
+      `quinn`/`websock`/`webtrans`/`muxtls` all build on this builder so they
+      gain it once their call sites switch to the timeout variants. Still
+      missing: the same for the runtime-agnostic `FuturesTransportBuilder`
+      (needs a caller-supplied timer since that path has no runtime), a
+      connection-level rate limit, and cancellation.
 
 ### 2.5 Key-material ergonomics
 - [ ] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
@@ -241,7 +253,13 @@ enforcement remain.
 
 ## 6. P1 — Security assurance & supply chain (CI)
 
-- [ ] `cargo-audit` (advisory scan) in CI; fail on vulnerable deps.
+- [x] `cargo-audit` (advisory scan) in CI; fail on vulnerable deps
+      (`security-audit` job in `.github/workflows/rust.yml`). Fixed the
+      vulnerabilities it found in `Cargo.lock` at the time
+      (`quinn-proto`, `rustls-webpki`, `rand`, `rkyv` bumped to patched
+      versions); one `unmaintained`-only warning remains on a dev-dependency
+      (`rustls-pemfile`, used by transport examples/tests), which `cargo
+      audit` does not fail the build on by default.
 - [ ] License/source policy (`cargo-deny`).
 - [ ] Reproducible locked builds; committed `Cargo.lock` checks.
 - [ ] MSRV policy + CI job.
