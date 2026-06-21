@@ -13,6 +13,7 @@ foctet-core = { workspace = true }
 http = "1.4"
 thiserror.workspace = true
 axum = { version = "0.8", optional = true }
+redis = { version = "0.27", optional = true, default-features = false, features = ["tokio-comp"] }
 
 [dev-dependencies]
 rand_core.workspace = true
@@ -27,6 +28,7 @@ worker = { version = "0.7.5", optional = true }
 default = []
 axum = ["dep:axum"]
 workers = ["dep:worker"]
+redis = ["dep:redis"]
 
 [[example]]
 name = "axum_body_echo_server"

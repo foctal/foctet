@@ -67,8 +67,11 @@ pub use context::{
 pub use context::unix_now_secs;
 pub use error::HttpError;
 pub use replay_store::{
-    DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore, ReplayStoreError,
+    AsyncReplayStore, DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore,
+    ReplayStoreError,
 };
+#[cfg(feature = "redis")]
+pub use replay_store::RedisReplayStore;
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";
@@ -304,27 +307,85 @@ impl HttpOpener {
     where
         S: ReplayStore + ?Sized,
     {
-        let (mut parts, body) = request.into_parts();
-        raw::ensure_foctet_content_type(&parts.headers)?;
-        let carrier = ContextCarrier::from_headers(&parts.headers)?;
-        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
-        context.validate_freshness(now_secs, max_skew_secs)?;
+        let (parts, plain, carrier) =
+            self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
 
-        let aad = context.to_aad_bytes();
-        let plain = self.open_body_with_aad(&body, &aad)?;
-
-        match store
-            .check_and_insert(&carrier.message_id, carrier.expiry_secs, now_secs)
+        match ReplayStore::check_and_insert(store, &carrier.message_id, carrier.expiry_secs, now_secs)
             .map_err(HttpError::ReplayStore)?
         {
             ReplayCheck::Accepted => {}
             ReplayCheck::Replay => return Err(HttpError::Replayed),
         }
 
+        Ok(self.open_request_finalize(parts, plain))
+    }
+
+    /// Opens a context-bound request using a durable [`AsyncReplayStore`].
+    ///
+    /// Identical to [`HttpOpener::open_request_with_context`] but awaits the
+    /// store, so it works with networked/durable backends (Redis, Cloudflare KV,
+    /// a Durable Object, or a shared SQL table) needed once more than one
+    /// instance serves traffic. Authentication still happens before the store is
+    /// consulted.
+    pub async fn open_request_with_async_store<S>(
+        &self,
+        request: Request<Vec<u8>>,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<Request<Vec<u8>>, HttpError>
+    where
+        S: AsyncReplayStore + ?Sized,
+    {
+        let (parts, plain, carrier) =
+            self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
+
+        match AsyncReplayStore::check_and_insert(
+            store,
+            &carrier.message_id,
+            carrier.expiry_secs,
+            now_secs,
+        )
+        .await
+        .map_err(HttpError::ReplayStore)?
+        {
+            ReplayCheck::Accepted => {}
+            ReplayCheck::Replay => return Err(HttpError::Replayed),
+        }
+
+        Ok(self.open_request_finalize(parts, plain))
+    }
+
+    /// Shared request-open logic up to (but excluding) the replay-store check:
+    /// validates content type, parses the carrier, reconstructs and freshness-
+    /// checks the context, and authenticates the body.
+    fn open_request_prepare(
+        &self,
+        request: Request<Vec<u8>>,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<(http::request::Parts, Vec<u8>, ContextCarrier), HttpError> {
+        let (parts, body) = request.into_parts();
+        raw::ensure_foctet_content_type(&parts.headers)?;
+        let carrier = ContextCarrier::from_headers(&parts.headers)?;
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        context.validate_freshness(now_secs, max_skew_secs)?;
+        let aad = context.to_aad_bytes();
+        let plain = self.open_body_with_aad(&body, &aad)?;
+        Ok((parts, plain, carrier))
+    }
+
+    fn open_request_finalize(
+        &self,
+        mut parts: http::request::Parts,
+        plain: Vec<u8>,
+    ) -> Request<Vec<u8>> {
         if self.config.strip_content_type_on_open() {
             parts.headers.remove(header::CONTENT_TYPE);
         }
-        Ok(Request::from_parts(parts, plain))
+        Request::from_parts(parts, plain)
     }
 
     /// Opens a response sealed with [`HttpSealer::seal_response_with_context`],
@@ -512,6 +573,41 @@ mod tests {
         // Replaying the identical captured request is rejected.
         let err = opener
             .open_request_with_context(clone_request(&sealed), &store, now, 30, binding)
+            .expect_err("replay must be rejected");
+        assert!(matches!(err, HttpError::Replayed));
+    }
+
+    #[tokio::test]
+    async fn context_bound_request_async_store_roundtrip_and_replay() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        // InMemoryReplayStore is usable through the async path via the blanket impl.
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        let opened = opener
+            .open_request_with_async_store(clone_request(&sealed), &store, now, 30, binding)
+            .await
+            .expect("first open");
+        assert_eq!(opened.body(), b"charge");
+
+        let err = opener
+            .open_request_with_async_store(clone_request(&sealed), &store, now, 30, binding)
+            .await
             .expect_err("replay must be rejected");
         assert!(matches!(err, HttpError::Replayed));
     }

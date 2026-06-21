@@ -9,8 +9,8 @@ use ::axum::response::Response as AxumResponse;
 use thiserror::Error;
 
 use crate::{
-    ContextBinding, ContextCarrier, HttpError, HttpOpenOptions, HttpOpener, HttpSealOptions,
-    HttpSealer, ReplayStore,
+    AsyncReplayStore, ContextBinding, ContextCarrier, HttpError, HttpOpenOptions, HttpOpener,
+    HttpSealOptions, HttpSealer, ReplayStore,
 };
 
 /// Error type for Axum adapter operations.
@@ -103,6 +103,31 @@ impl AxumOpener {
         let request = http::Request::from_parts(parts, body_bytes.to_vec());
         self.opener
             .open_request_with_context(request, store, now_secs, max_skew_secs, binding)
+            .map_err(AxumError::Http)
+    }
+
+    /// Opens an encrypted Axum request using a durable [`AsyncReplayStore`]
+    /// (Redis, Cloudflare KV, a shared SQL table, …) for multi-instance
+    /// deployments.
+    pub async fn open_request_with_async_store<S>(
+        &self,
+        request: AxumRequest,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<http::Request<Vec<u8>>, AxumError>
+    where
+        S: AsyncReplayStore + ?Sized,
+    {
+        let (parts, body) = request.into_parts();
+        let body_bytes = to_bytes(body, self.max_body_bytes)
+            .await
+            .map_err(AxumError::BodyRead)?;
+        let request = http::Request::from_parts(parts, body_bytes.to_vec());
+        self.opener
+            .open_request_with_async_store(request, store, now_secs, max_skew_secs, binding)
+            .await
             .map_err(AxumError::Http)
     }
 }

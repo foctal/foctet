@@ -61,6 +61,46 @@ pub trait ReplayStore {
     ) -> Result<ReplayCheck, ReplayStoreError>;
 }
 
+/// Asynchronous anti-replay store for durable / networked backends.
+///
+/// This is the trait to implement for stores that must perform I/O — Redis,
+/// Cloudflare KV, a Durable Object, or a SQL table shared across instances —
+/// which is required once requests are served by more than one process or
+/// serverless isolate (an [`InMemoryReplayStore`] is single-process only).
+///
+/// The futures intentionally do **not** require `Send`, so the trait is usable
+/// from `!Send` runtimes such as Cloudflare Workers. Implementations must keep
+/// the same **atomic check-and-insert** contract as [`ReplayStore`].
+///
+/// Every synchronous [`ReplayStore`] is also an [`AsyncReplayStore`] via a
+/// blanket implementation, so an [`InMemoryReplayStore`] works with the async
+/// opener path too.
+#[allow(async_fn_in_trait)]
+pub trait AsyncReplayStore {
+    /// Atomically records `message_id` (valid until `expires_at_secs`) and
+    /// reports whether it had already been seen.
+    async fn check_and_insert(
+        &self,
+        message_id: &[u8; MESSAGE_ID_LEN],
+        expires_at_secs: u64,
+        now_secs: u64,
+    ) -> Result<ReplayCheck, ReplayStoreError>;
+}
+
+impl<T> AsyncReplayStore for T
+where
+    T: ReplayStore + ?Sized,
+{
+    async fn check_and_insert(
+        &self,
+        message_id: &[u8; MESSAGE_ID_LEN],
+        expires_at_secs: u64,
+        now_secs: u64,
+    ) -> Result<ReplayCheck, ReplayStoreError> {
+        ReplayStore::check_and_insert(self, message_id, expires_at_secs, now_secs)
+    }
+}
+
 /// Single-process in-memory [`ReplayStore`].
 ///
 /// Suitable for a single server instance. It is **not** shared across processes
@@ -126,20 +166,141 @@ impl ReplayStore for InMemoryReplayStore {
     }
 }
 
+/// Encodes a replay-store key as `{prefix}{hex(message_id)}`.
+fn replay_key(prefix: &str, message_id: &[u8; MESSAGE_ID_LEN]) -> String {
+    use std::fmt::Write;
+    let mut key = String::with_capacity(prefix.len() + MESSAGE_ID_LEN * 2);
+    key.push_str(prefix);
+    for byte in message_id {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
+}
+
+/// Durable, multi-instance [`AsyncReplayStore`] backed by Redis.
+///
+/// Uses a single atomic `SET key 1 NX PX <ttl>` per check: Redis sets the key
+/// only if absent and reports whether it did, giving the required atomic
+/// check-and-insert, while `PX` lets Redis expire entries at the context's
+/// expiry so the keyspace stays bounded without manual eviction.
+///
+/// Requires the `redis` feature and a reachable Redis server.
+#[cfg(feature = "redis")]
+#[derive(Clone)]
+pub struct RedisReplayStore {
+    client: redis::Client,
+    prefix: String,
+}
+
+#[cfg(feature = "redis")]
+impl RedisReplayStore {
+    /// Default key prefix.
+    pub const DEFAULT_PREFIX: &'static str = "foctet:replay:";
+
+    /// Creates a store from an existing Redis client.
+    pub fn new(client: redis::Client) -> Self {
+        Self {
+            client,
+            prefix: Self::DEFAULT_PREFIX.to_string(),
+        }
+    }
+
+    /// Opens a Redis client from a connection URL (e.g. `redis://127.0.0.1/`).
+    pub fn open(url: &str) -> Result<Self, redis::RedisError> {
+        Ok(Self::new(redis::Client::open(url)?))
+    }
+
+    /// Overrides the key prefix used for replay entries.
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        self
+    }
+}
+
+#[cfg(feature = "redis")]
+impl AsyncReplayStore for RedisReplayStore {
+    async fn check_and_insert(
+        &self,
+        message_id: &[u8; MESSAGE_ID_LEN],
+        expires_at_secs: u64,
+        now_secs: u64,
+    ) -> Result<ReplayCheck, ReplayStoreError> {
+        let key = replay_key(&self.prefix, message_id);
+        let ttl_ms = expires_at_secs
+            .saturating_sub(now_secs)
+            .max(1)
+            .saturating_mul(1000);
+
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| ReplayStoreError::Backend(e.to_string()))?;
+
+        // `SET key 1 NX PX ttl` returns "OK" when the key was set (first use)
+        // and nil (→ None) when it already existed (replay).
+        let set: Option<String> = redis::cmd("SET")
+            .arg(&key)
+            .arg(1i64)
+            .arg("NX")
+            .arg("PX")
+            .arg(ttl_ms)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| ReplayStoreError::Backend(e.to_string()))?;
+
+        Ok(if set.is_some() {
+            ReplayCheck::Accepted
+        } else {
+            ReplayCheck::Replay
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_key_is_prefixed_hex() {
+        let mut id = [0u8; MESSAGE_ID_LEN];
+        id[0] = 0xAB;
+        id[15] = 0x01;
+        assert_eq!(
+            replay_key("foctet:replay:", &id),
+            "foctet:replay:ab000000000000000000000000000001"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_blanket_impl_enforces_replay() {
+        // Any sync ReplayStore is also an AsyncReplayStore.
+        let store = InMemoryReplayStore::new();
+        let id = [5u8; MESSAGE_ID_LEN];
+        assert_eq!(
+            AsyncReplayStore::check_and_insert(&store, &id, 100, 10)
+                .await
+                .expect("first"),
+            ReplayCheck::Accepted
+        );
+        assert_eq!(
+            AsyncReplayStore::check_and_insert(&store, &id, 100, 10)
+                .await
+                .expect("second"),
+            ReplayCheck::Replay
+        );
+    }
 
     #[test]
     fn first_use_accepted_second_use_is_replay() {
         let store = InMemoryReplayStore::new();
         let id = [9u8; MESSAGE_ID_LEN];
         assert_eq!(
-            store.check_and_insert(&id, 100, 10).expect("first"),
+            ReplayStore::check_and_insert(&store, &id, 100, 10).expect("first"),
             ReplayCheck::Accepted
         );
         assert_eq!(
-            store.check_and_insert(&id, 100, 10).expect("second"),
+            ReplayStore::check_and_insert(&store, &id, 100, 10).expect("second"),
             ReplayCheck::Replay
         );
     }
@@ -151,17 +312,17 @@ mod tests {
         let id_b = [2u8; MESSAGE_ID_LEN];
 
         assert_eq!(
-            store.check_and_insert(&id_a, 100, 10).expect("a"),
+            ReplayStore::check_and_insert(&store, &id_a, 100, 10).expect("a"),
             ReplayCheck::Accepted
         );
         // At capacity while id_a is still live.
         assert!(matches!(
-            store.check_and_insert(&id_b, 200, 50),
+            ReplayStore::check_and_insert(&store, &id_b, 200, 50),
             Err(ReplayStoreError::AtCapacity)
         ));
         // After id_a expires it is evicted and id_b fits.
         assert_eq!(
-            store.check_and_insert(&id_b, 200, 150).expect("b after expiry"),
+            ReplayStore::check_and_insert(&store, &id_b, 200, 150).expect("b after expiry"),
             ReplayCheck::Accepted
         );
         assert_eq!(store.len(), 1);
