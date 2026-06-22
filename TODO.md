@@ -5,7 +5,8 @@ Tracking document for taking Foctet from **Draft v0 / experimental** to a
 protect arbitrary TCP/UDP/QUIC/WebSocket/WebTransport payloads, HTTP bodies
 (axum, Cloudflare Workers), and files.
 
-- Source of requirements: `foctet-review.md` (review, 2026-06-20) + `SPEC.md`.
+- Source of requirements: `REVIEW.md` (production-readiness review,
+  2026-06-22) + `SPEC.md`.
 - Legend: `[x]` done · `[ ]` not started · `[~]` partial.
 - Priorities follow the review: **P0** (release-blocking), **P1** (required for
   v1), **P2** (hardening / scope clarity).
@@ -29,7 +30,8 @@ protect arbitrary TCP/UDP/QUIC/WebSocket/WebTransport payloads, HTTP bodies
 - HTTP body adapters for axum + Workers (`foctet-http`), whole-buffer.
 - Transport helpers for quinn / webtransport / websocket / muxtls
   (**bidirectional streams only**).
-- Vectors, property tests, 2 fuzz targets, CI (lint/test/wasm-check).
+- Vectors, property tests, 2 fuzz targets, and CI (Clippy, default-feature
+  workspace tests, wasm check, advisory scan).
 
 **Recently fixed (see `CHANGELOG.md` → Unreleased):**
 
@@ -113,6 +115,16 @@ enforcement remain.
       normalization guidance still open.
 - **Gate:** block production HTTP/Workers recommendations until durable store +
   default-enforcement land.
+
+### 1.3 Production-safe API and documentation defaults
+- [ ] Make protected-context + atomic durable replay protection the clearly
+      recommended and difficult-to-misuse HTTP production path; retain
+      stateless APIs only with explicit replayability documentation or a
+      deliberate API-surface decision.
+- [ ] Correct README/SECURITY deployment claims: datagram and body-envelope WASM
+      support now exist, while their adapter/operational limitations remain.
+      Also describe the implemented HTTP protected-context/replay layer and its
+      durable-store requirement accurately.
 
 ---
 
@@ -347,8 +359,15 @@ enforcement remain.
       (`rustls-pemfile`, used by transport examples/tests), which `cargo
       audit` does not fail the build on by default.
 - [ ] License/source policy (`cargo-deny`).
+- [ ] Restore `cargo fmt --all -- --check` (currently fails on existing source
+      formatting) and add it as a required CI gate.
+- [ ] Run `cargo test --workspace --all-features` in CI; the current workspace
+      test job uses default features, while all-feature execution was only
+      verified during the 2026-06-22 review.
 - [ ] Reproducible locked builds; committed `Cargo.lock` checks.
 - [ ] MSRV policy + CI job.
+- [ ] Pin third-party GitHub Actions to reviewed immutable commit SHAs and
+      maintain an update process.
 - [ ] Miri / sanitizers where applicable.
 - [ ] Fuzzing in CI with a corpus + time budget. Add fuzz targets beyond
       frame/archive: **body envelope, control messages, handshake state machine,
@@ -398,8 +417,10 @@ All must be true before using either phrase:
 
 ## Suggested next step
 
-The highest-leverage P0 remaining is **§1.2 (HTTP protected-context schema +
-`ReplayStore` + axum/Workers integration)** — it turns the existing body-envelope
-primitive into safe, replay-resistant HTTP E2EE, which is the most-requested
-surface (axum, Cloudflare Workers). Recommended order:
-`§1.2 → §4 → §5 (WASM/TS) → §3.3 (datagrams) → §2.3 (ratchet decision) → §6 review`.
+The most immediate, low-risk release hygiene work is **§6**: restore formatting
+and require format, locked builds, and all-feature tests in CI. Then complete
+**§1.2/§1.3** by making durable, context-bound HTTP replay protection the
+production-default story and correcting the public documentation. The remaining
+production sequence is: normative spec/interop → transport conformance and
+operational scope → supply-chain/fuzz/browser/Workers validation → independent
+security review.
