@@ -1,3 +1,9 @@
+// Low-level body-only demo: it uses the deprecated stateless `open_request`
+// path, which has no replay protection or HTTP-context binding. For production,
+// use `AxumOpener::open_request_with_context` with a `ReplayStore` (see the
+// workers-echo example and the crate docs).
+#![allow(deprecated)]
+
 use axum::{
     Router,
     extract::Request,

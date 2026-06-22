@@ -1,0 +1,58 @@
+# cargo-deny configuration — license, advisory, source, and ban policy.
+# Run locally with: cargo deny check
+# See https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check all targets the workspace can build for.
+all-features = true
+
+[advisories]
+version = 2
+# Fail the build on any security vulnerability.
+yanked = "deny"
+# Known accepted advisories (review and prune periodically):
+ignore = [
+    # rustls-pemfile is unmaintained (no safe upgrade) but only reachable through
+    # transport examples/tests (dev surface), not the published library API.
+    "RUSTSEC-2025-0134",
+]
+
+[licenses]
+version = 2
+# Permissive licenses allowed for redistribution. SPDX "OR" expressions are
+# satisfied by any one allowed term, so copyleft alternatives offered via OR
+# do not need to be listed here.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "NCSA",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Skip workspace crates marked `publish = false` (e.g. fuzz harness).
+ignore = true
+
+[bans]
+# Warn on duplicate versions of the same crate; deny known-bad patterns as needed.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal path dependencies (e.g. the fuzz harness) legitimately use `*`.
+allow-wildcard-paths = true
+
+[sources]
+# Only allow crates from the official registry by default.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

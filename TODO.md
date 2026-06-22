@@ -103,8 +103,12 @@ enforcement remain.
       contract (no conditional/NX write), so a naive KV-only store would silently
       reintroduce a replay race; needs a Durable Object (or KV + DO lock) before
       shipping.
-- [ ] Make context-bound APIs the **enforced default**; consider deprecating the
-      stateless `seal_request`/`open_request` for production use.
+- [~] Make context-bound APIs the **enforced default**; consider deprecating the
+      stateless `seal_request`/`open_request` for production use. **Done:** the
+      stateless full-request family is `#[deprecated]` (see §1.3). **Still open:**
+      a hard enforcement (removing the stateless full-request constructors, or
+      gating them behind an explicit `allow-stateless` opt-in) is deferred to the
+      API-freeze decision so downstream callers get a deprecation cycle first.
 - [x] Workers adapter parity (`WorkersOpener::open_request_with_context` /
       `open_request_with_async_store`, `WorkersSealer::seal_response_with_context`
       in `foctet-http/src/workers.rs`), reconstructing `http::request::Parts`
@@ -117,14 +121,26 @@ enforcement remain.
   default-enforcement land.
 
 ### 1.3 Production-safe API and documentation defaults
-- [ ] Make protected-context + atomic durable replay protection the clearly
+- [x] Make protected-context + atomic durable replay protection the clearly
       recommended and difficult-to-misuse HTTP production path; retain
       stateless APIs only with explicit replayability documentation or a
-      deliberate API-surface decision.
-- [ ] Correct README/SECURITY deployment claims: datagram and body-envelope WASM
+      deliberate API-surface decision. **Done:** the stateless full-request
+      family is now `#[deprecated]` (since 0.3.0) pointing at the `*_with_context`
+      path — `HttpSealer::seal_request` / `HttpOpener::open_request`,
+      `raw::{seal,open}_http_request[_with_limits]`, `AxumOpener::open_request` +
+      `open_axum_request_body[_with_limits]`, and `WorkersOpener::open_request` +
+      `open_worker_request[_with_limits]`. The lower-level `seal_body`/`open_body`
+      primitives stay (documented as caller-supplies-own-context). Module docs
+      now label the two protection levels.
+- [x] Correct README/SECURITY deployment claims: datagram and body-envelope WASM
       support now exist, while their adapter/operational limitations remain.
       Also describe the implemented HTTP protected-context/replay layer and its
-      durable-store requirement accurately.
+      durable-store requirement accurately. **Done:** README header + "What
+      Foctet Covers" + Security Notes and SECURITY.md status/known-limitations
+      rewritten to match the shipped surface (datagram/UDP, WASM SDK, HTTP
+      protected context + Redis durable store), and to call out the remaining
+      gaps (browser-WebTransport datagram, Cloudflare KV/DO store, npm publish,
+      independent review).
 
 ---
 
@@ -357,17 +373,35 @@ enforcement remain.
       (`quinn-proto`, `rustls-webpki`, `rand`, `rkyv` bumped to patched
       versions); one `unmaintained`-only warning remains on a dev-dependency
       (`rustls-pemfile`, used by transport examples/tests), which `cargo
-      audit` does not fail the build on by default.
-- [ ] License/source policy (`cargo-deny`).
-- [ ] Restore `cargo fmt --all -- --check` (currently fails on existing source
-      formatting) and add it as a required CI gate.
-- [ ] Run `cargo test --workspace --all-features` in CI; the current workspace
-      test job uses default features, while all-feature execution was only
-      verified during the 2026-06-22 review.
-- [ ] Reproducible locked builds; committed `Cargo.lock` checks.
-- [ ] MSRV policy + CI job.
-- [ ] Pin third-party GitHub Actions to reviewed immutable commit SHAs and
-      maintain an update process.
+      audit` does not fail the build on by default. **Re-checked 2026-06-22 via
+      `cargo deny`:** patched a new batch of advisories by bumping
+      `quinn-proto` → 0.11.15 (RUSTSEC-2026-0037), `rkyv` → 0.8.16
+      (RUSTSEC-2026-0122), and `rustls-webpki` → 0.103.13 (RUSTSEC-2026-0049 /
+      -0098 / -0099 / -0104). The `rustls-pemfile` unmaintained advisory
+      (RUSTSEC-2025-0134, no safe upgrade, dev-only) is explicitly ignored in
+      `deny.toml`.
+- [x] License/source policy (`cargo-deny`). **Done:** `deny.toml` (permissive
+      license allow-list, registry-only sources, advisory + ban checks,
+      `allow-wildcard-paths` for the fuzz harness) + a `cargo-deny` CI job.
+      Verified locally: `advisories ok, bans ok, licenses ok, sources ok`.
+- [x] Restore `cargo fmt --all -- --check` and add it as a required CI gate.
+      **Done:** formatting drift fixed across `foctet-http`/`foctet-transport`/
+      `foctet-wasm` and a dedicated `fmt` job added.
+- [x] Run `cargo test --workspace --all-features` in CI. **Done:** the `test` job
+      now runs `--all-features --locked`, plus the `foctet-core` feature-combo
+      matrix.
+- [x] Reproducible locked builds; committed `Cargo.lock` checks. **Done:** every
+      cargo invocation in CI passes `--locked` (fails if `Cargo.lock` is stale or
+      missing). `Cargo.lock` is committed.
+- [x] MSRV policy + CI job. **Done:** `rust-version = "1.88"` declared in the
+      workspace and inherited by all published members (1.85 fails on `time`'s
+      1.88 requirement via the `rcgen` TLS deps; 1.88 verified to build
+      all-features). New `msrv` CI job pins 1.88.0 and runs `cargo check
+      --workspace --all-features --locked`.
+- [x] Pin third-party GitHub Actions to reviewed immutable commit SHAs and
+      maintain an update process. **Done:** `actions/checkout` (v4.3.1),
+      `rustsec/audit-check` (v2.0.0), and `EmbarkStudios/cargo-deny-action`
+      (v2.0.9) are pinned to commit SHAs with the tag in a trailing comment.
 - [ ] Miri / sanitizers where applicable.
 - [ ] Fuzzing in CI with a corpus + time budget. Add fuzz targets beyond
       frame/archive: **body envelope, control messages, handshake state machine,

@@ -18,10 +18,14 @@
 //!   [`context`]) into the envelope's AEAD and enforce single use via a
 //!   [`ReplayStore`]. A captured envelope cannot be replayed or moved onto a
 //!   different route.
-//! - **Body-only (low-level):** [`HttpSealer::seal_request`] /
-//!   [`HttpOpener::open_request`] protect the bytes only, with no replay
-//!   protection or context binding. Use only when the application supplies its
-//!   own anti-replay and context validation.
+//! - **Body-only (low-level, deprecated for full requests):**
+//!   `HttpSealer::seal_request` / `HttpOpener::open_request` protect the bytes
+//!   only, with no replay protection or context binding, so a captured request
+//!   is replayable by design. These full-request helpers are **deprecated** —
+//!   use the context-bound path above for production. The
+//!   [`HttpSealer::seal_body`] / [`HttpOpener::open_body`] primitives remain
+//!   available for callers that supply their own anti-replay and context
+//!   validation.
 //!
 //! # Layers
 //!
@@ -50,28 +54,26 @@ pub mod axum;
 #[cfg(all(feature = "workers", target_arch = "wasm32"))]
 pub mod workers;
 
-use foctet_core::{
-    BodyEnvelopeLimits, open_body_with_context, seal_body_with_context,
-};
+use foctet_core::{BodyEnvelopeLimits, open_body_with_context, seal_body_with_context};
 use http::{
     Request, Response,
     header::{self},
 };
 
 pub use config::{HttpConfig, HttpOpenOptions, HttpSealOptions};
+#[cfg(not(target_arch = "wasm32"))]
+pub use context::unix_now_secs;
 pub use context::{
     ContextBinding, ContextCarrier, ContextDirection, DEFAULT_CONTEXT_TTL_SECS,
     DEFAULT_MAX_CLOCK_SKEW_SECS, MESSAGE_ID_LEN, ProtectedContext,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use context::unix_now_secs;
 pub use error::HttpError;
+#[cfg(feature = "redis")]
+pub use replay_store::RedisReplayStore;
 pub use replay_store::{
     AsyncReplayStore, DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore,
     ReplayStoreError,
 };
-#[cfg(feature = "redis")]
-pub use replay_store::RedisReplayStore;
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";
@@ -206,6 +208,12 @@ impl HttpSealer {
     /// for production. By default this also adds the advisory
     /// `x-foctet-scope: body-only` header so downstream consumers do not mistake
     /// body protection for full HTTP message protection.
+    #[deprecated(
+        since = "0.3.0",
+        note = "stateless full-request protection has no replay defense or HTTP-context \
+                binding and is replayable by design; use seal_request_with_context with a \
+                ReplayStore for production (see module docs)"
+    )]
     pub fn seal_request(&self, request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
         let sealed = self.seal_body(&body)?;
@@ -315,8 +323,13 @@ impl HttpOpener {
         let (parts, plain, carrier) =
             self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
 
-        match ReplayStore::check_and_insert(store, &carrier.message_id, carrier.expiry_secs, now_secs)
-            .map_err(HttpError::ReplayStore)?
+        match ReplayStore::check_and_insert(
+            store,
+            &carrier.message_id,
+            carrier.expiry_secs,
+            now_secs,
+        )
+        .map_err(HttpError::ReplayStore)?
         {
             ReplayCheck::Accepted => {}
             ReplayCheck::Replay => return Err(HttpError::Replayed),
@@ -424,6 +437,12 @@ impl HttpOpener {
     ///
     /// This provides **no** replay protection or HTTP-context binding; prefer
     /// [`HttpOpener::open_request_with_context`] for production.
+    #[deprecated(
+        since = "0.3.0",
+        note = "stateless full-request protection has no replay defense or HTTP-context \
+                binding and is replayable by design; use open_request_with_context with a \
+                ReplayStore for production (see module docs)"
+    )]
     pub fn open_request(&self, request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
@@ -459,6 +478,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn sealer_and_opener_roundtrip_request_and_response() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();

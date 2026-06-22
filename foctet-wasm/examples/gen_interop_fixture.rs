@@ -26,9 +26,14 @@ fn main() {
     let context = b"foctet-http-ctx-v1|POST|/pay";
 
     let envelope = seal_body(plaintext, public, key_id).expect("seal");
-    let context_envelope =
-        seal_body_with_context(plaintext, public, key_id, context, &BodyEnvelopeLimits::default())
-            .expect("seal with context");
+    let context_envelope = seal_body_with_context(
+        plaintext,
+        public,
+        key_id,
+        context,
+        &BodyEnvelopeLimits::default(),
+    )
+    .expect("seal with context");
 
     println!(
         concat!(

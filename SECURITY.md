@@ -7,8 +7,9 @@ framing, a one-shot `application/foctet` body envelope, and encrypted archive
 formats. The project is under active security and interoperability development.
 
 It is **not yet a stable, independently audited, general-purpose production E2EE
-SDK**, and it does **not** yet provide UDP/datagram operation or a
-TypeScript/WASM SDK. Do not describe it as a complete E2EE library for arbitrary
+SDK**. Several surfaces (datagram/UDP, WASM body envelope, HTTP protected
+context) are implemented but remain partial or unreviewed — see "Known
+limitations" below. Do not describe it as a complete E2EE library for arbitrary
 TCP/UDP/QUIC/WebSocket/WebTransport payloads until the gates in
 "Roadmap to a production claim" below are met.
 
@@ -84,9 +85,12 @@ tested, and independently reviewed:
 3. **Datagram support (partial).** A dedicated datagram API
    (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
    size cap, authenticate-before-replay, loss/reorder tolerant) ships with a QUIC
-   datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`). Raw-UDP and
-   browser-WebTransport datagram adapters, plus a session/rekey story over
-   datagrams, are still pending.
+   datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`) and a
+   raw-UDP adapter over a connected socket
+   (`foctet_transport::udp::UdpDatagramTransport`; peer discovery/pinning, MTU,
+   anti-amplification are the caller's responsibility). A browser-WebTransport
+   datagram adapter, a rekey-over-datagram story, and an MTU/fragmentation policy
+   are still pending.
 4. **WASM/TypeScript SDK (partial).** The `foctet-wasm` crate ships a
    `wasm-bindgen` API for the body envelope (seal/open, context-bound variants,
    `KeyPair`) with generated `.d.ts`, Node/browser/bundler builds, and a Node

@@ -101,7 +101,9 @@ impl QuinnDatagramChannel {
         session: &Session,
         config: DatagramConfig,
     ) -> Result<Self, CoreError> {
-        let keys = session.active_keys().ok_or(CoreError::InvalidSessionState)?;
+        let keys = session
+            .active_keys()
+            .ok_or(CoreError::InvalidSessionState)?;
         let endpoint = DatagramEndpoint::with_config(
             keys,
             session.inbound_direction(),

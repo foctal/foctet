@@ -61,9 +61,9 @@ pub mod adapter;
 mod config;
 pub mod datagram;
 mod error;
-pub mod message;
 #[cfg(feature = "runtime-futures")]
 mod futures;
+pub mod message;
 #[cfg(feature = "runtime-tokio")]
 mod tokio;
 
@@ -71,19 +71,19 @@ mod tokio;
 pub mod muxtls;
 #[cfg(feature = "transport-quinn")]
 pub mod quinn;
+#[cfg(feature = "runtime-tokio")]
+pub mod udp;
 #[cfg(feature = "transport-websock")]
 pub mod websock;
 #[cfg(feature = "transport-webtrans")]
 pub mod webtrans;
-#[cfg(feature = "runtime-tokio")]
-pub mod udp;
 
 pub use adapter::SplitIo;
 pub use config::TransportConfig;
 pub use datagram::{DatagramChannelError, DatagramTransport, SecureDatagramChannel};
 pub use error::TransportChannelError;
-pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
+pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};
 #[cfg(feature = "runtime-tokio")]
 pub use tokio::{DEFAULT_HANDSHAKE_TIMEOUT, TokioTransportBuilder, TokioTransportChannel};

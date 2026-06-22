@@ -68,6 +68,13 @@ impl AxumOpener {
     ///
     /// Body-only; no replay protection or HTTP-context binding. Prefer
     /// [`AxumOpener::open_request_with_context`] for production.
+    #[deprecated(
+        since = "0.3.0",
+        note = "stateless full-request protection has no replay defense or HTTP-context \
+                binding and is replayable by design; use open_request_with_context (or \
+                open_request_with_async_store) with a ReplayStore for production"
+    )]
+    #[allow(deprecated)]
     pub async fn open_request(
         &self,
         request: AxumRequest,
@@ -172,6 +179,13 @@ impl AxumSealer {
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use AxumOpener::open_request_with_context with a \
+            ReplayStore for production"
+)]
+#[allow(deprecated)]
 pub async fn open_axum_request_body(
     request: AxumRequest,
     recipient_secret_key: [u8; 32],
@@ -183,6 +197,13 @@ pub async fn open_axum_request_body(
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes with explicit envelope limits.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use AxumOpener::open_request_with_context with a \
+            ReplayStore for production"
+)]
+#[allow(deprecated)]
 pub async fn open_axum_request_body_with_limits(
     request: AxumRequest,
     recipient_secret_key: [u8; 32],
@@ -333,12 +354,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BODY_ONLY_SCOPE, CONTENT_TYPE, HttpSealer, SCOPE_HEADER, raw::seal_http_request};
+    #[allow(deprecated)] // seal_http_request is deprecated; used to build a test fixture
+    use crate::raw::seal_http_request;
+    use crate::{BODY_ONLY_SCOPE, CONTENT_TYPE, HttpSealer, SCOPE_HEADER};
     use http::{Request, Response, StatusCode, Version, header};
     use rand_core::OsRng;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     async fn open_axum_request_body_roundtrip() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();

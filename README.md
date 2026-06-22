@@ -9,11 +9,12 @@
 Transport-agnostic end-to-end encryption layer for secure data transfer.
 
 > **Status: experimental (Draft v0) — not production-ready.** Foctet implements
-> authenticated, **stream-oriented** encrypted framing, a one-shot HTTP body
-> envelope, and encrypted archives. It does **not** yet provide UDP/datagram
-> operation or a TypeScript/WASM SDK, and the wire format is unstable. See
-> [`SECURITY.md`](SECURITY.md) for the security posture and known limitations
-> before deploying.
+> authenticated encrypted framing (byte-stream, datagram, and message shapes), a
+> one-shot HTTP body envelope with versioned protected-context replay defense, a
+> WASM/TypeScript body-envelope SDK, and encrypted archives. The wire format is
+> still unstable and the protocol has **not** received an independent
+> cryptographic review. See [`SECURITY.md`](SECURITY.md) for the security posture
+> and known limitations before deploying.
 
 ## Crates
 
@@ -45,26 +46,33 @@ Implemented and tested today:
 
 - Transport-agnostic encrypted framing for **byte streams** and split send/recv
   transports (TCP, QUIC/WebTransport bidirectional streams, multiplexed WebSocket).
-- A **datagram API** (`foctet_core::datagram`, one frame per datagram) with a QUIC
-  datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`).
+- A **datagram API** (`foctet_core::datagram`, one frame per datagram) with QUIC
+  (`foctet_transport::quinn::QuinnDatagramChannel`) and raw-UDP
+  (`foctet_transport::udp::UdpDatagramTransport`) adapters.
+- A **message API** (`foctet_core::message`, one frame per reliable/ordered
+  message) with a generic `MessageTransport` shape (`foctet_transport::message`).
 - A **WASM/TypeScript SDK** (`foctet-wasm`) for the body envelope, with generated
   `.d.ts` and Node/browser/bundler builds (verified against Rust-produced
   envelopes).
-- Encrypted body envelopes for HTTP integrations such as `axum` and Cloudflare
-  Workers (body-only; optional context binding via `seal_body_with_context`).
+- **HTTP protected-context replay defense**: a versioned, domain-separated
+  context schema (`foctet-http`'s `ProtectedContext`, `x-foctet-*` carrier
+  headers) that binds method/path/query/message-id/timestamp/expiry into the
+  AEAD, with an atomic `ReplayStore` (in-memory + Redis `SET NX PX` backends) and
+  `axum` / Cloudflare Workers adapters.
 - Encrypted archive formats for files and split-file delivery.
 - Transport helpers for `quinn`, `webtrans`, `websock`, and `muxtls` (stream-only).
 
 Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
 
-- Raw-UDP and browser-WebTransport datagram adapters (a datagram API and a QUIC
-  datagram adapter are implemented).
+- A browser-WebTransport datagram adapter (QUIC and raw-UDP datagram adapters
+  exist).
+- A Cloudflare KV / Durable Object replay-store adapter (Redis is the durable
+  backend today; raw KV cannot satisfy the atomic check-and-insert contract).
 - A published npm package and browser-runner CI for the WASM SDK (the SDK and a
   Node interop test exist; framed-session APIs over WASM are still pending).
-- A versioned HTTP protected-context + replay-store integration (the cryptographic
-  primitive exists; the full HTTP schema and replay defense do not).
 - Streaming (chunked) HTTP bodies; adapters are whole-buffer.
 - Post-compromise security (in-session rekey is symmetric rotation, not a DH ratchet).
+- An independent cryptographic review and a normative, versioned wire spec.
 
 ## Quick Start
 
@@ -129,11 +137,15 @@ See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and reporti
   requires an explicit `SessionAuthConfig::unauthenticated_for_testing()` opt-in,
   intended only for tests or for use inside an already-authenticated outer channel.
   Prefer authenticated handshakes with pinned peer keys for production.
-- `seal_body_with_context` / `open_body_with_context` bind an application-supplied
-  context (e.g. HTTP method/authority/path/timestamp/message-id) into the AEAD so a
-  captured envelope cannot be replayed onto a different request. The application is
-  responsible for constructing and validating that context and for its own
-  anti-replay store until the first-class HTTP schema ships.
+- For HTTP, prefer the **protected-context APIs** (`HttpSealer::seal_request_with_context`
+  / `HttpOpener::open_request_with_context`, plus the `axum` / Workers adapters):
+  they bind request metadata (method/path/query/message-id/timestamp/expiry) into
+  the AEAD and enforce single use through an atomic `ReplayStore`. Deploy with a
+  durable store (`RedisReplayStore`) for multi-instance or serverless targets. The
+  low-level `seal_body` / `open_body` and stateless `seal_request` / `open_request`
+  paths remain replayable by design and must not be used for production HTTP. The
+  `seal_body_with_context` / `open_body_with_context` primitives are the building
+  block underneath, for callers that supply and validate their own context.
 - Deterministic archive secrets intentionally disable build-time randomness. Reusing
   them across real payloads leaks equality and key-reuse signals, so reserve them for
   fixtures and interoperability tests.

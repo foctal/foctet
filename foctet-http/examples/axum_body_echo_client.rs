@@ -1,3 +1,9 @@
+// Low-level body-only demo: it uses the deprecated stateless `seal_request`
+// path, which has no replay protection or HTTP-context binding. For production,
+// use the `*_with_context` API with a `ReplayStore` (see the workers-echo
+// example and the crate docs).
+#![allow(deprecated)]
+
 use foctet_http::{
     HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer,
     http::{self},

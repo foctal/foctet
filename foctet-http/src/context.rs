@@ -306,7 +306,11 @@ impl ProtectedContext {
         out.extend_from_slice(CONTEXT_DOMAIN_V1);
         out.push(self.direction.tag());
 
-        push_field(&mut out, b'M', self.method.as_deref().unwrap_or("").as_bytes());
+        push_field(
+            &mut out,
+            b'M',
+            self.method.as_deref().unwrap_or("").as_bytes(),
+        );
         push_optional(&mut out, b'A', self.authority.as_deref().map(str::as_bytes));
         push_field(&mut out, b'P', self.path.as_bytes());
         push_optional(&mut out, b'Q', self.query.as_deref().map(str::as_bytes));
@@ -510,8 +514,10 @@ mod tests {
         let (b_parts, _) = tenant_b.into_parts();
         let (none_parts, _) = no_header.into_parts();
 
-        let a_aad = ProtectedContext::for_request(&a_parts, carrier.clone(), binding).to_aad_bytes();
-        let b_aad = ProtectedContext::for_request(&b_parts, carrier.clone(), binding).to_aad_bytes();
+        let a_aad =
+            ProtectedContext::for_request(&a_parts, carrier.clone(), binding).to_aad_bytes();
+        let b_aad =
+            ProtectedContext::for_request(&b_parts, carrier.clone(), binding).to_aad_bytes();
         let none_aad = ProtectedContext::for_request(&none_parts, carrier, binding).to_aad_bytes();
 
         assert_ne!(a_aad, b_aad, "different header values must diverge");

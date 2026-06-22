@@ -250,8 +250,8 @@ mod tests {
     #[test]
     fn from_secret_key_recovers_public() {
         let kp = KeyPair::generate();
-        let rebuilt = KeyPair::from_secret_key(&kp.secret_key())
-            .unwrap_or_else(|_| panic!("from secret"));
+        let rebuilt =
+            KeyPair::from_secret_key(&kp.secret_key()).unwrap_or_else(|_| panic!("from secret"));
         assert_eq!(rebuilt.public_key(), kp.public_key());
     }
 }

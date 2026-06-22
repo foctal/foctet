@@ -9,37 +9,82 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
+# Third-party actions are pinned to immutable commit SHAs (with the human-readable
+# tag in a trailing comment) so a re-tagged release cannot silently change CI.
 
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal --component rustfmt
+        rustup default stable
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
     - name: Setup stable toolchain
       run: |
         rustup toolchain install stable --profile minimal --component clippy
         rustup default stable
         rustup target add wasm32-unknown-unknown
-    - name: Lint
-      run: cargo clippy --workspace --all-features -- -D warnings
-    - name: Workspace tests
-      run: cargo test --workspace --verbose
-    - name: Wasm check
-      run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown
+    - name: Lint (all features)
+      run: cargo clippy --workspace --all-features --locked -- -D warnings
+    - name: Wasm check (workers)
+      run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown --locked
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+    - name: Workspace tests (all features, locked)
+      run: cargo test --workspace --all-features --locked --verbose
     - name: Feature combinations (foctet-core)
       run: |
-        cargo test -p foctet-core --no-default-features
-        cargo test -p foctet-core --no-default-features --features runtime-futures
-        cargo test -p foctet-core --no-default-features --features runtime-tokio
+        cargo test -p foctet-core --no-default-features --locked
+        cargo test -p foctet-core --no-default-features --features runtime-futures --locked
+        cargo test -p foctet-core --no-default-features --features runtime-tokio --locked
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup MSRV toolchain
+      run: |
+        rustup toolchain install 1.88.0 --profile minimal
+        rustup default 1.88.0
+    - name: Check workspace builds on MSRV
+      run: cargo check --workspace --all-features --locked
 
   security-audit:
+    name: Advisory scan
     runs-on: ubuntu-latest
-
-    # Vulnerability/advisory scan only (no license checks) via the official
-    # RustSec action, which uses a prebuilt `cargo-audit` instead of compiling
-    # it from source, so this job stays fast.
     steps:
-    - uses: actions/checkout@v4
-    - uses: rustsec/audit-check@v2.0.0
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    # Vulnerability/advisory scan via the official RustSec action (prebuilt
+    # cargo-audit, no compile-from-source).
+    - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: License & source policy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - uses: EmbarkStudios/cargo-deny-action@d6d27f1b02f0c07f9db6ffc34e7871bba5ab5816 # v2.0.9
+      with:
+        command: check

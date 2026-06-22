@@ -90,8 +90,12 @@ impl TokioTransportBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let session =
-            run_initiator_handshake(&mut io, thresholds, SessionAuthConfig::unauthenticated_for_testing()).await?;
+        let session = run_initiator_handshake(
+            &mut io,
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        )
+        .await?;
         self.build(io, session)
     }
 
@@ -118,8 +122,12 @@ impl TokioTransportBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let session =
-            run_responder_handshake(&mut io, thresholds, SessionAuthConfig::unauthenticated_for_testing()).await?;
+        let session = run_responder_handshake(
+            &mut io,
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        )
+        .await?;
         self.build(io, session)
     }
 
@@ -151,12 +159,10 @@ impl TokioTransportBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let session = tokio::time::timeout(
-            timeout,
-            run_initiator_handshake(&mut io, thresholds, auth),
-        )
-        .await
-        .map_err(|_| CoreError::HandshakeTimeout)??;
+        let session =
+            tokio::time::timeout(timeout, run_initiator_handshake(&mut io, thresholds, auth))
+                .await
+                .map_err(|_| CoreError::HandshakeTimeout)??;
         self.build(io, session)
     }
 
@@ -193,12 +199,10 @@ impl TokioTransportBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let session = tokio::time::timeout(
-            timeout,
-            run_responder_handshake(&mut io, thresholds, auth),
-        )
-        .await
-        .map_err(|_| CoreError::HandshakeTimeout)??;
+        let session =
+            tokio::time::timeout(timeout, run_responder_handshake(&mut io, thresholds, auth))
+                .await
+                .map_err(|_| CoreError::HandshakeTimeout)??;
         self.build(io, session)
     }
 

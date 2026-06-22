@@ -4,7 +4,44 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Deprecated
+
+- **Stateless full-HTTP-request seal/open APIs (P0, §1.3).** The body-only
+  helpers that protect a whole HTTP *request* without replay defense or
+  HTTP-context binding are now `#[deprecated]` (since 0.3.0) in favor of the
+  context-bound path. A captured request sealed with these is replayable by
+  design. Affected: `HttpSealer::seal_request`, `HttpOpener::open_request`,
+  `raw::{seal,open}_http_request[_with_limits]`, `AxumOpener::open_request` and
+  `open_axum_request_body[_with_limits]`, and `WorkersOpener::open_request` with
+  `open_worker_request[_with_limits]`. Migrate to
+  `seal_request_with_context` / `open_request_with_context` (or the Axum/Workers
+  `*_with_context` adapters) backed by a `ReplayStore`. The lower-level
+  `seal_body` / `open_body` primitives are unchanged for callers that supply
+  their own context and anti-replay.
+
+### Changed
+
+- **CI release-hardening gates (P1, §6).** The Rust workflow now enforces
+  `cargo fmt --all -- --check`, runs `cargo test --workspace --all-features
+  --locked`, adds an MSRV job (`rust-version = "1.88"`, declared on every
+  published crate) and a `cargo-deny` license/source/advisory job (`deny.toml`),
+  and pins all third-party actions to immutable commit SHAs. Every cargo
+  invocation now passes `--locked` for reproducible builds.
+- **Documentation accuracy (P1, §1.3).** `README.md` and `SECURITY.md` were
+  corrected to match the shipped surface — datagram (QUIC + raw-UDP), the
+  `foctet-wasm` body-envelope SDK, and the HTTP protected-context + durable
+  (Redis) replay layer are now described as implemented, with the remaining gaps
+  (browser-WebTransport datagram, Cloudflare KV/Durable Object store, npm
+  publish, independent review) stated explicitly.
+
 ### Security
+
+- **Patch dependency advisories (§6).** Bumped `quinn-proto` → 0.11.15
+  (RUSTSEC-2026-0037, endpoint DoS), `rkyv` → 0.8.16 (RUSTSEC-2026-0122,
+  use-after-free in `*::clear`), and `rustls-webpki` → 0.103.13
+  (RUSTSEC-2026-0049 / -0098 / -0099 / -0104, CRL/name-constraint flaws). The
+  dev-only, unmaintained `rustls-pemfile` advisory (RUSTSEC-2025-0134, no safe
+  upgrade) is explicitly tracked in `deny.toml`.
 
 - **Centralize fail-closed outbound sequence allocation (P0 follow-up).** The
   blocking stream, async framed stream, datagram, and discrete-message paths now

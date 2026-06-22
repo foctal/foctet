@@ -221,6 +221,15 @@ impl WorkersOpener {
     }
 
     /// Opens an encrypted Workers request into convenience metadata and plaintext bytes.
+    ///
+    /// Body-only; no replay protection or HTTP-context binding. Prefer
+    /// [`WorkersOpener::open_request_with_context`] for production.
+    #[deprecated(
+        since = "0.3.0",
+        note = "stateless full-request protection has no replay defense or HTTP-context \
+                binding and is replayable by design; use open_request_with_context (or \
+                open_request_with_async_store) with a ReplayStore for production"
+    )]
     pub async fn open_request(
         &self,
         request: worker::Request,
@@ -356,6 +365,13 @@ pub async fn open_worker_request_body_with_limits(
 }
 
 /// Opens an encrypted Workers request into metadata and plaintext body bytes.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use WorkersOpener::open_request_with_context with a \
+            ReplayStore for production"
+)]
+#[allow(deprecated)]
 pub async fn open_worker_request(
     request: worker::Request,
     recipient_secret_key: [u8; 32],
@@ -366,6 +382,13 @@ pub async fn open_worker_request(
 }
 
 /// Opens an encrypted Workers request into metadata and plaintext bytes with explicit limits.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use WorkersOpener::open_request_with_context with a \
+            ReplayStore for production"
+)]
+#[allow(deprecated)]
 pub async fn open_worker_request_with_limits(
     request: worker::Request,
     recipient_secret_key: [u8; 32],

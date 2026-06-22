@@ -88,7 +88,9 @@ where
         session: &Session,
         config: MessageConfig,
     ) -> Result<Self, CoreError> {
-        let keys = session.active_keys().ok_or(CoreError::InvalidSessionState)?;
+        let keys = session
+            .active_keys()
+            .ok_or(CoreError::InvalidSessionState)?;
         let endpoint = MessageEndpoint::with_config(
             keys,
             session.inbound_direction(),
