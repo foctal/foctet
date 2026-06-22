@@ -19,6 +19,22 @@ All notable changes to this project are documented in this file.
   `seal_body` / `open_body` primitives are unchanged for callers that supply
   their own context and anti-replay.
 
+### Added
+
+- **Raw-WebSocket message transport (P1, §3.4).** `WebsockMessageTransport`
+  (`foctet-transport`, `transport-websock`) implements `MessageTransport` over a
+  `websock` crate connection, carrying exactly one Foctet frame per **binary**
+  WebSocket message — the first concrete `MessageTransport` backend beyond the
+  in-memory test double. Pair it with `SecureMessageChannel`. Verified by a real
+  plain-WebSocket loopback roundtrip test.
+- **Runtime-agnostic handshake timeout (P1, §2.4).**
+  `FuturesTransportBuilder::establish_initiator_with_auth_and_timeout` /
+  `establish_responder_with_auth_and_timeout` bound the native handshake by a
+  caller-supplied timer *future* (e.g. `tokio::time::sleep`, an async-io timer, a
+  browser timer), racing it against the handshake with a `std`-only `poll_fn` and
+  failing with `CoreError::HandshakeTimeout`. This gives the futures path parity
+  with the existing Tokio `Duration`-based timeout.
+
 ### Changed
 
 - **CI release-hardening gates (P1, §6).** The Rust workflow now enforces

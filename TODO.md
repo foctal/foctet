@@ -97,12 +97,17 @@ enforcement remain.
       (`HttpOpener::open_request_with_async_store`, `AxumOpener` variant).
 - [x] **Redis durable backend** (`RedisReplayStore`, `redis` feature) via atomic
       `SET NX PX`; compile-checked (needs a live Redis to run).
-- [ ] Cloudflare KV / Durable Object adapter (implement `AsyncReplayStore` in the
-      Worker; shipped trait makes this app-side today). **Not done deliberately:**
-      raw KV `get`-then-`put` cannot satisfy the trait's atomic check-and-insert
-      contract (no conditional/NX write), so a naive KV-only store would silently
-      reintroduce a replay race; needs a Durable Object (or KV + DO lock) before
-      shipping.
+- [x] Cloudflare Durable Object adapter. **Done** (`foctet-http/src/workers.rs`,
+      `workers` feature): `DurableObjectReplayStore` implements `AsyncReplayStore`
+      by routing each message ID to its own deterministically-named Durable
+      Object; the DO's single-threaded, strongly-consistent storage makes the
+      read-then-write atomic, so exactly one concurrent request gets `201` and
+      replays get `409`. The DO class delegates to
+      `check_and_insert_in_durable_object` (fetch handler) and
+      `expire_durable_object_replay_entry` (alarm handler, deletes the one
+      retained entry at expiry). Raw KV is intentionally NOT used: `get`-then-`put`
+      has no conditional/NX write and would reintroduce a replay race. Verified by
+      the `wasm32-unknown-unknown` workers build in CI (no live Wrangler run).
 - [~] Make context-bound APIs the **enforced default**; consider deprecating the
       stateless `seal_request`/`open_request` for production use. **Done:** the
       stateless full-request family is `#[deprecated]` (see §1.3). **Still open:**
@@ -200,10 +205,14 @@ enforcement remain.
       (`DEFAULT_HANDSHAKE_TIMEOUT` = 10s) in `foctet-transport/src/tokio.rs`,
       using `tokio::time::timeout` and a new `CoreError::HandshakeTimeout`;
       `quinn`/`websock`/`webtrans`/`muxtls` all build on this builder so they
-      gain it once their call sites switch to the timeout variants. Still
-      missing: the same for the runtime-agnostic `FuturesTransportBuilder`
-      (needs a caller-supplied timer since that path has no runtime), a
-      connection-level rate limit, and cancellation.
+      gain it once their call sites switch to the timeout variants. The
+      runtime-agnostic `FuturesTransportBuilder` now has parity via
+      `establish_initiator_with_auth_and_timeout` /
+      `establish_responder_with_auth_and_timeout`, which take a caller-supplied
+      timer *future* (e.g. `tokio::time::sleep`, an async-io timer, a browser
+      timer) and race it against the handshake with a `std`-only `poll_fn`
+      (`CoreError::HandshakeTimeout` on expiry; verified by stalled-handshake
+      tests). Still missing: a connection-level rate limit and cancellation.
 
 ### 2.5 Key-material ergonomics
 - [~] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
@@ -269,8 +278,12 @@ enforcement remain.
       `foctet_core::message::MessageEndpoint` (reliable, ordered, message-bounded;
       not MTU-capped; replay-after-auth; per-`(key_id, stream_id)` fail-closed
       sequence). In-memory `MessageTransport` roundtrip/replay/key-rotation tests.
-      **Still open:** a concrete `MessageTransport` impl over the `websock` crate
-      and a browser binding (see §3.4), plus the `ByteStream` marker shape below.
+      Concrete `WebsockMessageTransport` over the `websock` crate's raw
+      connection now exists (`foctet-transport/src/websock.rs`), verified with a
+      real plain-WebSocket loopback roundtrip
+      (`websock::tests::secure_message_channel_over_raw_websocket`). **Still
+      open:** a browser binding (see §3.4) and the `ByteStream` marker shape
+      below.
 - [~] `ByteStream` shape trait. The byte-stream secure path already exists
       (`FoctetFramed`/`FoctetStream` over `PollIo`, plus the Tokio/Futures
       builders); a thin `ByteStream` marker trait unifying it with the other two
@@ -305,10 +318,13 @@ enforcement remain.
 
 ### 3.4 WebSocket / WebTransport specifics
 - [~] Test real WebSocket message framing + a browser client; define
-      mux/backpressure behavior. The message *shape* now exists
-      (`foctet_transport::message::{MessageTransport, SecureMessageChannel}`, §3.2);
-      what remains is a concrete `MessageTransport` impl over the `websock` crate's
-      connection, a browser binding, and the mux/backpressure definition.
+      mux/backpressure behavior. The message *shape* exists
+      (`foctet_transport::message::{MessageTransport, SecureMessageChannel}`, §3.2)
+      **and** a concrete native impl `WebsockMessageTransport` over the `websock`
+      crate's raw connection (one Foctet frame per binary WebSocket message),
+      verified with a real plain-WebSocket loopback roundtrip in
+      `foctet-transport/src/websock.rs`. **Still open:** a browser (wasm)
+      `MessageTransport` binding and a documented mux/backpressure definition.
 - [ ] Test native **and** browser WebTransport; document stream-only scope until
       datagrams land.
 

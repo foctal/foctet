@@ -1,4 +1,8 @@
-use std::{future::poll_fn, pin::Pin};
+use std::{
+    future::{Future, poll_fn},
+    pin::{Pin, pin},
+    task::Poll,
+};
 
 use foctet_core::{
     AsyncSecureChannel, ControlMessage, CoreError, FoctetFramed, RekeyThresholds, Session,
@@ -140,6 +144,52 @@ impl FuturesTransportBuilder {
         self.build(io, session)
     }
 
+    /// Runs the native Foctet handshake as initiator with explicit authentication
+    /// config, bounded by a caller-supplied `timeout` future.
+    ///
+    /// Because this builder is runtime-agnostic, the deadline is provided as a
+    /// future rather than a `Duration`: pass `tokio::time::sleep(dur)`,
+    /// `async_io::Timer::after(dur)`, a browser timer, or any future that
+    /// resolves when the handshake should be abandoned. If `timeout` resolves
+    /// before the handshake completes, this fails with
+    /// [`CoreError::HandshakeTimeout`] and the transport is dropped.
+    pub async fn establish_initiator_with_auth_and_timeout<T, F>(
+        self,
+        mut io: T,
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+        timeout: F,
+    ) -> Result<FuturesTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+        F: Future<Output = ()>,
+    {
+        let session =
+            run_with_timeout(run_initiator_handshake(&mut io, thresholds, auth), timeout).await?;
+        self.build(io, session)
+    }
+
+    /// Runs the native Foctet handshake as responder with explicit authentication
+    /// config, bounded by a caller-supplied `timeout` future.
+    ///
+    /// See [`Self::establish_initiator_with_auth_and_timeout`] for how the
+    /// runtime-agnostic timeout future is supplied.
+    pub async fn establish_responder_with_auth_and_timeout<T, F>(
+        self,
+        mut io: T,
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+        timeout: F,
+    ) -> Result<FuturesTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+        F: Future<Output = ()>,
+    {
+        let session =
+            run_with_timeout(run_responder_handshake(&mut io, thresholds, auth), timeout).await?;
+        self.build(io, session)
+    }
+
     /// Runs the native Foctet handshake as initiator on split transport halves, then builds a secure channel.
     pub async fn establish_initiator_from_split<R, W>(
         self,
@@ -169,6 +219,30 @@ impl FuturesTransportBuilder {
         self.establish_responder(SplitIo::from_split(recv, send), thresholds)
             .await
     }
+}
+
+/// Drives `work` to completion, but resolves to [`CoreError::HandshakeTimeout`]
+/// if `timer` completes first. Runtime-agnostic: `timer` is any future, so the
+/// caller supplies the deadline source.
+async fn run_with_timeout<W, F>(work: W, timer: F) -> Result<Session, CoreError>
+where
+    W: Future<Output = Result<Session, CoreError>>,
+    F: Future<Output = ()>,
+{
+    let mut work = pin!(work);
+    let mut timer = pin!(timer);
+    poll_fn(move |cx| {
+        // Poll the handshake first so a handshake that is already complete wins
+        // even if the timer is also ready in the same poll.
+        if let Poll::Ready(result) = work.as_mut().poll(cx) {
+            return Poll::Ready(result);
+        }
+        if timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(CoreError::HandshakeTimeout));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 async fn write_control<T>(io: &mut T, msg: &ControlMessage) -> Result<(), CoreError>
@@ -302,5 +376,74 @@ where
         let (framed, session) = self.inner.into_parts();
         let io = framed.into_inner();
         (io.into_inner(), session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::task::Context;
+
+    /// A futures-io transport whose writes succeed instantly but whose reads
+    /// never produce data, so any handshake stalls waiting for the peer's reply.
+    #[derive(Debug)]
+    struct StalledIo;
+
+    impl AsyncRead for StalledIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for StalledIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn initiator_handshake_times_out_when_timer_fires_first() {
+        // An already-ready timer must abort the stalled handshake.
+        let err = FuturesTransportBuilder::new()
+            .establish_initiator_with_auth_and_timeout(
+                StalledIo,
+                RekeyThresholds::default(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+                std::future::ready(()),
+            )
+            .await
+            .expect_err("stalled handshake must time out");
+        assert!(matches!(err, CoreError::HandshakeTimeout));
+    }
+
+    #[tokio::test]
+    async fn responder_handshake_times_out_when_timer_fires_first() {
+        let err = FuturesTransportBuilder::new()
+            .establish_responder_with_auth_and_timeout(
+                StalledIo,
+                RekeyThresholds::default(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+                std::future::ready(()),
+            )
+            .await
+            .expect_err("stalled handshake must time out");
+        assert!(matches!(err, CoreError::HandshakeTimeout));
     }
 }
