@@ -21,6 +21,17 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Framed Foctet session over WebAssembly (P1, §5).** `foctet-wasm` now exposes
+  `FoctetSession` — the full authenticated handshake plus ordered,
+  replay-protected per-message `sealMessage`/`openMessage` — not just the
+  one-shot body envelope. WebAssembly performs the cryptography and handshake
+  state machine while the JS side owns the transport (a browser `WebSocket`,
+  `WebTransport` stream, or datagram channel), exchanging `Uint8Array` blobs.
+  Adds `IdentityKeyPair` (Ed25519), `AuthConfig` (pinned-peer `authenticated` or
+  explicit `unauthenticatedForTesting`), and `DecodedMessage`. The handshake
+  fails closed against an unexpected peer. Inner logic is native-tested; the
+  `wasm32-unknown-unknown` build is verified. In-session rekey is not yet carried
+  over this message API.
 - **Raw-WebSocket message transport (P1, §3.4).** `WebsockMessageTransport`
   (`foctet-transport`, `transport-websock`) implements `MessageTransport` over a
   `websock` crate connection, carrying exactly one Foctet frame per **binary**

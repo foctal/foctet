@@ -323,10 +323,17 @@ enforcement remain.
       **and** a concrete native impl `WebsockMessageTransport` over the `websock`
       crate's raw connection (one Foctet frame per binary WebSocket message),
       verified with a real plain-WebSocket loopback roundtrip in
-      `foctet-transport/src/websock.rs`. **Still open:** a browser (wasm)
-      `MessageTransport` binding and a documented mux/backpressure definition.
-- [ ] Test native **and** browser WebTransport; document stream-only scope until
-      datagrams land.
+      `foctet-transport/src/websock.rs`. For the **browser**, the wasm
+      `FoctetSession` (§5, `foctet-wasm/src/session.rs`) covers raw WebSocket:
+      JS owns the `WebSocket` and exchanges the `Uint8Array` blobs that WASM
+      `sealMessage`/`openMessage` produce/consume (one frame per binary message).
+      **Still open:** a headless browser-runner test in CI and a documented
+      mux/backpressure definition.
+- [~] Browser WebTransport: the wasm `FoctetSession` (§5) already protects data
+      sent over a browser `WebTransport` datagram or stream (JS owns the
+      transport, WASM seals/opens each message). **Still open:** a native
+      WebTransport integration test and a headless browser-runner test; document
+      the per-datagram size budget when used over WebTransport datagrams.
 
 ---
 
@@ -374,9 +381,23 @@ enforcement remain.
 - [ ] Publish the npm package (currently a private dev harness;
       `pkg-*` are build artifacts).
 - [ ] Browser-runner integration test in CI (wasm-bindgen-test / headless).
-- [ ] Framed-session / handshake APIs over WASM (today: body envelope only).
-- [ ] Host-backed / non-extractable key handling where the platform allows it;
-      document zeroization limits across the boundary.
+- [x] Framed-session / handshake APIs over WASM. **Done**
+      (`foctet-wasm/src/session.rs`): `FoctetSession` runs the native
+      authenticated handshake (`newInitiator`/`newResponder` + `AuthConfig`,
+      pinned-peer or explicit unauthenticated) and then per-message
+      `sealMessage`/`openMessage` (one Foctet frame per message, replay-after-auth).
+      WASM does the crypto/handshake; **JS owns the transport** (browser
+      WebSocket/WebTransport), exchanging `Uint8Array` blobs. Also exposes
+      `IdentityKeyPair` (Ed25519) and `DecodedMessage`. Inner logic is
+      native-tested (handshake roundtrip, peer pinning, replay, fail-closed,
+      unexpected-peer rejection); the `wasm32-unknown-unknown` build is verified.
+      **Still open:** in-session rekey is not carried over this message API yet
+      (matches the datagram/message-shape rekey gap).
+- [~] Host-backed / non-extractable key handling where the platform allows it;
+      document zeroization limits across the boundary. **Documented** as
+      unavailable: WebCrypto has no portable non-extractable X25519/Ed25519 key
+      type, so `KeyPair`/`IdentityKeyPair` expose raw bytes (README "Scope and
+      security"). Revisit if/when a platform offers a usable non-extractable path.
 - [ ] Replace `interop/minimal_decoder.ts` (header-only) references with the SDK.
 
 ---
