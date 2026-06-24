@@ -66,16 +66,31 @@ class DecodedMessage {
 }
 
 class FoctetSession {
+  // Message mode: reliable/ordered (raw WebSocket, WebTransport stream).
   static newInitiator(auth: AuthConfig): FoctetSession;
   static newResponder(auth: AuthConfig): FoctetSession;
+  // Datagram mode: MTU-bounded, loss-tolerant (WebTransport datagrams).
+  // maxDatagramSize = 0 uses the default (1200).
+  static newDatagramInitiator(auth: AuthConfig, maxDatagramSize: number): FoctetSession;
+  static newDatagramResponder(auth: AuthConfig, maxDatagramSize: number): FoctetSession;
+
   initialHandshakeMessage(): Uint8Array | undefined;   // initiator: send this first
   handleHandshakeMessage(message: Uint8Array): Uint8Array | undefined; // returns a reply to send, if any
   isEstablished(): boolean;
   peerAuthenticated(): boolean;
-  sealMessage(streamId: number, flags: number, plaintext: Uint8Array): Uint8Array; // one frame to send
-  openMessage(message: Uint8Array): DecodedMessage;     // open one received frame
+
+  // Message-mode sessions:
+  sealMessage(streamId: number, flags: number, plaintext: Uint8Array): Uint8Array;
+  openMessage(message: Uint8Array): DecodedMessage;
+  // Datagram-mode sessions:
+  sealDatagram(streamId: number, flags: number, plaintext: Uint8Array): Uint8Array;
+  openDatagram(datagram: Uint8Array): DecodedMessage;
 }
 ```
+
+A session commits to one framing mode; the methods for the other mode throw. For
+WebTransport datagrams, run the (reliable) handshake messages over a stream, then
+send each `sealDatagram` result as a datagram.
 
 Example over a browser `WebSocket` (binary frames), as the initiator:
 

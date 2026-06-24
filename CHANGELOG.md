@@ -32,6 +32,13 @@ All notable changes to this project are documented in this file.
   fails closed against an unexpected peer. Inner logic is native-tested; the
   `wasm32-unknown-unknown` build is verified. In-session rekey is not yet carried
   over this message API.
+  - A session can run in **message mode** (`newInitiator`/`newResponder`,
+    `sealMessage`/`openMessage` — reliable WebSocket / WebTransport stream) or
+    **datagram mode** (`newDatagramInitiator`/`newDatagramResponder`,
+    `sealDatagram`/`openDatagram` — MTU-bounded WebTransport datagrams via
+    `DatagramEndpoint`, configurable `maxDatagramSize`). A session is locked to
+    one mode so the two framings can never share a `(key_id, stream_id)` nonce
+    space.
 - **Raw-WebSocket message transport (P1, §3.4).** `WebsockMessageTransport`
   (`foctet-transport`, `transport-websock`) implements `MessageTransport` over a
   `websock` crate connection, carrying exactly one Foctet frame per **binary**

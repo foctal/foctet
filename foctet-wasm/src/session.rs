@@ -29,16 +29,34 @@
 //! message; each `openMessage` consumes exactly one. Replay state is committed
 //! only after a frame authenticates.
 //!
+//! # Framing modes
+//!
+//! A session commits to one framing mode at construction:
+//!
+//! - **Message** (`newInitiator` / `newResponder`): reliable, ordered,
+//!   message-bounded — raw WebSocket or a WebTransport stream. Use
+//!   `sealMessage` / `openMessage`.
+//! - **Datagram** (`newDatagramInitiator` / `newDatagramResponder`):
+//!   MTU-bounded, loss/reorder-tolerant — WebTransport datagrams. Use
+//!   `sealDatagram` / `openDatagram`. The handshake itself is reliable, so run
+//!   the handshake messages over a reliable channel (e.g. a WebTransport stream)
+//!   before switching to datagrams.
+//!
+//! A single session never mixes the two, so message and datagram traffic can
+//! never share a `(key_id, stream_id)` sequence space (which would reuse a
+//! nonce).
+//!
 //! # Scope
 //!
-//! In-session rekey is **not** driven over this message API yet (the control
-//! channel is used only for the initial handshake), matching the datagram and
-//! native message-shape limitation. Establish a fresh session rather than
-//! reusing one indefinitely.
+//! In-session rekey is **not** driven over this API yet (the control channel is
+//! used only for the initial handshake), matching the datagram and native
+//! message-shape limitation. Establish a fresh session rather than reusing one
+//! indefinitely.
 
 use foctet_core::{
-    ControlMessage, CoreError, DecodedMessage, IdentityKeyPair, MessageEndpoint, PeerIdentity,
-    RekeyThresholds, Session, SessionAuthConfig, SessionState,
+    ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram, DecodedMessage,
+    IdentityKeyPair, MessageEndpoint, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
+    SessionState,
 };
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
@@ -207,11 +225,49 @@ impl From<DecodedMessage> for WasmDecodedMessage {
     }
 }
 
-/// A full Foctet session: handshake then ordered, replay-protected messages.
+impl From<DecodedDatagram> for WasmDecodedMessage {
+    fn from(decoded: DecodedDatagram) -> Self {
+        WasmDecodedMessage {
+            stream_id: decoded.header.stream_id,
+            flags: decoded.header.flags,
+            key_id: decoded.header.key_id,
+            seq: decoded.header.seq,
+            plaintext: decoded.plaintext,
+        }
+    }
+}
+
+/// The data-framing shape a session uses after the handshake. A session commits
+/// to exactly one so message and datagram framing can never share a
+/// `(key_id, stream_id)` sequence space (which would reuse a nonce).
+enum SessionEndpoint {
+    Message(MessageEndpoint),
+    Datagram(DatagramEndpoint),
+}
+
+#[derive(Clone, Copy)]
+enum TransportKind {
+    /// Reliable, ordered, message-bounded framing (raw WebSocket, WebTransport
+    /// stream). Not MTU-capped.
+    Message,
+    /// MTU-bounded, loss/reorder-tolerant framing (WebTransport datagrams).
+    Datagram { max_datagram_size: usize },
+}
+
+/// A full Foctet session: an authenticated handshake followed by
+/// replay-protected per-message (or per-datagram) seal/open.
+///
+/// A session is created in one framing mode and stays in it: the `*Message`
+/// methods work on a message-mode session (reliable, ordered — raw WebSocket or
+/// a WebTransport stream) and the `*Datagram` methods on a datagram-mode session
+/// (MTU-bounded, loss-tolerant — WebTransport datagrams). The handshake messages
+/// themselves are reliable and must be exchanged over a reliable channel even
+/// when data later flows as datagrams.
 #[wasm_bindgen]
 pub struct FoctetSession {
     session: Session,
-    endpoint: Option<MessageEndpoint>,
+    kind: TransportKind,
+    endpoint: Option<SessionEndpoint>,
     pending_handshake: Option<Vec<u8>>,
 }
 
@@ -232,6 +288,30 @@ impl FoctetSession {
     #[wasm_bindgen(js_name = newResponder)]
     pub fn new_responder(auth: &WasmAuthConfig) -> FoctetSession {
         FoctetSession::responder(auth.build())
+    }
+
+    /// Starts a datagram-mode session as the initiator (for WebTransport
+    /// datagrams). Exchange the handshake messages over a reliable channel, then
+    /// use [`Self::seal_datagram`] / [`Self::open_datagram`] for data.
+    ///
+    /// `max_datagram_size` caps each sealed datagram; pass `0` for the default
+    /// (`foctet_core::DEFAULT_MAX_DATAGRAM_SIZE`).
+    #[wasm_bindgen(js_name = newDatagramInitiator)]
+    pub fn new_datagram_initiator(
+        auth: &WasmAuthConfig,
+        max_datagram_size: usize,
+    ) -> FoctetSession {
+        FoctetSession::initiator_with_kind(auth.build(), datagram_kind(max_datagram_size))
+    }
+
+    /// Starts a datagram-mode session as the responder. See
+    /// [`Self::new_datagram_initiator`].
+    #[wasm_bindgen(js_name = newDatagramResponder)]
+    pub fn new_datagram_responder(
+        auth: &WasmAuthConfig,
+        max_datagram_size: usize,
+    ) -> FoctetSession {
+        FoctetSession::responder_with_kind(auth.build(), datagram_kind(max_datagram_size))
     }
 
     /// Returns the initiator's first handshake message to send, exactly once.
@@ -268,33 +348,71 @@ impl FoctetSession {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, JsError> {
-        self.seal_inner(stream_id, flags, plaintext)
+        self.seal_message_inner(stream_id, flags, plaintext)
             .map_err(core_to_js)
     }
 
     /// Opens one received transport message into its decrypted payload.
     #[wasm_bindgen(js_name = openMessage)]
     pub fn open_message(&mut self, message: &[u8]) -> Result<WasmDecodedMessage, JsError> {
-        self.open_inner(message)
+        self.open_message_inner(message)
+            .map(WasmDecodedMessage::from)
+            .map_err(core_to_js)
+    }
+
+    /// Seals `plaintext` into one datagram (datagram-mode sessions only).
+    ///
+    /// Fails if the sealed datagram would exceed the configured maximum size, or
+    /// if this is a message-mode session.
+    #[wasm_bindgen(js_name = sealDatagram)]
+    pub fn seal_datagram(
+        &mut self,
+        stream_id: u32,
+        flags: u8,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, JsError> {
+        self.seal_datagram_inner(stream_id, flags, plaintext)
+            .map_err(core_to_js)
+    }
+
+    /// Opens one received datagram into its decrypted payload (datagram-mode
+    /// sessions only).
+    #[wasm_bindgen(js_name = openDatagram)]
+    pub fn open_datagram(&mut self, datagram: &[u8]) -> Result<WasmDecodedMessage, JsError> {
+        self.open_datagram_inner(datagram)
             .map(WasmDecodedMessage::from)
             .map_err(core_to_js)
     }
 }
 
+fn datagram_kind(max_datagram_size: usize) -> TransportKind {
+    TransportKind::Datagram { max_datagram_size }
+}
+
 // Inner, native-testable logic (no `JsError`), shared by the wasm wrappers above.
 impl FoctetSession {
     fn initiator(auth: SessionAuthConfig) -> Self {
+        Self::initiator_with_kind(auth, TransportKind::Message)
+    }
+
+    fn responder(auth: SessionAuthConfig) -> Self {
+        Self::responder_with_kind(auth, TransportKind::Message)
+    }
+
+    fn initiator_with_kind(auth: SessionAuthConfig, kind: TransportKind) -> Self {
         let (session, hello) = Session::new_initiator_with_auth(RekeyThresholds::default(), auth);
         FoctetSession {
             session,
+            kind,
             endpoint: None,
             pending_handshake: Some(hello.encode()),
         }
     }
 
-    fn responder(auth: SessionAuthConfig) -> Self {
+    fn responder_with_kind(auth: SessionAuthConfig, kind: TransportKind) -> Self {
         FoctetSession {
             session: Session::new_responder_with_auth(RekeyThresholds::default(), auth),
+            kind,
             endpoint: None,
             pending_handshake: None,
         }
@@ -307,39 +425,72 @@ impl FoctetSession {
         Ok(reply.map(|msg| msg.encode()))
     }
 
-    /// Builds the message endpoint once the handshake reaches `Active`.
+    /// Builds the framing endpoint (matching the session's mode) once the
+    /// handshake reaches `Active`.
     fn ensure_endpoint(&mut self) {
         if self.endpoint.is_none()
             && self.session.state() == SessionState::Active
             && let Some(keys) = self.session.active_keys()
         {
-            self.endpoint = Some(MessageEndpoint::new(
-                keys,
-                self.session.inbound_direction(),
-                self.session.outbound_direction(),
-            ));
+            let inbound = self.session.inbound_direction();
+            let outbound = self.session.outbound_direction();
+            self.endpoint = Some(match self.kind {
+                TransportKind::Message => {
+                    SessionEndpoint::Message(MessageEndpoint::new(keys, inbound, outbound))
+                }
+                TransportKind::Datagram { max_datagram_size } => {
+                    let mut config = DatagramConfig::default();
+                    if max_datagram_size > 0 {
+                        config.max_datagram_size = max_datagram_size;
+                    }
+                    SessionEndpoint::Datagram(DatagramEndpoint::with_config(
+                        keys, inbound, outbound, config,
+                    ))
+                }
+            });
         }
     }
 
-    fn seal_inner(
+    fn seal_message_inner(
         &mut self,
         stream_id: u32,
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
         self.ensure_endpoint();
-        self.endpoint
-            .as_mut()
-            .ok_or(CoreError::InvalidSessionState)?
-            .seal(stream_id, flags, plaintext)
+        match self.endpoint.as_mut() {
+            Some(SessionEndpoint::Message(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
+            _ => Err(CoreError::InvalidSessionState),
+        }
     }
 
-    fn open_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
+    fn open_message_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
         self.ensure_endpoint();
-        self.endpoint
-            .as_mut()
-            .ok_or(CoreError::InvalidSessionState)?
-            .open(message)
+        match self.endpoint.as_mut() {
+            Some(SessionEndpoint::Message(endpoint)) => endpoint.open(message),
+            _ => Err(CoreError::InvalidSessionState),
+        }
+    }
+
+    fn seal_datagram_inner(
+        &mut self,
+        stream_id: u32,
+        flags: u8,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CoreError> {
+        self.ensure_endpoint();
+        match self.endpoint.as_mut() {
+            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
+            _ => Err(CoreError::InvalidSessionState),
+        }
+    }
+
+    fn open_datagram_inner(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
+        self.ensure_endpoint();
+        match self.endpoint.as_mut() {
+            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.open(datagram),
+            _ => Err(CoreError::InvalidSessionState),
+        }
     }
 }
 
@@ -375,19 +526,24 @@ mod tests {
         assert!(initiator.is_established() && responder.is_established());
 
         let frame = initiator
-            .seal_inner(7, 0, b"hello over a wasm session")
+            .seal_message_inner(7, 0, b"hello over a wasm session")
             .expect("seal");
-        let opened = responder.open_inner(&frame).expect("open");
+        let opened = responder.open_message_inner(&frame).expect("open");
         assert_eq!(opened.plaintext, b"hello over a wasm session");
         assert_eq!(opened.header.stream_id, 7);
 
         // A duplicate frame must be rejected as a replay.
-        assert!(responder.open_inner(&frame).is_err());
+        assert!(responder.open_message_inner(&frame).is_err());
 
         // Reverse direction works too.
-        let back = responder.seal_inner(7, 0, b"reply").expect("seal back");
+        let back = responder
+            .seal_message_inner(7, 0, b"reply")
+            .expect("seal back");
         assert_eq!(
-            initiator.open_inner(&back).expect("open back").plaintext,
+            initiator
+                .open_message_inner(&back)
+                .expect("open back")
+                .plaintext,
             b"reply"
         );
     }
@@ -428,10 +584,13 @@ mod tests {
         );
 
         let frame = initiator
-            .seal_inner(0, 0, b"authenticated payload")
+            .seal_message_inner(0, 0, b"authenticated payload")
             .expect("seal");
         assert_eq!(
-            responder.open_inner(&frame).expect("open").plaintext,
+            responder
+                .open_message_inner(&frame)
+                .expect("open")
+                .plaintext,
             b"authenticated payload"
         );
     }
@@ -445,7 +604,7 @@ mod tests {
             "session must not be active before the handshake completes"
         );
         assert!(
-            initiator.seal_inner(0, 0, b"too early").is_err(),
+            initiator.seal_message_inner(0, 0, b"too early").is_err(),
             "sealing before the session is active must fail"
         );
     }
@@ -481,5 +640,39 @@ mod tests {
             .expect("server hello");
         // The initiator must reject the responder whose identity it did not pin.
         assert!(initiator.handle_handshake_inner(&server_hello).is_err());
+    }
+
+    #[test]
+    fn datagram_mode_handshake_then_datagram_roundtrip_and_replay() {
+        let mut initiator = FoctetSession::initiator_with_kind(
+            SessionAuthConfig::unauthenticated_for_testing(),
+            TransportKind::Datagram {
+                max_datagram_size: 0,
+            },
+        );
+        let mut responder = FoctetSession::responder_with_kind(
+            SessionAuthConfig::unauthenticated_for_testing(),
+            TransportKind::Datagram {
+                max_datagram_size: 0,
+            },
+        );
+
+        drive_handshake(&mut initiator, &mut responder);
+        assert!(initiator.is_established() && responder.is_established());
+
+        let datagram = initiator
+            .seal_datagram_inner(3, 0, b"hello over a wasm datagram")
+            .expect("seal datagram");
+        let opened = responder
+            .open_datagram_inner(&datagram)
+            .expect("open datagram");
+        assert_eq!(opened.plaintext, b"hello over a wasm datagram");
+        assert_eq!(opened.header.stream_id, 3);
+
+        // A duplicate datagram must be rejected as a replay.
+        assert!(responder.open_datagram_inner(&datagram).is_err());
+
+        // Message-framing methods must fail on a datagram-mode session.
+        assert!(initiator.seal_message_inner(3, 0, b"wrong shape").is_err());
     }
 }

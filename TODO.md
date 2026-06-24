@@ -329,11 +329,14 @@ enforcement remain.
       `sealMessage`/`openMessage` produce/consume (one frame per binary message).
       **Still open:** a headless browser-runner test in CI and a documented
       mux/backpressure definition.
-- [~] Browser WebTransport: the wasm `FoctetSession` (§5) already protects data
-      sent over a browser `WebTransport` datagram or stream (JS owns the
-      transport, WASM seals/opens each message). **Still open:** a native
-      WebTransport integration test and a headless browser-runner test; document
-      the per-datagram size budget when used over WebTransport datagrams.
+- [~] Browser WebTransport: the wasm `FoctetSession` (§5) protects data over
+      both WebTransport **streams** (message mode: `newInitiator`/`sealMessage`)
+      and WebTransport **datagrams** (datagram mode:
+      `newDatagramInitiator`/`sealDatagram`, MTU-bounded via
+      `DatagramEndpoint`, configurable `maxDatagramSize`). JS owns the transport;
+      a session is locked to one framing mode so message/datagram traffic can
+      never share a `(key_id, stream_id)` nonce space. **Still open:** a native
+      WebTransport integration test and a headless browser-runner test.
 
 ---
 
