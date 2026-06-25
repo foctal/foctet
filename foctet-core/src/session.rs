@@ -9,8 +9,8 @@ use crate::{
     auth::{HandshakeAuth, SessionAuthConfig},
     control::ControlMessage,
     crypto::{
-        Direction, EphemeralKeyPair, TrafficKeys, derive_rekey_traffic_keys, derive_traffic_keys,
-        random_session_salt,
+        Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, derive_rekey_traffic_keys,
+        derive_traffic_keys, random_session_salt,
     },
 };
 
@@ -69,8 +69,8 @@ pub struct Session {
     peer_eph_public: Option<[u8; 32]>,
     shared_secret: Option<[u8; 32]>,
     session_salt: [u8; 32],
-    active_keys: Option<TrafficKeys>,
-    previous_keys: Vec<TrafficKeys>,
+    active_keys: Option<KeyHandle>,
+    previous_keys: Vec<KeyHandle>,
     thresholds: RekeyThresholds,
     auth: SessionAuthConfig,
     peer_authenticated: bool,
@@ -101,7 +101,8 @@ impl Session {
     ) -> (Self, ControlMessage) {
         let local_eph = EphemeralKeyPair::generate();
         let session_salt = random_session_salt();
-        let binding = client_hello_binding(local_eph.public, session_salt);
+        let binding =
+            client_hello_binding(local_eph.public, session_salt, auth.channel_binding_bytes());
         let auth_payload = auth.local_identity().map(|identity| {
             HandshakeAuth::sign(
                 identity,
@@ -209,7 +210,11 @@ impl Session {
                     auth,
                 },
             ) => {
-                let expected = client_hello_binding(*eph_public, *session_salt);
+                let expected = client_hello_binding(
+                    *eph_public,
+                    *session_salt,
+                    self.auth.channel_binding_bytes(),
+                );
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
@@ -226,13 +231,17 @@ impl Session {
                 let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
 
                 self.shared_secret = Some(shared);
-                self.active_keys = Some(keys);
+                self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
                 self.peer_authenticated = peer_authenticated;
                 self.last_rekey_at = Instant::now();
 
-                let server_binding =
-                    server_hello_binding(*eph_public, self.local_eph.public, self.session_salt);
+                let server_binding = server_hello_binding(
+                    *eph_public,
+                    self.local_eph.public,
+                    self.session_salt,
+                    self.auth.channel_binding_bytes(),
+                );
                 let server_auth = self.auth.local_identity().map(|identity| {
                     HandshakeAuth::sign(
                         identity,
@@ -259,8 +268,12 @@ impl Session {
                     auth,
                 },
             ) => {
-                let expected =
-                    server_hello_binding(self.local_eph.public, *eph_public, self.session_salt);
+                let expected = server_hello_binding(
+                    self.local_eph.public,
+                    *eph_public,
+                    self.session_salt,
+                    self.auth.channel_binding_bytes(),
+                );
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
@@ -272,7 +285,7 @@ impl Session {
                 let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
 
                 self.shared_secret = Some(shared);
-                self.active_keys = Some(keys);
+                self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
                 self.peer_authenticated = peer_authenticated;
                 self.last_rekey_at = Instant::now();
@@ -318,13 +331,17 @@ impl Session {
         }
     }
 
-    /// Returns the currently active traffic keys, if session is active.
-    pub fn active_keys(&self) -> Option<TrafficKeys> {
+    /// Returns a handle to the currently active traffic keys, if session is
+    /// active.
+    ///
+    /// The returned [`KeyHandle`] shares the underlying key bytes by reference
+    /// count; it does not copy the secret material.
+    pub fn active_keys(&self) -> Option<KeyHandle> {
         self.active_keys.clone()
     }
 
-    /// Returns active key followed by retained previous keys.
-    pub fn active_and_previous_keys(&self) -> Option<Vec<TrafficKeys>> {
+    /// Returns handles to the active key followed by retained previous keys.
+    pub fn active_and_previous_keys(&self) -> Option<Vec<KeyHandle>> {
         let mut out = Vec::new();
         let active = self.active_keys.clone()?;
         out.push(active);
@@ -332,8 +349,8 @@ impl Session {
         Some(out)
     }
 
-    /// Returns current key ring as transport-ready list.
-    pub fn key_ring(&self) -> Result<Vec<TrafficKeys>, CoreError> {
+    /// Returns current key ring as transport-ready list of handles.
+    pub fn key_ring(&self) -> Result<Vec<KeyHandle>, CoreError> {
         self.active_and_previous_keys()
             .ok_or(CoreError::InvalidSessionState)
     }
@@ -406,7 +423,7 @@ impl Session {
                     .truncate(self.thresholds.max_previous_keys);
             }
         }
-        self.active_keys = Some(next);
+        self.active_keys = Some(KeyHandle::new(next));
     }
 
     fn verify_client_auth(
@@ -464,11 +481,30 @@ impl Session {
     }
 }
 
-fn client_hello_binding(client_public: [u8; 32], session_salt: [u8; 32]) -> [u8; 32] {
+/// Mixes an optional outer-channel binding into a transcript hash.
+///
+/// When `channel_binding` is empty this is a no-op, so a handshake configured
+/// without a binding hashes byte-identically to before this field existed. When
+/// present it is added length-prefixed under a domain separator so distinct
+/// bindings can never collide with other transcript fields.
+fn mix_channel_binding(hasher: &mut Sha256, channel_binding: &[u8]) {
+    if !channel_binding.is_empty() {
+        hasher.update(b"foctet channel-binding");
+        hasher.update((channel_binding.len() as u64).to_be_bytes());
+        hasher.update(channel_binding);
+    }
+}
+
+fn client_hello_binding(
+    client_public: [u8; 32],
+    session_salt: [u8; 32],
+    channel_binding: &[u8],
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"foctet hs client");
     hasher.update(client_public);
     hasher.update(session_salt);
+    mix_channel_binding(&mut hasher, channel_binding);
     hasher.finalize().into()
 }
 
@@ -489,12 +525,14 @@ fn server_hello_binding(
     client_public: [u8; 32],
     server_public: [u8; 32],
     session_salt: [u8; 32],
+    channel_binding: &[u8],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"foctet hs server");
     hasher.update(client_public);
     hasher.update(server_public);
     hasher.update(session_salt);
+    mix_channel_binding(&mut hasher, channel_binding);
     hasher.finalize().into()
 }
 
@@ -576,6 +614,105 @@ mod tests {
             .with_local_identity(server_identity.clone())
             .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
             .require_peer_authentication(true);
+
+        let (mut client, hello) =
+            Session::new_initiator_with_auth(RekeyThresholds::default(), client_auth);
+        let mut server = Session::new_responder_with_auth(RekeyThresholds::default(), server_auth);
+
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handle client hello")
+            .expect("server hello response");
+        client
+            .handle_control(&server_hello)
+            .expect("client handle server hello");
+
+        assert!(client.peer_authenticated());
+        assert!(server.peer_authenticated());
+    }
+
+    #[test]
+    fn matching_channel_binding_completes_handshake_without_identity() {
+        use crate::ChannelBinding;
+        let binding = ChannelBinding::new(b"tls-exporter:matching-outer-channel".to_vec());
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(binding.clone()),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(binding),
+        );
+
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server accepts a matching channel binding")
+            .expect("server hello response");
+        client
+            .handle_control(&server_hello)
+            .expect("client accepts a matching channel binding");
+
+        assert_eq!(client.state(), SessionState::Active);
+        assert_eq!(server.state(), SessionState::Active);
+        // The channel — not a Foctet identity — provided MITM resistance.
+        assert!(!client.peer_authenticated());
+        assert!(!server.peer_authenticated());
+    }
+
+    #[test]
+    fn mismatched_channel_binding_fails_handshake() {
+        use crate::ChannelBinding;
+        // Models a relay: each side is bound to a different outer channel.
+        let (_client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(ChannelBinding::new(b"channel-A".to_vec())),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(ChannelBinding::new(b"channel-B".to_vec())),
+        );
+
+        let err = server
+            .handle_control(&hello)
+            .expect_err("a channel-binding mismatch must fail closed");
+        assert!(matches!(err, CoreError::InvalidControlMessage));
+    }
+
+    #[test]
+    fn channel_binding_must_be_present_on_both_sides() {
+        use crate::ChannelBinding;
+        // The initiator binds to a channel; the responder does not.
+        let (_client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(ChannelBinding::new(b"channel-A".to_vec())),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+
+        let err = server
+            .handle_control(&hello)
+            .expect_err("a one-sided channel binding must fail closed");
+        assert!(matches!(err, CoreError::InvalidControlMessage));
+    }
+
+    #[test]
+    fn channel_binding_strengthens_identity_authenticated_handshake() {
+        use crate::ChannelBinding;
+        let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
+        let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
+        let binding = ChannelBinding::new(b"tls-exporter:bound".to_vec());
+        let client_auth = SessionAuthConfig::new()
+            .with_local_identity(client_identity.clone())
+            .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
+            .require_peer_authentication(true)
+            .with_channel_binding(binding.clone());
+        let server_auth = SessionAuthConfig::new()
+            .with_local_identity(server_identity.clone())
+            .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
+            .require_peer_authentication(true)
+            .with_channel_binding(binding);
 
         let (mut client, hello) =
             Session::new_initiator_with_auth(RekeyThresholds::default(), client_auth);

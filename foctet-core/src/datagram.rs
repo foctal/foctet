@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use crate::{
     CoreError,
-    crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
+    crypto::{Direction, KeyHandle, decrypt_frame_with_key, encrypt_frame},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
     replay::{DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector},
     sequence::OutboundSequence,
@@ -84,7 +84,7 @@ pub struct DecodedDatagram {
 /// example a QUIC or WebTransport datagram socket) that moves the returned bytes.
 #[derive(Clone, Debug)]
 pub struct DatagramEndpoint {
-    keys: Vec<TrafficKeys>,
+    keys: Vec<KeyHandle>,
     active_key_id: u8,
     max_retained_keys: usize,
     inbound_direction: Direction,
@@ -97,7 +97,7 @@ pub struct DatagramEndpoint {
 impl DatagramEndpoint {
     /// Creates a datagram endpoint with default configuration.
     pub fn new(
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -111,7 +111,7 @@ impl DatagramEndpoint {
 
     /// Creates a datagram endpoint with explicit configuration.
     pub fn with_config(
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
         config: DatagramConfig,
@@ -150,7 +150,7 @@ impl DatagramEndpoint {
     }
 
     /// Installs new active keys and retains a bounded set of previous keys.
-    pub fn install_active_keys(&mut self, keys: TrafficKeys) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -160,14 +160,14 @@ impl DatagramEndpoint {
         }
     }
 
-    fn active_keys(&self) -> Result<&TrafficKeys, CoreError> {
+    fn active_keys(&self) -> Result<&KeyHandle, CoreError> {
         self.keys
             .iter()
             .find(|k| k.key_id == self.active_key_id)
             .ok_or(CoreError::MissingSessionSecret)
     }
 
-    fn key_for_id(&self, key_id: u8) -> Option<&TrafficKeys> {
+    fn key_for_id(&self, key_id: u8) -> Option<&KeyHandle> {
         self.keys.iter().find(|k| k.key_id == key_id)
     }
 
@@ -254,14 +254,14 @@ impl DatagramEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{EphemeralKeyPair, derive_traffic_keys, random_session_salt};
+    use crate::crypto::{EphemeralKeyPair, KeyHandle, derive_traffic_keys, random_session_salt};
 
     fn endpoints() -> (DatagramEndpoint, DatagramEndpoint) {
         let a = EphemeralKeyPair::generate();
         let b = EphemeralKeyPair::generate();
         let ss = a.shared_secret(b.public).expect("shared secret");
         let salt = random_session_salt();
-        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
         // Client seals C2S / opens S2C; server is the mirror.
         let client = DatagramEndpoint::new(keys.clone(), Direction::S2C, Direction::C2S);
         let server = DatagramEndpoint::new(keys, Direction::C2S, Direction::S2C);

@@ -10,7 +10,7 @@ use futures_sink::Sink;
 use crate::{
     CoreError,
     control::ControlMessage,
-    crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
+    crypto::{Direction, KeyHandle, decrypt_frame_with_key, encrypt_frame},
     io::PollIo,
     limits::ProtocolLimits,
     payload::{self, Tlv},
@@ -203,7 +203,7 @@ pub struct DecodedFrame {
 #[derive(Clone, Debug)]
 pub struct FoctetFramed<T> {
     io: T,
-    keys: Vec<TrafficKeys>,
+    keys: Vec<KeyHandle>,
     active_key_id: u8,
     limits: ProtocolLimits,
     inbound_direction: Direction,
@@ -221,7 +221,7 @@ impl<T> FoctetFramed<T> {
     /// Creates a framed transport with initial traffic keys.
     pub fn new(
         io: T,
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -309,7 +309,7 @@ impl<T> FoctetFramed<T> {
     }
 
     /// Installs new active keys and retains previous keys.
-    pub fn install_active_keys(&mut self, keys: TrafficKeys) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -319,14 +319,14 @@ impl<T> FoctetFramed<T> {
         }
     }
 
-    fn active_keys(&self) -> Result<&TrafficKeys, CoreError> {
+    fn active_keys(&self) -> Result<&KeyHandle, CoreError> {
         self.keys
             .iter()
             .find(|k| k.key_id == self.active_key_id)
             .ok_or(CoreError::MissingSessionSecret)
     }
 
-    fn key_for_id(&self, key_id: u8) -> Option<&TrafficKeys> {
+    fn key_for_id(&self, key_id: u8) -> Option<&KeyHandle> {
         self.keys.iter().find(|k| k.key_id == key_id)
     }
 
@@ -770,7 +770,8 @@ mod tests {
     use crate::{
         ControlMessage, CoreError,
         crypto::{
-            Direction, EphemeralKeyPair, derive_traffic_keys, encrypt_frame, random_session_salt,
+            Direction, EphemeralKeyPair, KeyHandle, derive_traffic_keys, encrypt_frame,
+            random_session_salt,
         },
         io::{PollRead, PollWrite},
     };
@@ -834,7 +835,7 @@ mod tests {
         let eph_b = EphemeralKeyPair::generate();
         let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
         let salt = random_session_salt();
-        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
 
         let io = MemoryIo::default();
         let mut framed = FoctetFramed::new(io, keys.clone(), Direction::C2S, Direction::C2S)
@@ -870,7 +871,7 @@ mod tests {
         let eph_b = EphemeralKeyPair::generate();
         let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
         let salt = random_session_salt();
-        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
 
         let valid = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, b"hello").expect("valid frame");
         let forged =
@@ -924,7 +925,7 @@ mod tests {
         let eph_b = EphemeralKeyPair::generate();
         let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
         let salt = random_session_salt();
-        let keys = derive_traffic_keys(&ss, &salt, 1).expect("traffic keys");
+        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
 
         let (mut session, _hello) = crate::Session::new_initiator_with_auth(
             crate::RekeyThresholds::default(),

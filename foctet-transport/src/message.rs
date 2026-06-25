@@ -17,9 +17,7 @@
 //! unlike the MTU-bounded datagram shape. Replay state is committed only after
 //! AEAD authentication, so a forged message cannot advance the window.
 
-use foctet_core::{
-    CoreError, DecodedMessage, MessageConfig, MessageEndpoint, Session, TrafficKeys,
-};
+use foctet_core::{CoreError, DecodedMessage, KeyHandle, MessageConfig, MessageEndpoint, Session};
 use thiserror::Error;
 
 /// A message-oriented transport that sends and receives whole, discrete messages.
@@ -109,7 +107,7 @@ where
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
-    pub fn install_active_keys(&mut self, keys: TrafficKeys) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.endpoint.install_active_keys(keys);
     }
 
@@ -152,7 +150,7 @@ mod tests {
     use std::rc::Rc;
 
     use foctet_core::{
-        Direction, EphemeralKeyPair, RekeyThresholds, Session, SessionAuthConfig,
+        Direction, EphemeralKeyPair, KeyHandle, RekeyThresholds, Session, SessionAuthConfig,
         derive_traffic_keys, random_session_salt,
     };
 
@@ -265,8 +263,8 @@ mod tests {
         let b = EphemeralKeyPair::generate();
         let ss = a.shared_secret(b.public).expect("shared secret");
         let salt = random_session_salt();
-        let k1 = derive_traffic_keys(&ss, &salt, 1).expect("keys gen 1");
-        let k2 = derive_traffic_keys(&ss, &salt, 2).expect("keys gen 2");
+        let k1 = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("keys gen 1"));
+        let k2 = KeyHandle::new(derive_traffic_keys(&ss, &salt, 2).expect("keys gen 2"));
 
         let (client_io, server_io) = linked_pair();
         let mut client = SecureMessageChannel {

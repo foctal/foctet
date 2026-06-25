@@ -91,8 +91,8 @@ mod sequence;
 pub mod session;
 
 pub use auth::{
-    HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth, IdentityKeyPair, PeerIdentity,
-    SessionAuthConfig,
+    ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth, IdentityKeyPair,
+    PeerIdentity, SessionAuthConfig,
 };
 pub use body::{
     BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,
@@ -102,7 +102,7 @@ pub use body::{
 };
 pub use control::{ControlMessage, ControlMessageKind};
 pub use crypto::{
-    Direction, EphemeralKeyPair, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
+    Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
     derive_rekey_traffic_keys, derive_traffic_keys, encrypt_frame, make_nonce, random_session_salt,
 };
 pub use datagram::{

@@ -79,6 +79,40 @@ impl IdentityKeyPair {
     }
 }
 
+/// An outer-channel binding value mixed into the Foctet handshake transcript.
+///
+/// When both peers configure the *same* binding (for example a TLS exporter
+/// value per RFC 5705, a TLS channel id, or any other value that is unique to
+/// the authenticated outer channel), it is folded into the handshake transcript
+/// hash. A man-in-the-middle that terminates the outer channel and relays the
+/// Foctet handshake necessarily has a *different* binding value, so the two
+/// sides compute different transcripts and the handshake fails closed — even
+/// when no Foctet Ed25519 identity is used. This lets an authenticated outer
+/// channel substitute for Foctet identity authentication.
+///
+/// The binding is **not** secret; it is authenticated context, not key
+/// material. An empty binding is treated as "no binding" and leaves the
+/// transcript byte-identical to a handshake configured without one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChannelBinding(Vec<u8>);
+
+impl ChannelBinding {
+    /// Creates a channel binding from the outer channel's binding bytes.
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+
+    /// Returns the binding bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns whether the binding carries no bytes (treated as "no binding").
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Peer identity pin used to verify remote handshake authentication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PeerIdentity {
@@ -146,6 +180,7 @@ pub struct SessionAuthConfig {
     peer_identity: Option<PeerIdentity>,
     require_peer_authentication: bool,
     allow_unauthenticated: bool,
+    channel_binding: Option<ChannelBinding>,
 }
 
 impl SessionAuthConfig {
@@ -172,9 +207,35 @@ impl SessionAuthConfig {
         }
     }
 
+    /// Creates a configuration whose man-in-the-middle resistance comes from an
+    /// authenticated outer channel rather than a Foctet Ed25519 identity.
+    ///
+    /// The `binding` (e.g. a TLS exporter value) is folded into the handshake
+    /// transcript on both sides, so a relay across a different outer channel
+    /// fails closed. This is the typed, production-oriented alternative to
+    /// [`SessionAuthConfig::unauthenticated_for_testing`]: there is no Foctet
+    /// identity, but the handshake is bound to a channel you already trust.
+    pub fn bound_to_channel(binding: ChannelBinding) -> Self {
+        Self {
+            allow_unauthenticated: true,
+            channel_binding: Some(binding),
+            ..Self::default()
+        }
+    }
+
     /// Attaches a local identity used to sign native handshake messages.
     pub fn with_local_identity(mut self, identity: IdentityKeyPair) -> Self {
         self.local_identity = Some(identity);
+        self
+    }
+
+    /// Binds the handshake transcript to an outer-channel [`ChannelBinding`].
+    ///
+    /// Additive to any identity configuration: both peers must supply the same
+    /// binding or the handshake fails. An empty binding leaves the transcript
+    /// byte-identical to a handshake configured without one.
+    pub fn with_channel_binding(mut self, binding: ChannelBinding) -> Self {
+        self.channel_binding = Some(binding);
         self
     }
 
@@ -218,6 +279,15 @@ impl SessionAuthConfig {
     /// Returns whether remote handshake authentication is mandatory.
     pub fn requires_peer_authentication(&self) -> bool {
         self.require_peer_authentication
+    }
+
+    /// Returns the configured outer-channel binding bytes, or an empty slice
+    /// when none is set. An empty binding leaves the transcript unchanged.
+    pub fn channel_binding_bytes(&self) -> &[u8] {
+        match &self.channel_binding {
+            Some(binding) => binding.as_bytes(),
+            None => &[],
+        }
     }
 }
 

@@ -2,6 +2,9 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use std::ops::Deref;
+use std::sync::Arc;
+
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
@@ -34,7 +37,11 @@ pub enum Direction {
 /// auditable exposure — prefer [`TrafficKeys::key_for`], and only copy the
 /// bytes out when you immediately wrap the copy (e.g. in
 /// [`zeroize::Zeroizing`]).
-#[derive(Clone)]
+///
+/// `TrafficKeys` is deliberately **not** `Clone`: the secret key bytes exist in
+/// exactly one place and are zeroized when that place is dropped. Share keys
+/// through a [`KeyHandle`] (a reference-counted handle) instead of copying the
+/// secret bytes into multiple owners.
 pub struct TrafficKeys {
     /// Active key identifier carried in frame headers.
     pub key_id: u8,
@@ -84,6 +91,43 @@ impl Drop for TrafficKeys {
     fn drop(&mut self) {
         self.c2s.zeroize();
         self.s2c.zeroize();
+    }
+}
+
+/// A shared, reference-counted handle to a set of [`TrafficKeys`].
+///
+/// Because [`TrafficKeys`] is not `Clone`, the session key ring, the previous-key
+/// retention list, and the various I/O endpoints share one key set through a
+/// `KeyHandle` rather than each owning a copy of the secret bytes. Cloning a
+/// `KeyHandle` only bumps the reference count; the underlying key bytes are
+/// zeroized once the last handle is dropped.
+///
+/// A `KeyHandle` dereferences to the inner [`TrafficKeys`], so field access
+/// (`handle.key_id`) and methods (`handle.key_for(dir)`) work directly, and it
+/// coerces to `&TrafficKeys` at call sites such as [`encrypt_frame`]. Equality
+/// and `Debug` delegate to [`TrafficKeys`] (constant-time comparison, redacted
+/// secret bytes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyHandle(Arc<TrafficKeys>);
+
+impl KeyHandle {
+    /// Wraps a freshly derived key set in a shared handle.
+    pub fn new(keys: TrafficKeys) -> Self {
+        Self(Arc::new(keys))
+    }
+}
+
+impl From<TrafficKeys> for KeyHandle {
+    fn from(keys: TrafficKeys) -> Self {
+        Self::new(keys)
+    }
+}
+
+impl Deref for KeyHandle {
+    type Target = TrafficKeys;
+
+    fn deref(&self) -> &TrafficKeys {
+        &self.0
     }
 }
 

@@ -1,13 +1,13 @@
 use std::{env, error::Error};
 
-use foctet::core::{Direction, FoctetStream, TrafficKeys, derive_traffic_keys};
+use foctet::core::{Direction, FoctetStream, KeyHandle, derive_traffic_keys};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 use x25519_dalek::{PublicKey, StaticSecret};
 
-fn build_shared_keys() -> Result<TrafficKeys, foctet::core::CoreError> {
+fn build_shared_keys() -> Result<KeyHandle, foctet::core::CoreError> {
     let client_private = StaticSecret::from([0x31; 32]);
     let server_private = StaticSecret::from([0x52; 32]);
     let server_public = PublicKey::from(&server_private).to_bytes();
@@ -15,12 +15,16 @@ fn build_shared_keys() -> Result<TrafficKeys, foctet::core::CoreError> {
         .diffie_hellman(&PublicKey::from(server_public))
         .to_bytes();
     let session_salt = [0xA5; 32];
-    derive_traffic_keys(&shared_secret, &session_salt, 1)
+    Ok(KeyHandle::new(derive_traffic_keys(
+        &shared_secret,
+        &session_salt,
+        1,
+    )?))
 }
 
 async fn run_server(
     listener: TcpListener,
-    keys: TrafficKeys,
+    keys: KeyHandle,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (stream, peer) = listener.accept().await?;
     stream.set_nodelay(true)?;
@@ -44,7 +48,7 @@ async fn run_server(
     Ok(())
 }
 
-async fn run_client(addr: std::net::SocketAddr, keys: TrafficKeys) -> Result<(), Box<dyn Error>> {
+async fn run_client(addr: std::net::SocketAddr, keys: KeyHandle) -> Result<(), Box<dyn Error>> {
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
 

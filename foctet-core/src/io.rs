@@ -7,7 +7,7 @@ use std::{
 use crate::{
     CoreError,
     control::ControlMessage,
-    crypto::{Direction, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
+    crypto::{Direction, KeyHandle, TrafficKeys, decrypt_frame_with_key, encrypt_frame},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
     limits::ProtocolLimits,
     payload::{self, Tlv},
@@ -173,7 +173,7 @@ where
     /// Constructs [`FoctetFramed`] from Tokio async I/O.
     pub fn from_tokio(
         io: T,
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -194,7 +194,7 @@ where
     /// Constructs [`FoctetFramed`] from futures-io async I/O.
     pub fn from_futures(
         io: T,
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -215,7 +215,7 @@ where
     /// Constructs [`FoctetStream`] from Tokio async I/O.
     pub fn from_tokio(
         io: T,
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -232,7 +232,7 @@ where
     /// Constructs [`FoctetStream`] from futures-io async I/O.
     pub fn from_futures(
         io: T,
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -356,7 +356,7 @@ where
 #[derive(Debug)]
 pub struct SyncIo<T> {
     io: T,
-    keys: Vec<TrafficKeys>,
+    keys: Vec<KeyHandle>,
     active_key_id: u8,
     limits: ProtocolLimits,
     inbound_direction: Direction,
@@ -371,7 +371,7 @@ impl<T> SyncIo<T> {
     /// Creates a blocking Foctet transport wrapper.
     pub fn new(
         io: T,
-        keys: TrafficKeys,
+        keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
@@ -441,7 +441,7 @@ impl<T> SyncIo<T> {
     }
 
     /// Installs new active keys and retains previous keys.
-    pub fn install_active_keys(&mut self, keys: TrafficKeys) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -456,14 +456,14 @@ impl<T> SyncIo<T> {
         self.io
     }
 
-    fn active_keys(&self) -> Result<&TrafficKeys, CoreError> {
+    fn active_keys(&self) -> Result<&KeyHandle, CoreError> {
         self.keys
             .iter()
             .find(|k| k.key_id == self.active_key_id)
             .ok_or(CoreError::MissingSessionSecret)
     }
 
-    fn key_for_id(&self, key_id: u8) -> Option<&TrafficKeys> {
+    fn key_for_id(&self, key_id: u8) -> Option<&KeyHandle> {
         self.keys.iter().find(|k| k.key_id == key_id)
     }
 
@@ -701,7 +701,7 @@ mod tests {
     use super::SyncIo;
     use crate::CoreError;
     use crate::crypto::{
-        Direction, EphemeralKeyPair, TrafficKeys, derive_traffic_keys, encrypt_frame,
+        Direction, EphemeralKeyPair, KeyHandle, derive_traffic_keys, encrypt_frame,
         random_session_salt,
     };
 
@@ -735,12 +735,12 @@ mod tests {
         }
     }
 
-    fn test_keys() -> TrafficKeys {
+    fn test_keys() -> KeyHandle {
         let a = EphemeralKeyPair::generate();
         let b = EphemeralKeyPair::generate();
         let ss = a.shared_secret(b.public).expect("shared secret");
         let salt = random_session_salt();
-        derive_traffic_keys(&ss, &salt, 1).expect("traffic keys")
+        KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"))
     }
 
     #[test]

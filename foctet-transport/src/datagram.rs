@@ -12,7 +12,7 @@
 //! and replay state is committed only after AEAD authentication.
 
 use foctet_core::{
-    CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram, Session, TrafficKeys,
+    CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram, KeyHandle, Session,
 };
 use thiserror::Error;
 
@@ -103,7 +103,7 @@ where
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
-    pub fn install_active_keys(&mut self, keys: TrafficKeys) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.endpoint.install_active_keys(keys);
     }
 

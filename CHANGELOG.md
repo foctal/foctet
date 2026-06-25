@@ -21,6 +21,18 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Channel binding to an authenticated outer channel (P1, §2.1).** New
+  `ChannelBinding` + `SessionAuthConfig::bound_to_channel(..)` /
+  `with_channel_binding(..)` (`foctet-core`). The binding value (e.g. a TLS
+  exporter per RFC 5705) is folded into the handshake transcript hash on both
+  sides, so a man-in-the-middle that terminates the outer channel and relays the
+  Foctet handshake computes a different transcript and fails closed — letting an
+  authenticated outer channel substitute for a Foctet Ed25519 identity.
+  `bound_to_channel` is the typed, production-named alternative to
+  `unauthenticated_for_testing`. The transcript is byte-identical to before when
+  no binding is set (an extra length-prefixed, domain-separated hash input only;
+  no change to key derivation, the AEAD, or signatures), and the binding flows
+  through the transport builders automatically.
 - **Framed Foctet session over WebAssembly (P1, §5).** `foctet-wasm` now exposes
   `FoctetSession` — the full authenticated handshake plus ordered,
   replay-protected per-message `sealMessage`/`openMessage` — not just the
@@ -55,6 +67,19 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **`TrafficKeys` is now non-`Clone`; share keys via `KeyHandle` (P1, §2.5).**
+  Traffic-key secret bytes now exist in exactly one place and are zeroized when
+  it drops, instead of being copied into every owner. Shared ownership goes
+  through the new `KeyHandle` (`Arc<TrafficKeys>`): it derefs to `TrafficKeys`,
+  clones cheaply (refcount only), and delegates `Debug`/`Eq` to the redacted,
+  constant-time `TrafficKeys` impls. **Breaking:** `Session::active_keys()` /
+  `active_and_previous_keys()` / `key_ring()` now return `KeyHandle`(s), and the
+  endpoint constructors (`FoctetFramed::new` / `SyncIo::new` / `from_tokio` /
+  `from_futures`, `MessageEndpoint::{new,with_config}`,
+  `DatagramEndpoint::{new,with_config}`) and `install_active_keys` take a
+  `KeyHandle`. Wrap a freshly derived key set with `KeyHandle::new(..)` (or
+  `.into()`). The transport `SecureMessageChannel`/`SecureDatagramChannel` and
+  quinn adapters' `install_active_keys` take `KeyHandle` to match.
 - **CI release-hardening gates (P1, §6).** The Rust workflow now enforces
   `cargo fmt --all -- --check`, runs `cargo test --workspace --all-features
   --locked`, adds an MSRV job (`rust-version = "1.88"`, declared on every

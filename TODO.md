@@ -156,9 +156,23 @@ enforcement remain.
       `allow_unauthenticated()`.
 - [x] Downgrade/MITM negative tests (`session.rs`).
 - [x] All transport convenience helpers route through explicit opt-in.
-- [ ] Introduce a typed `AuthenticatedPeer` / `ChannelBinding` abstraction so an
-      outer-channel binding (e.g. TLS exporter / channel id) can substitute for
-      Foctet identity auth, instead of the current boolean opt-in.
+- [x] Introduce a typed `ChannelBinding` abstraction so an outer-channel binding
+      (e.g. TLS exporter / channel id) can substitute for Foctet identity auth,
+      instead of the current boolean opt-in. **Done** (`foctet-core/src/auth.rs`,
+      `session.rs`): `ChannelBinding` + `SessionAuthConfig::bound_to_channel(..)`
+      (typed, production-named alternative to `unauthenticated_for_testing`) and
+      `with_channel_binding(..)` (additive to identity auth). The binding is
+      folded into the handshake transcript hash (`client_hello_binding` /
+      `server_hello_binding`) length-prefixed under a domain separator, so a
+      relay across a different outer channel fails closed; it is byte-identical
+      to before when no binding is set (existing vectors unchanged — extra hash
+      input only, no KDF/AEAD/signature change). Tests: matching binding
+      completes an identity-less handshake, mismatch fails, one-sided fails,
+      binding strengthens an identity-authenticated handshake. Flows through the
+      transport builders automatically (they already take `SessionAuthConfig`).
+      **Still open:** a typed `AuthenticatedPeer` *result* type (the verified
+      peer is currently implied by the pinned `PeerIdentity` + `peer_authenticated()`);
+      surfacing channel binding through the WASM `AuthConfig`.
 - [ ] Consider removing/renaming the no-auth transport convenience constructors
       at API-freeze (currently they call `unauthenticated_for_testing()`).
 
@@ -215,25 +229,35 @@ enforcement remain.
       tests). Still missing: a connection-level rate limit and cancellation.
 
 ### 2.5 Key-material ergonomics
-- [~] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
+- [x] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
       Secret-leak hardening done: `TrafficKeys`, `EphemeralKeyPair`,
       `IdentityKeyPair` (`foctet-core`) and `HttpOpenOptions` (`foctet-http`)
-      now redact secret bytes in `Debug` (no more raw key arrays in logs);
-      `TrafficKeys`/`IdentityKeyPair` equality is constant-time via
-      `subtle::ConstantTimeEq`; `HttpOpenOptions` keeps its recipient secret in
-      a `Zeroizing` wrapper. **Still open:** these types remain `Clone` because
-      the session key ring, `previous_keys`, and the sync/async/datagram I/O
-      paths all hold owned `TrafficKeys` copies — making them non-`Clone` needs
-      a key-handle refactor (the bullet below), not just a derive change.
+      redact secret bytes in `Debug`; `TrafficKeys`/`IdentityKeyPair` equality is
+      constant-time via `subtle::ConstantTimeEq`; `HttpOpenOptions` keeps its
+      recipient secret in a `Zeroizing` wrapper. **Done:** `TrafficKeys` is now
+      **non-`Clone`** — the secret key bytes exist in exactly one place and are
+      zeroized when it drops. Shared ownership goes through a new
+      `KeyHandle(Arc<TrafficKeys>)` (`Deref<Target=TrafficKeys>`, cheap `Clone`
+      that only bumps the refcount, `Debug`/`Eq` delegate to the redacted /
+      constant-time `TrafficKeys` impls). The session key ring + `previous_keys`,
+      and the stream/sync (`FoctetFramed`/`SyncIo`), datagram, and message
+      endpoints now all hold `KeyHandle`s instead of owned `TrafficKeys` copies;
+      `Session::active_keys()`/`key_ring()` and the endpoint
+      `new`/`with_config`/`install_active_keys` APIs take/return `KeyHandle`
+      (downstream-visible). Verified: full workspace tests + clippy + wasm +
+      rustdoc + cargo-deny all green.
 - [x] Stop returning raw secret-key byte copies.
       `IdentityKeyPair::secret_key_bytes()` → `expose_secret_key_bytes()` and
       `HttpOpenOptions::recipient_secret_key()` → `expose_recipient_secret_key()`
       now return `Zeroizing<[u8; 32]>` (wiped on drop) under an `expose_`-prefixed,
       greppable name. The internal `key_for`-style raw copies are immediately
       wrapped in `Zeroizing` at the AEAD call sites (`crypto.rs`).
-- [ ] Key-provider / keystore abstraction: separate key *handles* from bytes;
-      key IDs with rotation policy; optional hardware-backed path. (Prereq for
-      making `TrafficKeys` non-`Clone`.)
+- [~] Key-provider / keystore abstraction: separate key *handles* from bytes;
+      key IDs with rotation policy; optional hardware-backed path. The key-handle
+      half is **done** (`KeyHandle` shares traffic-key bytes by refcount, see
+      above). **Still open:** a `KeyProvider`/keystore trait with a rotation
+      policy and an optional hardware-backed signer for the long-term identity
+      key (the X25519/Ed25519 secrets still live as in-process bytes).
 - [x] Document that session state MUST NOT be restored with reset counters under
       the same traffic key; gate persistence until designed safely.
 
