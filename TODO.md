@@ -256,12 +256,21 @@ enforcement remain.
       now return `Zeroizing<[u8; 32]>` (wiped on drop) under an `expose_`-prefixed,
       greppable name. The internal `key_for`-style raw copies are immediately
       wrapped in `Zeroizing` at the AEAD call sites (`crypto.rs`).
-- [~] Key-provider / keystore abstraction: separate key *handles* from bytes;
-      key IDs with rotation policy; optional hardware-backed path. The key-handle
-      half is **done** (`KeyHandle` shares traffic-key bytes by refcount, see
-      above). **Still open:** a `KeyProvider`/keystore trait with a rotation
-      policy and an optional hardware-backed signer for the long-term identity
-      key (the X25519/Ed25519 secrets still live as in-process bytes).
+- [x] Key-provider / keystore abstraction: separate key *handles* from bytes;
+      optional hardware-backed path. **Done in two parts:** (1) traffic keys are
+      shared by `KeyHandle` (refcount, secret bytes single-owner, see above);
+      (2) the long-term **identity** signing is now behind a `HandshakeSigner`
+      trait (`public_key()` + `sign()`, `Send + Sync`, never exposes key bytes).
+      `IdentityKeyPair` implements it for the in-process case;
+      `SessionAuthConfig::with_local_signer(..)` accepts any signer (HSM, cloud
+      KMS, TPM, OS keystore) while `with_local_identity(..)` is unchanged for the
+      software path. `SessionAuthConfig` now stores `Option<Arc<dyn
+      HandshakeSigner>>` (dropped its unused `Eq`/`PartialEq` derives, hand-wrote
+      a `Debug` that shows only the signer's public key); `HandshakeAuth::sign`
+      takes `&dyn HandshakeSigner` (existing `&IdentityKeyPair` callers coerce).
+      Verified end-to-end by an external-signer handshake test. **Still open
+      (optional):** key IDs with an explicit rotation *policy* type (rotation
+      itself works via the rekey state machine).
 - [x] Document that session state MUST NOT be restored with reset counters under
       the same traffic key; gate persistence until designed safely.
 

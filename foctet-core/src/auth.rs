@@ -1,9 +1,30 @@
+use std::sync::Arc;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::CoreError;
+
+/// Signs native handshake transcripts with a long-term Ed25519 identity.
+///
+/// This is the seam for **hardware-backed or otherwise non-extractable** identity
+/// keys: implement it for an HSM, a cloud KMS, a TPM, or an OS keystore so the
+/// Ed25519 private key never enters process memory. The software
+/// [`IdentityKeyPair`] implements it for the common case.
+///
+/// The contract is deliberately narrow — expose the public key and produce a
+/// detached Ed25519 signature over `message` — so a signer is never asked to
+/// reveal private key bytes. `Send + Sync` is required so a configured
+/// [`Session`](crate::Session) stays usable across threads and async tasks.
+pub trait HandshakeSigner: Send + Sync {
+    /// Returns the Ed25519 public identity key (the verifying key).
+    fn public_key(&self) -> [u8; 32];
+
+    /// Produces a detached Ed25519 signature over `message`.
+    fn sign(&self, message: &[u8]) -> [u8; 64];
+}
 
 /// Authentication mode discriminator for native handshake messages.
 pub const HANDSHAKE_AUTH_NONE: u8 = 0;
@@ -76,6 +97,16 @@ impl IdentityKeyPair {
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         let signing_key = SigningKey::from_bytes(&self.secret_key);
         signing_key.sign(message).to_bytes()
+    }
+}
+
+impl HandshakeSigner for IdentityKeyPair {
+    fn public_key(&self) -> [u8; 32] {
+        IdentityKeyPair::public_key(self)
+    }
+
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        IdentityKeyPair::sign(self, message)
     }
 }
 
@@ -170,11 +201,15 @@ pub struct HandshakeAuth {
 }
 
 impl HandshakeAuth {
-    /// Creates an authentication payload from a local identity and transcript message.
-    pub fn sign(identity: &IdentityKeyPair, message: &[u8]) -> Self {
+    /// Creates an authentication payload from a local signer and transcript message.
+    ///
+    /// Accepts any [`HandshakeSigner`] (the software [`IdentityKeyPair`] coerces
+    /// automatically), so hardware-backed identities work without exposing key
+    /// bytes.
+    pub fn sign(signer: &dyn HandshakeSigner, message: &[u8]) -> Self {
         Self {
-            identity_public_key: identity.public_key(),
-            signature: identity.sign(message),
+            identity_public_key: signer.public_key(),
+            signature: signer.sign(message),
         }
     }
 
@@ -207,13 +242,33 @@ impl HandshakeAuth {
 /// [`SessionAuthConfig::allow_unauthenticated`]). This makes the active
 /// man-in-the-middle exposure of an unauthenticated ephemeral handshake an
 /// explicit, auditable choice rather than a silent default.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default)]
 pub struct SessionAuthConfig {
-    local_identity: Option<IdentityKeyPair>,
+    local_signer: Option<Arc<dyn HandshakeSigner>>,
     peer_identity: Option<PeerIdentity>,
     require_peer_authentication: bool,
     allow_unauthenticated: bool,
     channel_binding: Option<ChannelBinding>,
+}
+
+impl core::fmt::Debug for SessionAuthConfig {
+    /// Shows the local signer only by its public key (never secret material) and
+    /// omits the trait object's internals.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SessionAuthConfig")
+            .field(
+                "local_signer_public_key",
+                &self.local_signer.as_ref().map(|signer| signer.public_key()),
+            )
+            .field("peer_identity", &self.peer_identity)
+            .field(
+                "require_peer_authentication",
+                &self.require_peer_authentication,
+            )
+            .field("allow_unauthenticated", &self.allow_unauthenticated)
+            .field("channel_binding", &self.channel_binding)
+            .finish()
+    }
 }
 
 impl SessionAuthConfig {
@@ -256,9 +311,24 @@ impl SessionAuthConfig {
         }
     }
 
-    /// Attaches a local identity used to sign native handshake messages.
+    /// Attaches a software local identity used to sign native handshake messages.
+    ///
+    /// Convenience over [`SessionAuthConfig::with_local_signer`] for the common
+    /// in-process [`IdentityKeyPair`] case.
     pub fn with_local_identity(mut self, identity: IdentityKeyPair) -> Self {
-        self.local_identity = Some(identity);
+        self.local_signer = Some(Arc::new(identity));
+        self
+    }
+
+    /// Attaches a local [`HandshakeSigner`] used to sign native handshake
+    /// messages.
+    ///
+    /// Use this for hardware-backed or otherwise non-extractable identity keys
+    /// (HSM, cloud KMS, TPM, OS keystore): the private key never enters process
+    /// memory. For an in-process key, prefer
+    /// [`SessionAuthConfig::with_local_identity`].
+    pub fn with_local_signer<S: HandshakeSigner + 'static>(mut self, signer: S) -> Self {
+        self.local_signer = Some(Arc::new(signer));
         self
     }
 
@@ -299,9 +369,14 @@ impl SessionAuthConfig {
         self.allow_unauthenticated
     }
 
-    /// Returns the local identity, if configured.
-    pub fn local_identity(&self) -> Option<&IdentityKeyPair> {
-        self.local_identity.as_ref()
+    /// Returns the configured local handshake signer, if any.
+    pub fn local_signer(&self) -> Option<&dyn HandshakeSigner> {
+        self.local_signer.as_deref()
+    }
+
+    /// Returns the local identity public key, if a local signer is configured.
+    pub fn local_identity_public_key(&self) -> Option<[u8; 32]> {
+        self.local_signer.as_ref().map(|signer| signer.public_key())
     }
 
     /// Returns the pinned peer identity, if configured.

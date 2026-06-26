@@ -104,9 +104,9 @@ impl Session {
         let session_salt = random_session_salt();
         let binding =
             client_hello_binding(local_eph.public, session_salt, auth.channel_binding_bytes());
-        let auth_payload = auth.local_identity().map(|identity| {
+        let auth_payload = auth.local_signer().map(|signer| {
             HandshakeAuth::sign(
-                identity,
+                signer,
                 &client_auth_message(local_eph.public, session_salt, binding),
             )
         });
@@ -257,9 +257,9 @@ impl Session {
                     self.session_salt,
                     self.auth.channel_binding_bytes(),
                 );
-                let server_auth = self.auth.local_identity().map(|identity| {
+                let server_auth = self.auth.local_signer().map(|signer| {
                     HandshakeAuth::sign(
-                        identity,
+                        signer,
                         &server_auth_message(
                             *eph_public,
                             self.local_eph.public,
@@ -662,6 +662,66 @@ mod tests {
         assert_eq!(
             client_seen.identity_public_key(),
             client_identity.public_key()
+        );
+    }
+
+    #[test]
+    fn external_handshake_signer_authenticates_like_a_software_identity() {
+        use crate::HandshakeSigner;
+
+        // A stand-in for a hardware/KMS signer: it implements `HandshakeSigner`
+        // without being an `IdentityKeyPair`, exercising `with_local_signer` and
+        // the `&dyn HandshakeSigner` handshake path.
+        struct ExternalSigner(IdentityKeyPair);
+        impl HandshakeSigner for ExternalSigner {
+            fn public_key(&self) -> [u8; 32] {
+                self.0.public_key()
+            }
+            fn sign(&self, message: &[u8]) -> [u8; 64] {
+                self.0.sign(message)
+            }
+        }
+
+        let client_identity = IdentityKeyPair::from_secret_key_bytes([0x71; 32]);
+        let server_identity = IdentityKeyPair::from_secret_key_bytes([0x72; 32]);
+        let client_pub = client_identity.public_key();
+        let server_pub = server_identity.public_key();
+
+        let client_auth = SessionAuthConfig::new()
+            .with_local_signer(ExternalSigner(client_identity))
+            .with_peer_identity(PeerIdentity::new(server_pub))
+            .require_peer_authentication(true);
+        let server_auth = SessionAuthConfig::new()
+            .with_local_signer(ExternalSigner(server_identity))
+            .with_peer_identity(PeerIdentity::new(client_pub))
+            .require_peer_authentication(true);
+
+        let (mut client, hello) =
+            Session::new_initiator_with_auth(RekeyThresholds::default(), client_auth);
+        let mut server = Session::new_responder_with_auth(RekeyThresholds::default(), server_auth);
+
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handles client hello")
+            .expect("server hello");
+        client
+            .handle_control(&server_hello)
+            .expect("client finalizes");
+
+        assert!(client.peer_authenticated() && server.peer_authenticated());
+        assert_eq!(
+            client
+                .authenticated_peer()
+                .expect("peer")
+                .identity_public_key(),
+            server_pub
+        );
+        assert_eq!(
+            server
+                .authenticated_peer()
+                .expect("peer")
+                .identity_public_key(),
+            client_pub
         );
     }
 

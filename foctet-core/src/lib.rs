@@ -92,7 +92,7 @@ pub mod session;
 
 pub use auth::{
     AuthenticatedPeer, ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth,
-    IdentityKeyPair, PeerIdentity, SessionAuthConfig,
+    HandshakeSigner, IdentityKeyPair, PeerIdentity, SessionAuthConfig,
 };
 pub use body::{
     BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,

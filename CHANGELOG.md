@@ -21,6 +21,18 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Pluggable handshake signer for hardware-backed identities (P1, §2.5).** New
+  `HandshakeSigner` trait (`public_key()` + `sign()`, `Send + Sync`) is the seam
+  for non-extractable long-term identity keys — implement it for an HSM, cloud
+  KMS, TPM, or OS keystore so the Ed25519 private key never enters process
+  memory. `IdentityKeyPair` implements it for the in-process case;
+  `SessionAuthConfig::with_local_signer(..)` accepts any signer, and
+  `with_local_identity(..)` is unchanged. **Breaking:** `SessionAuthConfig` now
+  stores `Option<Arc<dyn HandshakeSigner>>` and no longer derives `Eq`/`PartialEq`
+  (its `Debug` shows only the signer's public key); `HandshakeAuth::sign` takes
+  `&dyn HandshakeSigner` (an `&IdentityKeyPair` argument still coerces);
+  `SessionAuthConfig::local_identity()` is replaced by `local_signer()` /
+  `local_identity_public_key()`.
 - **Typed authenticated-peer result (P1, §2.1).** `Session::authenticated_peer()`
   returns an `Option<AuthenticatedPeer>` naming the peer's verified Ed25519
   identity public key — the typed counterpart to the `peer_authenticated()`
