@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -9,8 +8,8 @@ use crate::{
     auth::{AuthenticatedPeer, HandshakeAuth, SessionAuthConfig},
     control::ControlMessage,
     crypto::{
-        Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, derive_rekey_traffic_keys,
-        derive_traffic_keys, random_session_salt,
+        Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, derive_ratchet_root,
+        derive_traffic_keys, dh_ratchet_step, random_session_salt,
     },
 };
 
@@ -67,8 +66,12 @@ pub struct Session {
     state: SessionState,
     local_eph: EphemeralKeyPair,
     peer_eph_public: Option<[u8; 32]>,
-    shared_secret: Option<[u8; 32]>,
     session_salt: [u8; 32],
+    /// DH-ratchet root key, advanced by a fresh DH output at every rekey.
+    ratchet_root: [u8; 32],
+    /// Whether this side may initiate the next rekey. The DH ratchet alternates:
+    /// after initiating a rekey this becomes `false` until the peer rekeys.
+    can_rekey: bool,
     active_keys: Option<KeyHandle>,
     previous_keys: Vec<KeyHandle>,
     thresholds: RekeyThresholds,
@@ -82,9 +85,7 @@ pub struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(shared) = &mut self.shared_secret {
-            shared.zeroize();
-        }
+        self.ratchet_root.zeroize();
         self.session_salt.zeroize();
     }
 }
@@ -124,8 +125,9 @@ impl Session {
                 state: SessionState::WaitingPeerHello,
                 local_eph,
                 peer_eph_public: None,
-                shared_secret: None,
                 session_salt,
+                ratchet_root: [0u8; 32],
+                can_rekey: false,
                 active_keys: None,
                 previous_keys: Vec::new(),
                 thresholds,
@@ -152,8 +154,9 @@ impl Session {
             state: SessionState::WaitingPeerHello,
             local_eph: EphemeralKeyPair::generate(),
             peer_eph_public: None,
-            shared_secret: None,
             session_salt: [0u8; 32],
+            ratchet_root: [0u8; 32],
+            can_rekey: false,
             active_keys: None,
             previous_keys: Vec::new(),
             thresholds,
@@ -241,12 +244,15 @@ impl Session {
 
                 self.peer_eph_public = Some(*eph_public);
                 self.session_salt = *session_salt;
-                let shared = self.local_eph.shared_secret(*eph_public)?;
+                let mut shared = self.local_eph.shared_secret(*eph_public)?;
                 let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
+                self.ratchet_root = derive_ratchet_root(&self.session_salt, &shared)?;
+                shared.zeroize();
 
-                self.shared_secret = Some(shared);
                 self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
+                // The DH ratchet alternates; the initiator takes the first turn.
+                self.can_rekey = false;
                 self.peer_authenticated = authenticated_peer.is_some();
                 self.authenticated_peer_key = authenticated_peer;
                 self.last_rekey_at = Instant::now();
@@ -296,12 +302,15 @@ impl Session {
                     self.verify_server_auth(*eph_public, *transcript_binding, auth.as_ref())?;
 
                 self.peer_eph_public = Some(*eph_public);
-                let shared = self.local_eph.shared_secret(*eph_public)?;
+                let mut shared = self.local_eph.shared_secret(*eph_public)?;
                 let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
+                self.ratchet_root = derive_ratchet_root(&self.session_salt, &shared)?;
+                shared.zeroize();
 
-                self.shared_secret = Some(shared);
                 self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
+                // The initiator takes the first DH-ratchet turn.
+                self.can_rekey = true;
                 self.peer_authenticated = authenticated_peer.is_some();
                 self.authenticated_peer_key = authenticated_peer;
                 self.last_rekey_at = Instant::now();
@@ -313,7 +322,7 @@ impl Session {
                 ControlMessage::Rekey {
                     old_key_id,
                     new_key_id,
-                    rekey_salt,
+                    ratchet_public,
                     transcript_binding,
                 },
             ) => {
@@ -324,21 +333,27 @@ impl Session {
                 if *old_key_id != active.key_id {
                     return Err(CoreError::UnexpectedControlMessage);
                 }
+                if *new_key_id != old_key_id.wrapping_add(1) {
+                    return Err(CoreError::InvalidControlMessage);
+                }
 
                 let expected =
-                    rekey_binding(*old_key_id, *new_key_id, *rekey_salt, self.session_salt);
+                    rekey_binding(*old_key_id, *new_key_id, ratchet_public, self.session_salt);
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
 
-                let shared = self.shared_secret.ok_or(CoreError::MissingSessionSecret)?;
-                let next = derive_rekey_traffic_keys(
-                    &shared,
-                    &self.session_salt,
-                    rekey_salt,
-                    *new_key_id,
-                )?;
+                // DH-ratchet receive step: mix DH(my current ratchet key, the
+                // peer's fresh ratchet public) into the root chain, then adopt
+                // the peer's new public. After receiving it becomes our turn to
+                // initiate the next rekey.
+                let mut dh = self.local_eph.shared_secret(*ratchet_public)?;
+                let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, *new_key_id)?;
+                dh.zeroize();
+                self.peer_eph_public = Some(*ratchet_public);
+                self.ratchet_root = new_root;
                 self.install_new_active_key(next);
+                self.can_rekey = true;
                 self.last_rekey_at = Instant::now();
                 Ok(None)
             }
@@ -383,7 +398,11 @@ impl Session {
         self.outbound_frames = self.outbound_frames.saturating_add(1);
         self.outbound_bytes = self.outbound_bytes.saturating_add(plaintext_len as u64);
 
-        if self.should_rekey() {
+        // Threshold-driven rekey is best-effort and respects the DH-ratchet
+        // turn: if it is the peer's turn to ratchet, defer rather than fail —
+        // we keep using the current key until the peer rekeys (which hands the
+        // turn back) or the threshold is re-checked on a later send.
+        if self.should_rekey() && self.can_rekey {
             let msg = self.force_rekey()?;
             return Ok(Some(msg));
         }
@@ -391,10 +410,19 @@ impl Session {
         Ok(None)
     }
 
-    /// Forces immediate rekey and returns the `Rekey` control message.
+    /// Forces an immediate rekey (one DH-ratchet step) and returns the `Rekey`
+    /// control message to send to the peer.
+    ///
+    /// Fails with [`CoreError::RekeyNotPermitted`] when it is the peer's turn to
+    /// ratchet: rekeys strictly alternate between the two sides so the root
+    /// chain never forks and both peers' ratchet keys rotate (giving forward
+    /// secrecy and post-compromise security in both directions).
     pub fn force_rekey(&mut self) -> Result<ControlMessage, CoreError> {
         if self.state != SessionState::Active {
             return Err(CoreError::InvalidSessionState);
+        }
+        if !self.can_rekey {
+            return Err(CoreError::RekeyNotPermitted);
         }
 
         let active = self
@@ -403,24 +431,33 @@ impl Session {
             .ok_or(CoreError::InvalidSessionState)?;
         let old_key_id = active.key_id;
         let new_key_id = old_key_id.checked_add(1).ok_or(CoreError::KeyIdExhausted)?;
+        let peer_public = self
+            .peer_eph_public
+            .ok_or(CoreError::MissingSessionSecret)?;
 
-        let mut rekey_salt = [0u8; 32];
-        OsRng.fill_bytes(&mut rekey_salt);
-
-        let shared = self.shared_secret.ok_or(CoreError::MissingSessionSecret)?;
-        let next = derive_rekey_traffic_keys(&shared, &self.session_salt, &rekey_salt, new_key_id)?;
+        // DH-ratchet send step: rotate to a fresh ephemeral key and mix
+        // DH(new ephemeral, peer's current ratchet public) into the root chain.
+        let new_eph = EphemeralKeyPair::generate();
+        let mut dh = new_eph.shared_secret(peer_public)?;
+        let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, new_key_id)?;
+        dh.zeroize();
+        let ratchet_public = new_eph.public;
+        self.local_eph = new_eph;
+        self.ratchet_root = new_root;
         self.install_new_active_key(next);
+        // It is now the peer's turn to initiate the next rekey.
+        self.can_rekey = false;
 
         self.outbound_frames = 0;
         self.outbound_bytes = 0;
         self.last_rekey_at = Instant::now();
 
         let transcript_binding =
-            rekey_binding(old_key_id, new_key_id, rekey_salt, self.session_salt);
+            rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);
         Ok(ControlMessage::Rekey {
             old_key_id,
             new_key_id,
-            rekey_salt,
+            ratchet_public,
             transcript_binding,
         })
     }
@@ -575,14 +612,14 @@ fn server_auth_message(
 fn rekey_binding(
     old_key_id: u8,
     new_key_id: u8,
-    rekey_salt: [u8; 32],
+    ratchet_public: &[u8; 32],
     session_salt: [u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"foctet rekey");
     hasher.update([old_key_id]);
     hasher.update([new_key_id]);
-    hasher.update(rekey_salt);
+    hasher.update(ratchet_public);
     hasher.update(session_salt);
     hasher.finalize().into()
 }
@@ -621,6 +658,67 @@ mod tests {
         let client_key = client.active_keys().expect("client active key");
         let server_key = server.active_keys().expect("server active key");
         assert_eq!(client_key.key_id, server_key.key_id);
+        // The DH-ratchet step must derive byte-identical traffic keys on both
+        // sides, or the channel would desync after rekey.
+        assert_eq!(client_key, server_key);
+    }
+
+    #[test]
+    fn dh_ratchet_alternates_and_rotates_both_sides_keys() {
+        let (mut client, mut server) = active_pair();
+
+        // The initiator takes the first turn; the responder cannot rekey yet.
+        assert!(matches!(
+            server.force_rekey(),
+            Err(CoreError::RekeyNotPermitted)
+        ));
+
+        let mut last_key: Option<KeyHandle> = None;
+        // Several alternating rounds: client, server, client, server, ...
+        for round in 0..4 {
+            let (rekeyer, receiver) = if round % 2 == 0 {
+                (&mut client, &mut server)
+            } else {
+                (&mut server, &mut client)
+            };
+
+            // The side out of turn cannot initiate.
+            assert!(matches!(
+                receiver.force_rekey(),
+                Err(CoreError::RekeyNotPermitted)
+            ));
+
+            let rekey = rekeyer.force_rekey().expect("force rekey on turn");
+            // Having just rekeyed, the same side may not rekey again.
+            assert!(matches!(
+                rekeyer.force_rekey(),
+                Err(CoreError::RekeyNotPermitted)
+            ));
+            receiver.handle_control(&rekey).expect("peer applies rekey");
+
+            let ck = client.active_keys().expect("client key");
+            let sk = server.active_keys().expect("server key");
+            assert_eq!(ck.key_id, (round as u8) + 1);
+            assert_eq!(ck, sk, "both sides must derive the same key");
+            // Each ratchet step must yield a fresh key, never a repeat.
+            if let Some(prev) = &last_key {
+                assert_ne!(prev, &ck, "rekey must rotate to a fresh key");
+            }
+            last_key = Some(ck.clone());
+        }
+    }
+
+    #[test]
+    fn rekey_with_a_jumped_new_key_id_is_rejected() {
+        let (mut client, mut server) = active_pair();
+        let mut rekey = client.force_rekey().expect("client force rekey");
+        if let ControlMessage::Rekey { new_key_id, .. } = &mut rekey {
+            *new_key_id = 5; // not old_key_id + 1
+        }
+        let err = server
+            .handle_control(&rekey)
+            .expect_err("a non-sequential new_key_id must be rejected");
+        assert!(matches!(err, CoreError::InvalidControlMessage));
     }
 
     #[test]
@@ -959,7 +1057,7 @@ mod tests {
         let forged_rekey = ControlMessage::Rekey {
             old_key_id: 99,
             new_key_id: 100,
-            rekey_salt: [0x42; 32],
+            ratchet_public: [0x42; 32],
             transcript_binding: [0u8; 32],
         };
         let err = server

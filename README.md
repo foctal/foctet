@@ -71,7 +71,9 @@ Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
 - A published npm package and browser-runner CI for the WASM SDK (the SDK and a
   Node interop test exist; framed-session APIs over WASM are still pending).
 - Streaming (chunked) HTTP bodies; adapters are whole-buffer.
-- Post-compromise security (in-session rekey is symmetric rotation, not a DH ratchet).
+- A reviewed post-compromise-security claim: in-session rekey now uses a
+  forward-secret, alternating **DH ratchet**, but its post-compromise guarantee
+  is pending the required independent cryptographic review (see `SECURITY.md`).
 - An independent cryptographic review and a normative, versioned wire spec.
 
 ## Quick Start

@@ -103,7 +103,8 @@ pub use body::{
 pub use control::{ControlMessage, ControlMessageKind};
 pub use crypto::{
     Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
-    derive_rekey_traffic_keys, derive_traffic_keys, encrypt_frame, make_nonce, random_session_salt,
+    derive_ratchet_root, derive_traffic_keys, dh_ratchet_step, encrypt_frame, make_nonce,
+    random_session_salt,
 };
 pub use datagram::{
     DATAGRAM_FRAME_OVERHEAD, DEFAULT_MAX_DATAGRAM_SIZE, DatagramConfig, DatagramEndpoint,
@@ -179,6 +180,10 @@ pub enum CoreError {
     /// Session operation was called in an invalid state.
     #[error("invalid session state")]
     InvalidSessionState,
+    /// A rekey was initiated out of turn (the DH ratchet alternates between
+    /// peers; only the side whose turn it is may initiate the next rekey).
+    #[error("rekey not permitted: it is the peer's turn to ratchet")]
+    RekeyNotPermitted,
     /// Session/shared secret is not available.
     #[error("missing session secret")]
     MissingSessionSecret,

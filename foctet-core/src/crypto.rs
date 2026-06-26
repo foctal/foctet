@@ -156,34 +156,59 @@ pub fn derive_traffic_keys(
     Ok(TrafficKeys { key_id, c2s, s2c })
 }
 
-/// Derives rekeyed traffic keys from shared/session/rekey salt inputs.
-pub fn derive_rekey_traffic_keys(
-    shared_secret: &[u8; 32],
+/// Derives the initial DH-ratchet root key from the handshake shared secret.
+///
+/// The root key seeds the rekey ratchet (see [`dh_ratchet_step`]); it is mixed
+/// with a fresh Diffie-Hellman output at every rekey so that traffic keys gain
+/// forward secrecy and post-compromise security across rekeys, rather than all
+/// being derivable from the one handshake secret.
+pub fn derive_ratchet_root(
     session_salt: &[u8; 32],
-    rekey_salt: &[u8; 32],
-    key_id: u8,
-) -> Result<TrafficKeys, CoreError> {
-    let mut salt = Zeroizing::new([0u8; 64]);
-    salt[..32].copy_from_slice(session_salt);
-    salt[32..].copy_from_slice(rekey_salt);
-    let hk = Hkdf::<Sha256>::new(Some(&salt[..]), shared_secret);
+    shared_secret: &[u8; 32],
+) -> Result<[u8; 32], CoreError> {
+    let hk = Hkdf::<Sha256>::new(Some(session_salt), shared_secret);
+    let mut root = [0u8; 32];
+    hk.expand(b"foctet ratchet init", &mut root)
+        .map_err(|_| CoreError::Hkdf)?;
+    Ok(root)
+}
 
+/// Performs one DH-ratchet step: mixes a fresh Diffie-Hellman output `dh` into
+/// the ratchet `root`, returning the advanced root and the next traffic keys.
+///
+/// `(new_root, c2s, s2c)` are independent HKDF-SHA-256 expansions of
+/// `HKDF(salt = root, ikm = dh)`. Because `dh` comes from a freshly generated
+/// ephemeral key at each rekey, an attacker who learns the current keys cannot
+/// derive the keys after the next rekey (post-compromise security), and an
+/// attacker who later compromises the long-term state cannot derive past keys
+/// (forward secrecy) once the ephemeral private keys are discarded.
+pub fn dh_ratchet_step(
+    root: &[u8; 32],
+    dh: &[u8; 32],
+    key_id: u8,
+) -> Result<([u8; 32], TrafficKeys), CoreError> {
+    let hk = Hkdf::<Sha256>::new(Some(root), dh);
+
+    let mut new_root = [0u8; 32];
     let mut c2s = [0u8; 32];
     let mut s2c = [0u8; 32];
 
-    let mut info_c2s = [0u8; 17];
-    info_c2s[..16].copy_from_slice(b"foctet rekey c2s");
-    info_c2s[16] = key_id;
-    let mut info_s2c = [0u8; 17];
-    info_s2c[..16].copy_from_slice(b"foctet rekey s2c");
-    info_s2c[16] = key_id;
+    hk.expand(b"foctet ratchet root", &mut new_root)
+        .map_err(|_| CoreError::Hkdf)?;
+
+    let mut info_c2s = [0u8; 19];
+    info_c2s[..18].copy_from_slice(b"foctet ratchet c2s");
+    info_c2s[18] = key_id;
+    let mut info_s2c = [0u8; 19];
+    info_s2c[..18].copy_from_slice(b"foctet ratchet s2c");
+    info_s2c[18] = key_id;
 
     hk.expand(&info_c2s, &mut c2s)
         .map_err(|_| CoreError::Hkdf)?;
     hk.expand(&info_s2c, &mut s2c)
         .map_err(|_| CoreError::Hkdf)?;
 
-    Ok(TrafficKeys { key_id, c2s, s2c })
+    Ok((new_root, TrafficKeys { key_id, c2s, s2c }))
 }
 
 /// Generates a random session salt for key derivation.

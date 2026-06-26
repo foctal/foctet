@@ -21,6 +21,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Channel binding in the WASM `AuthConfig` (P1, §2.1/§5).** `foctet-wasm`'s
+  `AuthConfig` gains `boundToChannel(channelBinding)` (no Foctet identity; MITM
+  resistance from an authenticated outer channel) and `withChannelBinding(..)`
+  (additive to any config), so browser/JS `FoctetSession`s get the same
+  transcript channel binding as native sessions.
 - **Opt-in anti-amplification for the raw-UDP datagram adapter (P1, §3.3).**
   `UdpDatagramTransport::with_anti_amplification(factor)` (with
   `DEFAULT_AMPLIFICATION_FACTOR` = 3, matching QUIC) refuses to send once the
@@ -95,6 +100,23 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **Rekey is now a forward-secret DH ratchet (P1, §2.3) — review pending.**
+  In-session rekey no longer re-derives keys from the one handshake shared secret
+  (which gave no post-compromise security). Each rekey performs a Diffie-Hellman
+  ratchet step: the rekeying side generates a fresh ephemeral X25519 key, mixes
+  `X25519(new_ephemeral, peer_ratchet_public)` into a root-key chain
+  (`derive_ratchet_root` / `dh_ratchet_step`), and the handshake shared secret is
+  discarded after seeding the root. Rekeys **alternate** between the peers
+  (enforced by a turn flag: out-of-turn `force_rekey` returns the new
+  `CoreError::RekeyNotPermitted`; threshold-driven rekey defers instead of
+  failing), so the root chain cannot fork and both peers' keys rotate — giving
+  forward secrecy and, across an alternating rekey, post-compromise security in
+  both directions. **Breaking:** the `Rekey` control message carries
+  `ratchet_public` instead of `rekey_salt`; `derive_rekey_traffic_keys` is removed
+  in favor of `derive_ratchet_root` + `dh_ratchet_step`. **Caveat:** the
+  construction is implemented and tested but has **not** completed the independent
+  cryptographic review required before its PCS guarantee is relied upon for high
+  assurance (see `SECURITY.md`).
 - **`TrafficKeys` is now non-`Clone`; share keys via `KeyHandle` (P1, §2.5).**
   Traffic-key secret bytes now exist in exactly one place and are zeroized when
   it drops, instead of being copied into every owner. Shared ownership goes

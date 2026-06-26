@@ -43,14 +43,14 @@ pub enum ControlMessage {
         /// Optional identity authentication for the handshake transcript.
         auth: Option<HandshakeAuth>,
     },
-    /// Rekey event message.
+    /// Rekey event message carrying one DH-ratchet step.
     Rekey {
         /// Previous key identifier.
         old_key_id: u8,
         /// New key identifier.
         new_key_id: u8,
-        /// Salt value used for rekey derivation.
-        rekey_salt: [u8; 32],
+        /// Sender's fresh ephemeral X25519 public key for this ratchet step.
+        ratchet_public: [u8; 32],
         /// Transcript binding hash.
         transcript_binding: [u8; 32],
     },
@@ -103,12 +103,12 @@ impl ControlMessage {
             Self::Rekey {
                 old_key_id,
                 new_key_id,
-                rekey_salt,
+                ratchet_public,
                 transcript_binding,
             } => {
                 out.push(*old_key_id);
                 out.push(*new_key_id);
-                out.extend_from_slice(rekey_salt);
+                out.extend_from_slice(ratchet_public);
                 out.extend_from_slice(transcript_binding);
             }
             Self::Error { code } => {
@@ -174,14 +174,14 @@ impl ControlMessage {
                 }
                 let old_key_id = body[0];
                 let new_key_id = body[1];
-                let mut rekey_salt = [0u8; 32];
-                rekey_salt.copy_from_slice(&body[2..34]);
+                let mut ratchet_public = [0u8; 32];
+                ratchet_public.copy_from_slice(&body[2..34]);
                 let mut transcript_binding = [0u8; 32];
                 transcript_binding.copy_from_slice(&body[34..66]);
                 Ok(Self::Rekey {
                     old_key_id,
                     new_key_id,
-                    rekey_salt,
+                    ratchet_public,
                     transcript_binding,
                 })
             }
@@ -241,7 +241,7 @@ mod tests {
         let msg = ControlMessage::Rekey {
             old_key_id: 1,
             new_key_id: 2,
-            rekey_salt: [7u8; 32],
+            ratchet_public: [7u8; 32],
             transcript_binding: [9u8; 32],
         };
         let encoded = msg.encode();

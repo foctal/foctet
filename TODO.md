@@ -175,8 +175,10 @@ enforcement remain.
       verified Ed25519 identity public key (typed form of `peer_authenticated()`;
       `None` for a channel-binding-only handshake since no peer *identity* was
       proven). `AuthenticatedPeer` exposes `identity_public_key()` +
-      `matches(&PeerIdentity)` (constant-time). Tested. **Still open:** surfacing
-      channel binding through the WASM `AuthConfig`.
+      `matches(&PeerIdentity)` (constant-time). Tested. Channel binding is now
+      also surfaced through the WASM `AuthConfig`
+      (`AuthConfig.boundToChannel(..)` and `.withChannelBinding(..)` in
+      `foctet-wasm`, tested). **Done.**
 - [ ] Consider removing/renaming the no-auth transport convenience constructors
       at API-freeze (currently they call `unauthenticated_for_testing()`).
 
@@ -185,14 +187,31 @@ enforcement remain.
       `frame.rs::try_decode`.
 - [x] Forged-high-sequence-then-valid regression tests (sync + async).
 
-### 2.3 Rekey vs post-compromise security
-- [x] SPEC/README/SECURITY now state rekey = symmetric rotation, **no PCS**.
-- [ ] **Decide and document the target**: keep symmetric rekey (accurately
-      specified) *or* design an authenticated **ephemeral-DH ratchet** with:
-  - [ ] fresh forward-secret DH step per rekey
-  - [ ] transcript binding, concurrency/collision rules, rollback behavior
-  - [ ] out-of-order rekey delivery handling + vectors
-  - [ ] independent cryptographic review **before** shipping (do not improvise)
+### 2.3 Rekey vs post-compromise security — **DH ratchet implemented (review pending)**
+- [x] Target decided + implemented: an authenticated **ephemeral-DH ratchet**
+      replaces symmetric rekey. SPEC §3.2/§7.1.2, SECURITY.md, README updated to
+      describe FS + alternating-PCS honestly with the review caveat.
+- [x] Fresh forward-secret DH step per rekey: `force_rekey` generates a fresh
+      ephemeral, `dh = X25519(new_eph, peer_ratchet_pub)`, advanced via
+      `crypto::dh_ratchet_step` (`HKDF(salt=root, ikm=dh)` → new root + c2s/s2c);
+      root seeded by `derive_ratchet_root`. `Rekey` control carries
+      `ratchet_public` (replaces `rekey_salt`); handshake shared secret is no
+      longer retained.
+- [x] Transcript binding + concurrency/collision rules: `rekey_binding` binds
+      `ratchet_public`; rekeys **alternate** via a `can_rekey` turn flag (only the
+      side whose turn it is may initiate; out-of-turn → `RekeyNotPermitted`;
+      threshold-driven rekey defers instead of failing), so the root chain cannot
+      fork and both sides' keys rotate. Receiver rejects bad `old_key_id`,
+      non-sequential `new_key_id`, or a mismatched binding. Tested
+      (`dh_ratchet_alternates_and_rotates_both_sides_keys`,
+      `rekey_with_a_jumped_new_key_id_is_rejected`, replayed/stale/forged).
+- [~] Out-of-order rekey delivery + vectors: the control channel is ordered
+      (stream), so in-order is assumed and enforced by the turn flag; datagram
+      delivery is out of scope here (see §3.3 rekey-over-datagram). Canonical
+      ratchet **test vectors** not yet added.
+- [ ] **Independent cryptographic review** of this ratchet **before** the PCS
+      guarantee is claimed for high assurance (the one remaining gate; the
+      construction is the alternating DH-ratchet, not improvised per-message).
 
 ### 2.4 Centralized protocol limits (P2 in review, do early)
 - [~] One public `ProtocolLimits`. Done for the **stream** shape:

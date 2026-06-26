@@ -64,7 +64,7 @@ Normative keywords: **MUST**, **SHOULD**, **MAY**.
 *   **Integrity & Authenticity**: Endpoints detect tampering/injection.
 *   **Replay protection**: Endpoints detect replayed frames within a session.
 *   **Forward secrecy (between sessions)**: A fresh ephemeral X25519 handshake per session means compromise of one session's keys does not reveal other sessions' traffic.
-*   **Within-session rekey is symmetric traffic-key rotation, NOT post-compromise security (PCS).** Rekey derives each new traffic key from the original handshake shared secret plus a public rekey salt via HKDF. It provides key separation and bounds the volume protected by any single key, but an adversary who compromises the live in-session shared secret can derive current and future traffic keys from observed rekey controls. A DH ratchet that provides PCS is **not implemented**; do not rely on rekey for post-compromise recovery.
+*   **Within-session rekey is a forward-secret DH ratchet (review pending).** Each rekey performs a Diffie-Hellman ratchet step (a fresh ephemeral X25519 output mixed into a root-key chain; see §7.1.2), and rekeys alternate between the peers so both ratchet keys rotate. This provides forward secrecy and, across an alternating rekey, post-compromise security. The construction has **not** yet completed the independent cryptographic review required before its PCS guarantee is relied upon for high assurance; until then, treat the PCS property as provisional. Under strictly one-directional traffic the alternation can stall after one step, so rekey periodically from both ends.
 *   **Key separation**: Distinct keys for directions and purposes (data vs control).
 
 ### 3.3 Misuse Cases (Implementation Risks)
@@ -204,7 +204,7 @@ Operational constraints for uniqueness:
 *   Reusing the same key material with wrapped `key_id` values is NOT allowed.
 *   Implementations SHOULD treat `(direction, stream_id, key_id, seq)` as a write-once space and fail closed on state rollback.
 
-#### 7.1.2 Rekey
+#### 7.1.2 Rekey (DH ratchet)
 
 Endpoints SHOULD rekey on:
 
@@ -212,7 +212,25 @@ Endpoints SHOULD rekey on:
 *   frame-count threshold, OR
 *   data-volume threshold
 
-Rekey produces a new `key_id` and new traffic keys via HKDF with context binding.
+Rekey performs one **Diffie-Hellman ratchet step**. The rekeying side generates a
+fresh ephemeral X25519 key pair, computes `dh = X25519(new_ephemeral_private,
+peer_current_ratchet_public)`, and advances the root chain and traffic keys via
+`HKDF(salt = root, ikm = dh)` (see §7.1.3). It sends the new ratchet public key in
+the `Rekey` control message (replacing the former random rekey salt). The
+receiver computes the same `dh` with its current ratchet private key against the
+new public, advancing identically.
+
+Rekeys **alternate** between the two peers: after a side initiates a rekey it MUST
+NOT initiate another until it has received one from the peer (`old_key_id` and the
+turn flag enforce this). This prevents the root chain from forking and ensures
+both peers' ratchet keys rotate, providing forward secrecy and post-compromise
+security across an alternating rekey. The initiator takes the first turn. The
+receiver MUST reject a `Rekey` whose `old_key_id` is not its active key, whose
+`new_key_id` is not `old_key_id + 1`, or whose transcript binding does not match.
+
+> Status: this ratchet construction is implemented but has **not** completed the
+> independent cryptographic review required before its post-compromise guarantee
+> is relied upon for high assurance.
 
 #### 7.1.3 Profile 0x01 Algorithm Invariants
 
@@ -223,7 +241,12 @@ For Draft v0 profile `0x01`, implementations MUST satisfy all of the following:
     *   Shared secret output is 32 bytes.
 *   **HKDF-SHA256 derivation**
     *   Initial traffic keys use labels `foctet c2s` and `foctet s2c`.
-    *   Rekey traffic keys use labels `foctet rekey c2s || key_id` and `foctet rekey s2c || key_id`.
+    *   The ratchet root is seeded from the handshake shared secret with
+        `HKDF(salt = session_salt, ikm = shared_secret)` and label
+        `foctet ratchet init`.
+    *   Each rekey advances the ratchet with `HKDF(salt = root, ikm = dh)`: the new
+        root uses label `foctet ratchet root`, and the new traffic keys use labels
+        `foctet ratchet c2s || key_id` and `foctet ratchet s2c || key_id`.
     *   `key_c2s` and `key_s2c` MUST be derived independently and MUST NOT share output buffers.
 *   **AEAD usage**
     *   Cipher is XChaCha20-Poly1305 with 24-byte nonce and 16-byte authentication tag.

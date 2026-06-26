@@ -80,8 +80,17 @@ tested, and independently reviewed:
    guidance. The low-level `seal_body` /
    `open_body` and `seal_request` / `open_request` paths remain stateless and
    replayable by design — use the `*_with_context` APIs in production.
-2. **No post-compromise security.** In-session rekey is symmetric traffic-key
-   rotation, not a DH ratchet. See `SPEC.md` §3.2.
+2. **Forward-secret DH ratchet rekey (pending independent review).** In-session
+   rekey now performs a Diffie-Hellman ratchet step: each rekey mixes a fresh
+   ephemeral X25519 output into a root-key chain, and rekeys **alternate**
+   between the two peers (enforced by a turn flag, so the root chain cannot fork
+   and both peers' ratchet keys rotate). This gives forward secrecy and, across
+   an alternating rekey, post-compromise security in both directions. **Caveat:**
+   this construction has **not yet had the independent cryptographic review** this
+   project requires, so do not yet rely on its post-compromise guarantee for
+   high-assurance use. Operational note: under strictly one-directional traffic
+   the alternation can stall after one step (the quiet side never takes its turn);
+   rekey periodically from both ends for continued ratcheting.
 3. **Datagram support (partial).** A dedicated datagram API
    (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
    size cap, authenticate-before-replay, loss/reorder tolerant) ships with a QUIC

@@ -53,8 +53,14 @@ class IdentityKeyPair {
 class AuthConfig {
   // Pin the peer's identity and prove your own (recommended).
   static authenticated(localIdentity: IdentityKeyPair, peerPublicKey: Uint8Array): AuthConfig;
+  // No Foctet identity: bind to an authenticated outer channel (e.g. a TLS
+  // exporter). Both peers must pass the same value; a relay across a different
+  // channel fails closed.
+  static boundToChannel(channelBinding: Uint8Array): AuthConfig;
   // Tests, or use only inside an already-authenticated outer channel (e.g. mTLS).
   static unauthenticatedForTesting(): AuthConfig;
+  // Additionally bind any config to an outer-channel value (returns a new config).
+  withChannelBinding(channelBinding: Uint8Array): AuthConfig;
 }
 
 class DecodedMessage {

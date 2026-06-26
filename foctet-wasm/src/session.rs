@@ -54,9 +54,9 @@
 //! indefinitely.
 
 use foctet_core::{
-    ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram, DecodedMessage,
-    IdentityKeyPair, MessageEndpoint, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
-    SessionState,
+    ChannelBinding, ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram,
+    DecodedMessage, IdentityKeyPair, MessageEndpoint, PeerIdentity, RekeyThresholds, Session,
+    SessionAuthConfig, SessionState,
 };
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
@@ -109,6 +109,7 @@ impl WasmIdentityKeyPair {
     }
 }
 
+#[derive(Clone)]
 enum AuthMode {
     UnauthenticatedForTesting,
     Authenticated {
@@ -120,11 +121,17 @@ enum AuthMode {
 /// Handshake authentication policy for a [`FoctetSession`].
 ///
 /// Mirrors the fail-closed native default: prefer [`WasmAuthConfig::authenticated`]
-/// with a pinned peer identity for production. [`WasmAuthConfig::unauthenticated_for_testing`]
-/// is only for tests or use inside an already-authenticated outer channel.
+/// with a pinned peer identity for production. [`WasmAuthConfig::bound_to_channel`]
+/// substitutes an authenticated outer channel for a Foctet identity, while
+/// [`WasmAuthConfig::unauthenticated_for_testing`] is only for tests or use
+/// inside an already-authenticated outer channel.
+///
+/// Any config can additionally carry an outer-channel binding via
+/// [`WasmAuthConfig::with_channel_binding`].
 #[wasm_bindgen(js_name = AuthConfig)]
 pub struct WasmAuthConfig {
     mode: AuthMode,
+    channel_binding: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen(js_class = AuthConfig)]
@@ -142,7 +149,23 @@ impl WasmAuthConfig {
                 local_secret,
                 peer_public,
             },
+            channel_binding: None,
         })
+    }
+
+    /// Builds a config whose man-in-the-middle resistance comes from an
+    /// authenticated outer channel (e.g. a TLS exporter value) rather than a
+    /// Foctet identity.
+    ///
+    /// Both peers must supply the same `channel_binding`; a relay across a
+    /// different outer channel fails closed. This is the production-oriented
+    /// alternative to [`WasmAuthConfig::unauthenticated_for_testing`].
+    #[wasm_bindgen(js_name = boundToChannel)]
+    pub fn bound_to_channel(channel_binding: &[u8]) -> WasmAuthConfig {
+        WasmAuthConfig {
+            mode: AuthMode::UnauthenticatedForTesting,
+            channel_binding: Some(channel_binding.to_vec()),
+        }
     }
 
     /// Builds an unauthenticated config. Use only for tests or inside an
@@ -151,13 +174,26 @@ impl WasmAuthConfig {
     pub fn unauthenticated_for_testing() -> WasmAuthConfig {
         WasmAuthConfig {
             mode: AuthMode::UnauthenticatedForTesting,
+            channel_binding: None,
+        }
+    }
+
+    /// Returns a copy of this config additionally bound to `channel_binding`.
+    ///
+    /// Additive to any mode: both peers must supply the same binding or the
+    /// handshake fails. An empty binding leaves the transcript unchanged.
+    #[wasm_bindgen(js_name = withChannelBinding)]
+    pub fn with_channel_binding(&self, channel_binding: &[u8]) -> WasmAuthConfig {
+        WasmAuthConfig {
+            mode: self.mode.clone(),
+            channel_binding: Some(channel_binding.to_vec()),
         }
     }
 }
 
 impl WasmAuthConfig {
     fn build(&self) -> SessionAuthConfig {
-        match &self.mode {
+        let mut config = match &self.mode {
             AuthMode::UnauthenticatedForTesting => SessionAuthConfig::unauthenticated_for_testing(),
             AuthMode::Authenticated {
                 local_secret,
@@ -166,7 +202,11 @@ impl WasmAuthConfig {
                 .with_local_identity(IdentityKeyPair::from_secret_key_bytes(**local_secret))
                 .with_peer_identity(PeerIdentity::new(*peer_public))
                 .require_peer_authentication(true),
+        };
+        if let Some(binding) = &self.channel_binding {
+            config = config.with_channel_binding(ChannelBinding::new(binding.clone()));
         }
+        config
     }
 }
 
@@ -593,6 +633,70 @@ mod tests {
                 .plaintext,
             b"authenticated payload"
         );
+    }
+
+    #[test]
+    fn channel_bound_auth_config_completes_handshake() {
+        // No Foctet identity: MITM resistance comes from a shared channel binding.
+        let binding = b"tls-exporter:wasm-channel".to_vec();
+        let initiator_auth = WasmAuthConfig::bound_to_channel(&binding);
+        let responder_auth = WasmAuthConfig::bound_to_channel(&binding);
+
+        let mut initiator = FoctetSession::initiator(initiator_auth.build());
+        let mut responder = FoctetSession::responder(responder_auth.build());
+
+        drive_handshake(&mut initiator, &mut responder);
+        assert!(initiator.is_established() && responder.is_established());
+
+        let frame = initiator.seal_message_inner(0, 0, b"hi").expect("seal");
+        assert_eq!(
+            responder
+                .open_message_inner(&frame)
+                .expect("open")
+                .plaintext,
+            b"hi"
+        );
+    }
+
+    #[test]
+    fn mismatched_channel_binding_fails_wasm_handshake() {
+        let initiator_auth = WasmAuthConfig::bound_to_channel(b"channel-A");
+        let responder_auth = WasmAuthConfig::bound_to_channel(b"channel-B");
+        let mut initiator = FoctetSession::initiator(initiator_auth.build());
+        let mut responder = FoctetSession::responder(responder_auth.build());
+
+        let client_hello = initiator.initial_handshake_message().expect("client hello");
+        assert!(responder.handle_handshake_inner(&client_hello).is_err());
+    }
+
+    #[test]
+    fn with_channel_binding_strengthens_authenticated_config() {
+        // Identity auth plus a channel binding: both must match.
+        let client_id = IdentityKeyPair::generate();
+        let server_id = IdentityKeyPair::generate();
+        let binding = b"bound".to_vec();
+
+        let client_auth = WasmAuthConfig::authenticated(
+            &WasmIdentityKeyPair {
+                inner: IdentityKeyPair::from_secret_key_bytes(*client_id.expose_secret_key_bytes()),
+            },
+            &server_id.public_key(),
+        )
+        .expect("client auth")
+        .with_channel_binding(&binding);
+        let server_auth = WasmAuthConfig::authenticated(
+            &WasmIdentityKeyPair {
+                inner: IdentityKeyPair::from_secret_key_bytes(*server_id.expose_secret_key_bytes()),
+            },
+            &client_id.public_key(),
+        )
+        .expect("server auth")
+        .with_channel_binding(&binding);
+
+        let mut initiator = FoctetSession::initiator(client_auth.build());
+        let mut responder = FoctetSession::responder(server_auth.build());
+        drive_handshake(&mut initiator, &mut responder);
+        assert!(initiator.peer_authenticated() && responder.peer_authenticated());
     }
 
     #[test]
