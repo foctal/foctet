@@ -341,17 +341,26 @@ enforcement remain.
       `runtime-tokio` feature) implements `DatagramTransport` over a
       *connected* `tokio::net::UdpSocket`. Session negotiation, peer
       discovery/pinning (via `UdpSocket::connect`, since the trait carries no
-      destination address), MTU/fragmentation, and anti-amplification are
-      documented as the caller's responsibility in the module docs — this
-      adapter only moves bytes, unlike QUIC/WebTransport which provide
-      connection + peer auth for free. Verified with a real-socket roundtrip
-      test (`udp::tests::roundtrip_over_real_udp_sockets`).
+      destination address) and MTU/fragmentation are documented as the caller's
+      responsibility; **anti-amplification is now an opt-in built-in** (see the
+      §3.3 item below). Otherwise this adapter only moves bytes, unlike
+      QUIC/WebTransport which provide connection + peer auth for free. Verified
+      with a real-socket roundtrip test (`udp::tests::roundtrip_over_real_udp_sockets`).
 - [ ] Browser WebTransport datagram adapter (implement `DatagramTransport`
       for it).
 - [ ] MTU/path-change handling and fragmentation policy for payloads above the
       datagram limit (currently fail-closed `FrameTooLarge`).
 - [ ] Rekey-over-datagram story (control frames are stream-oriented today).
-- [ ] Anti-amplification guidance/limits documented for datagram adapters.
+- [x] Anti-amplification guidance/limits for datagram adapters. **Done** for the
+      raw-UDP adapter: opt-in `UdpDatagramTransport::with_anti_amplification(factor)`
+      (`DEFAULT_AMPLIFICATION_FACTOR` = 3, QUIC-style) refuses to send once
+      cumulative sent would exceed `factor ×` cumulative received from an
+      unvalidated peer (returns `WouldBlock`), so a spoofed source address cannot
+      be amplified/reflected; `mark_peer_validated()` lifts the limit once the
+      peer proves it can receive (e.g. handshake completion). Off by default
+      (no behavior change). Counters are atomic + shared across clones. Verified
+      by `udp::tests::anti_amplification_caps_sends_until_validated`. QUIC's own
+      adapter needs none (QUIC enforces this itself).
 
 ### 3.4 WebSocket / WebTransport specifics
 - [~] Test real WebSocket message framing + a browser client; define

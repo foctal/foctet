@@ -21,6 +21,15 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Opt-in anti-amplification for the raw-UDP datagram adapter (P1, §3.3).**
+  `UdpDatagramTransport::with_anti_amplification(factor)` (with
+  `DEFAULT_AMPLIFICATION_FACTOR` = 3, matching QUIC) refuses to send once the
+  cumulative bytes sent would exceed `factor ×` the bytes received from an
+  unvalidated peer (returning `io::ErrorKind::WouldBlock`), so a spoofed source
+  address cannot turn the endpoint into a reflector/amplifier.
+  `mark_peer_validated()` lifts the limit once the peer proves it can receive
+  (e.g. when the Foctet handshake over the path completes). Off by default, so
+  existing behavior is unchanged; counters are atomic and shared across clones.
 - **Pluggable handshake signer for hardware-backed identities (P1, §2.5).** New
   `HandshakeSigner` trait (`public_key()` + `sign()`, `Send + Sync`) is the seam
   for non-extractable long-term identity keys — implement it for an HSM, cloud
