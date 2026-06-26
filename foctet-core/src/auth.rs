@@ -127,6 +127,39 @@ impl PeerIdentity {
     }
 }
 
+/// A peer whose Ed25519 identity was proven during the handshake.
+///
+/// Obtained from [`crate::Session::authenticated_peer`] after a successful
+/// handshake in which the remote side presented a valid identity signature (and,
+/// when a [`PeerIdentity`] was pinned, matched it). It is the typed counterpart
+/// to the [`crate::Session::peer_authenticated`] boolean: it additionally tells
+/// you *which* identity authenticated. A handshake whose man-in-the-middle
+/// resistance comes only from a [`ChannelBinding`] (no Foctet identity) yields
+/// `None`, because no peer *identity* was proven.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedPeer {
+    identity_public_key: [u8; 32],
+}
+
+impl AuthenticatedPeer {
+    /// Creates an authenticated-peer record from a verified identity key.
+    pub fn new(identity_public_key: [u8; 32]) -> Self {
+        Self {
+            identity_public_key,
+        }
+    }
+
+    /// Returns the verified Ed25519 identity public key of the peer.
+    pub fn identity_public_key(&self) -> [u8; 32] {
+        self.identity_public_key
+    }
+
+    /// Returns whether this peer matches the given pinned [`PeerIdentity`].
+    pub fn matches(&self, identity: &PeerIdentity) -> bool {
+        self.identity_public_key.ct_eq(&identity.public_key).into()
+    }
+}
+
 /// Authentication payload attached to a handshake control message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HandshakeAuth {

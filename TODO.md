@@ -170,9 +170,13 @@ enforcement remain.
       completes an identity-less handshake, mismatch fails, one-sided fails,
       binding strengthens an identity-authenticated handshake. Flows through the
       transport builders automatically (they already take `SessionAuthConfig`).
-      **Still open:** a typed `AuthenticatedPeer` *result* type (the verified
-      peer is currently implied by the pinned `PeerIdentity` + `peer_authenticated()`);
-      surfacing channel binding through the WASM `AuthConfig`.
+      Typed `AuthenticatedPeer` result type **done**:
+      `Session::authenticated_peer() -> Option<AuthenticatedPeer>` returns the
+      verified Ed25519 identity public key (typed form of `peer_authenticated()`;
+      `None` for a channel-binding-only handshake since no peer *identity* was
+      proven). `AuthenticatedPeer` exposes `identity_public_key()` +
+      `matches(&PeerIdentity)` (constant-time). Tested. **Still open:** surfacing
+      channel binding through the WASM `AuthConfig`.
 - [ ] Consider removing/renaming the no-auth transport convenience constructors
       at API-freeze (currently they call `unauthenticated_for_testing()`).
 

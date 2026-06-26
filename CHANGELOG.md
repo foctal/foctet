@@ -21,6 +21,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Typed authenticated-peer result (P1, §2.1).** `Session::authenticated_peer()`
+  returns an `Option<AuthenticatedPeer>` naming the peer's verified Ed25519
+  identity public key — the typed counterpart to the `peer_authenticated()`
+  boolean. `AuthenticatedPeer` exposes `identity_public_key()` and a
+  constant-time `matches(&PeerIdentity)`. A handshake authenticated only by a
+  `ChannelBinding` (no Foctet identity) returns `None`, since no peer identity
+  was proven.
 - **Channel binding to an authenticated outer channel (P1, §2.1).** New
   `ChannelBinding` + `SessionAuthConfig::bound_to_channel(..)` /
   `with_channel_binding(..)` (`foctet-core`). The binding value (e.g. a TLS

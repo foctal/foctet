@@ -6,7 +6,7 @@ use zeroize::Zeroize;
 
 use crate::{
     CoreError,
-    auth::{HandshakeAuth, SessionAuthConfig},
+    auth::{AuthenticatedPeer, HandshakeAuth, SessionAuthConfig},
     control::ControlMessage,
     crypto::{
         Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, derive_rekey_traffic_keys,
@@ -74,6 +74,7 @@ pub struct Session {
     thresholds: RekeyThresholds,
     auth: SessionAuthConfig,
     peer_authenticated: bool,
+    authenticated_peer_key: Option<[u8; 32]>,
     outbound_frames: u64,
     outbound_bytes: u64,
     last_rekey_at: Instant,
@@ -130,6 +131,7 @@ impl Session {
                 thresholds,
                 auth,
                 peer_authenticated: false,
+                authenticated_peer_key: None,
                 outbound_frames: 0,
                 outbound_bytes: 0,
                 last_rekey_at: Instant::now(),
@@ -157,6 +159,7 @@ impl Session {
             thresholds,
             auth,
             peer_authenticated: false,
+            authenticated_peer_key: None,
             outbound_frames: 0,
             outbound_bytes: 0,
             last_rekey_at: Instant::now(),
@@ -176,6 +179,17 @@ impl Session {
     /// Returns whether the peer presented and passed handshake authentication.
     pub fn peer_authenticated(&self) -> bool {
         self.peer_authenticated
+    }
+
+    /// Returns the peer whose Ed25519 identity was proven during the handshake,
+    /// if any.
+    ///
+    /// This is the typed form of [`Session::peer_authenticated`]: it returns
+    /// `Some` only after a successful handshake in which the remote presented a
+    /// valid identity signature. A handshake authenticated solely by a
+    /// [`crate::ChannelBinding`] (no Foctet identity) returns `None`.
+    pub fn authenticated_peer(&self) -> Option<AuthenticatedPeer> {
+        self.authenticated_peer_key.map(AuthenticatedPeer::new)
     }
 
     /// Returns outbound traffic direction for this role.
@@ -218,7 +232,7 @@ impl Session {
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
-                let peer_authenticated = self.verify_client_auth(
+                let authenticated_peer = self.verify_client_auth(
                     *eph_public,
                     *session_salt,
                     *transcript_binding,
@@ -233,7 +247,8 @@ impl Session {
                 self.shared_secret = Some(shared);
                 self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
-                self.peer_authenticated = peer_authenticated;
+                self.peer_authenticated = authenticated_peer.is_some();
+                self.authenticated_peer_key = authenticated_peer;
                 self.last_rekey_at = Instant::now();
 
                 let server_binding = server_hello_binding(
@@ -277,7 +292,7 @@ impl Session {
                 if transcript_binding != &expected {
                     return Err(CoreError::InvalidControlMessage);
                 }
-                let peer_authenticated =
+                let authenticated_peer =
                     self.verify_server_auth(*eph_public, *transcript_binding, auth.as_ref())?;
 
                 self.peer_eph_public = Some(*eph_public);
@@ -287,7 +302,8 @@ impl Session {
                 self.shared_secret = Some(shared);
                 self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
-                self.peer_authenticated = peer_authenticated;
+                self.peer_authenticated = authenticated_peer.is_some();
+                self.authenticated_peer_key = authenticated_peer;
                 self.last_rekey_at = Instant::now();
                 Ok(None)
             }
@@ -432,7 +448,7 @@ impl Session {
         session_salt: [u8; 32],
         transcript_binding: [u8; 32],
         auth: Option<&HandshakeAuth>,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<Option<[u8; 32]>, CoreError> {
         let message = client_auth_message(eph_public, session_salt, transcript_binding);
         self.verify_auth_payload(auth, &message)
     }
@@ -442,7 +458,7 @@ impl Session {
         server_public: [u8; 32],
         transcript_binding: [u8; 32],
         auth: Option<&HandshakeAuth>,
-    ) -> Result<bool, CoreError> {
+    ) -> Result<Option<[u8; 32]>, CoreError> {
         let message = server_auth_message(
             self.local_eph.public,
             server_public,
@@ -452,11 +468,16 @@ impl Session {
         self.verify_auth_payload(auth, &message)
     }
 
+    /// Verifies an optional handshake auth payload.
+    ///
+    /// Returns `Ok(Some(identity_public_key))` when the peer proved a (possibly
+    /// pinned) Ed25519 identity, `Ok(None)` when the peer presented no identity
+    /// and that is explicitly permitted, and an error otherwise.
     fn verify_auth_payload(
         &self,
         auth: Option<&HandshakeAuth>,
         message: &[u8],
-    ) -> Result<bool, CoreError> {
+    ) -> Result<Option<[u8; 32]>, CoreError> {
         match auth {
             Some(auth) => {
                 auth.verify(message)?;
@@ -465,7 +486,7 @@ impl Session {
                 {
                     return Err(CoreError::PeerIdentityMismatch);
                 }
-                Ok(true)
+                Ok(Some(auth.identity_public_key))
             }
             // Peer presented no authentication. Fail closed unless the caller
             // explicitly opted into an unauthenticated handshake. A pinned peer
@@ -475,7 +496,7 @@ impl Session {
             {
                 Err(CoreError::MissingPeerAuthentication)
             }
-            None if self.auth.allows_unauthenticated() => Ok(false),
+            None if self.auth.allows_unauthenticated() => Ok(None),
             None => Err(CoreError::MissingPeerAuthentication),
         }
     }
@@ -629,6 +650,45 @@ mod tests {
 
         assert!(client.peer_authenticated());
         assert!(server.peer_authenticated());
+
+        // The typed authenticated-peer record names the verified identity.
+        let server_seen = client.authenticated_peer().expect("client sees a peer");
+        assert_eq!(
+            server_seen.identity_public_key(),
+            server_identity.public_key()
+        );
+        assert!(server_seen.matches(&PeerIdentity::new(server_identity.public_key())));
+        let client_seen = server.authenticated_peer().expect("server sees a peer");
+        assert_eq!(
+            client_seen.identity_public_key(),
+            client_identity.public_key()
+        );
+    }
+
+    #[test]
+    fn channel_binding_only_handshake_has_no_authenticated_peer() {
+        use crate::ChannelBinding;
+        let binding = ChannelBinding::new(b"tls-exporter:no-identity".to_vec());
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(binding.clone()),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::bound_to_channel(binding),
+        );
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handles hello")
+            .expect("server hello");
+        client
+            .handle_control(&server_hello)
+            .expect("client finalizes");
+
+        // No Foctet identity was proven, so there is no authenticated peer even
+        // though the handshake completed (its MITM resistance is the channel).
+        assert!(client.authenticated_peer().is_none());
+        assert!(server.authenticated_peer().is_none());
     }
 
     #[test]
