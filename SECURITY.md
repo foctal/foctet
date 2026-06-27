@@ -106,8 +106,14 @@ tested, and independently reviewed:
    interop test that opens Rust-produced envelopes. Still pending: a published
    npm package, browser-runner CI, framed-session/handshake APIs over WASM, and
    host-backed (non-extractable) key handling.
-5. **HTTP adapters are whole-buffer**, not streaming; large uploads/downloads are
-   not yet handled as bounded streams.
+5. **Streaming HTTP bodies (partial).** A chunked streaming mode now exists
+   (`foctet_core::body_stream`, plus `foctet_http`'s `HttpStreamSealer` /
+   `HttpStreamOpener`): per-chunk AEAD with unique nonces, an authenticated
+   final-chunk marker (truncation/extension resistance), ordering checks, and
+   the same protected-context + replay binding as the one-shot path. Still open:
+   turn-key integration into a specific framework's body stream (axum/Workers
+   request and response bodies) and backpressure guidance — the one-shot
+   `seal_request`/envelope helpers remain whole-buffer.
 6. **Wire format is unstable** (`0.x`, Draft v0) and has not been validated by an
    independent implementation.
 

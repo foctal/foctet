@@ -19,8 +19,8 @@ pub const BODY_PROFILE_V0: u8 = 0x01;
 pub const X25519_PUBLIC_KEY_LEN: usize = 32;
 /// XChaCha20-Poly1305 nonce length in bytes.
 pub const XCHACHA_NONCE_LEN: usize = 24;
-const CONTENT_KEY_LEN: usize = 32;
-const TAG_LEN: usize = 16;
+pub(crate) const CONTENT_KEY_LEN: usize = 32;
+pub(crate) const TAG_LEN: usize = 16;
 const WRAP_INFO_LABEL: &[u8] = b"foctet body wrap v0";
 
 /// Parser and encoder hardening limits for body envelopes.
@@ -86,6 +86,14 @@ pub enum BodyEnvelopeError {
     /// HKDF expansion failed.
     #[error("hkdf expand failed")]
     Hkdf,
+    /// A stream chunk arrived after the final chunk, or sealing/opening
+    /// continued after the stream was finalized.
+    #[error("stream already finalized")]
+    StreamFinished,
+    /// A stream chunk arrived with an unexpected index (out of order, gap, or
+    /// duplicate).
+    #[error("stream chunk out of order")]
+    ChunkOutOfOrder,
 }
 
 #[derive(Clone, Debug)]
@@ -528,7 +536,7 @@ fn parse_envelope<'a>(
     })
 }
 
-fn wrap_content_key(
+pub(crate) fn wrap_content_key(
     content_key: &[u8; CONTENT_KEY_LEN],
     recipient_public_key: [u8; 32],
     eph_priv: StaticSecret,
@@ -553,7 +561,7 @@ fn wrap_content_key(
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)
 }
 
-fn unwrap_content_key(
+pub(crate) fn unwrap_content_key(
     wrapped_key: &[u8],
     key_id: &[u8],
     recipient_secret_key: [u8; 32],

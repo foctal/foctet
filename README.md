@@ -70,7 +70,10 @@ Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
   backend today; raw KV cannot satisfy the atomic check-and-insert contract).
 - A published npm package and browser-runner CI for the WASM SDK (the SDK and a
   Node interop test exist; framed-session APIs over WASM are still pending).
-- Streaming (chunked) HTTP bodies; adapters are whole-buffer.
+- Framework-integrated streaming (axum/Workers) request/response bodies — the
+  streaming primitive and an `http`-level `HttpStreamSealer`/`HttpStreamOpener`
+  exist, but wiring them into a specific framework's body stream is left to the
+  application.
 - A reviewed post-compromise-security claim: in-session rekey now uses a
   forward-secret, alternating **DH ratchet**, but its post-compromise guarantee
   is pending the required independent cryptographic review (see `SECURITY.md`).

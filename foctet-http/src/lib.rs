@@ -48,6 +48,7 @@ pub mod context;
 mod error;
 pub mod raw;
 mod replay_store;
+pub mod stream;
 
 #[cfg(feature = "axum")]
 pub mod axum;
@@ -74,6 +75,7 @@ pub use replay_store::{
     AsyncReplayStore, DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore,
     ReplayStoreError,
 };
+pub use stream::{HttpStreamOpener, HttpStreamSealer};
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";

@@ -21,6 +21,17 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Streaming (chunked) HTTP bodies (P1, §4).** New `foctet_core::body_stream`
+  (`StreamSealer` / `StreamOpener`) seals a body as an ordered sequence of
+  per-chunk-authenticated frames instead of one buffered envelope: one
+  ECIES-wrapped content key per stream, a unique `prefix||index` nonce per chunk,
+  and AAD binding the stream header, chunk index, a flags byte, and the caller
+  context. Exactly one authenticated `FINAL` chunk provides truncation/extension
+  resistance (`is_finished()` must be `true` to accept the stream), sequential
+  indices reject reorder/gap/duplicate, and an aborted stream simply never
+  finalizes (safe cancellation). `foctet_http::stream::{HttpStreamSealer,
+  HttpStreamOpener}` wraps it with the HTTP protected context plus freshness and
+  single-use replay enforcement (the message id is consumed once per stream).
 - **Channel binding in the WASM `AuthConfig` (P1, §2.1/§5).** `foctet-wasm`'s
   `AuthConfig` gains `boundToChannel(channelBinding)` (no Foctet identity; MITM
   resistance from an authenticated outer channel) and `withChannelBinding(..)`

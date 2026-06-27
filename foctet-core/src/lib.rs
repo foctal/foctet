@@ -65,6 +65,8 @@
 pub mod auth;
 /// One-shot body-complete encrypted envelope (`application/foctet`) helpers.
 pub mod body;
+/// Streaming (chunked) `application/foctet` body with per-chunk AEAD.
+pub mod body_stream;
 /// Control-plane message types used inside encrypted control frames.
 pub mod control;
 /// Cryptographic primitives and key-derivation helpers.
@@ -99,6 +101,10 @@ pub use body::{
     open_body_for_key_id, open_body_for_key_id_with_context, open_body_for_key_id_with_limits,
     open_body_with_context, open_body_with_limits, seal_body, seal_body_with_context,
     seal_body_with_limits,
+};
+pub use body_stream::{
+    DecodedChunk, STREAM_CHUNK_OVERHEAD, STREAM_MAGIC, STREAM_NONCE_PREFIX_LEN, STREAM_PROFILE_V0,
+    STREAM_VERSION_V0, StreamOpener, StreamSealer,
 };
 pub use control::{ControlMessage, ControlMessageKind};
 pub use crypto::{

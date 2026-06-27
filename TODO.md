@@ -426,9 +426,21 @@ enforcement remain.
       multi-instance deployments (see §1.2).
 - [~] Safe default body limits: Axum opener bounds via `max_body_bytes`; document
       recommended values and add backpressure guidance.
-- [ ] Streaming HTTP mode (only after design + review): per-chunk AEAD, unique
-      nonces, final authenticated manifest/length, cancellation, context/replay
-      binding. Do not market whole-buffer envelope as streaming.
+- [x] Streaming HTTP mode: per-chunk AEAD, unique nonces, final authenticated
+      manifest/length, cancellation, context/replay binding. **Done.** Core
+      primitive `foctet_core::body_stream` (`StreamSealer`/`StreamOpener`): one
+      ECIES-wrapped content key per stream; each chunk AEAD'd under a unique
+      `prefix||index` nonce with AAD `header||index||flags||context`; exactly one
+      authenticated `FINAL` chunk gives truncation/extension resistance
+      (`is_finished()` must be true to accept); sequential indices reject
+      reorder/gap/dup; an aborted stream simply never finalizes (cancellation =
+      discard). HTTP layer `foctet_http::stream::{HttpStreamSealer,
+      HttpStreamOpener}` binds the protected context and enforces freshness +
+      single-use via `ReplayStore` (message id consumed once per stream).
+      9 tests (roundtrip, truncation, extension, reorder, wrong-context,
+      tampered, wrong-recipient, HTTP roundtrip+replay, HTTP truncation).
+      **Still open:** turn-key axum/Workers body-stream wiring + backpressure
+      guidance (the primitive is framework-agnostic by design).
 - [ ] End-to-end Workers test under `wrangler`: key lookup, durable replay store,
       failure handling, response binding, key rotation, operational guide.
 
