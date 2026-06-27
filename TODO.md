@@ -369,7 +369,16 @@ enforcement remain.
       for it).
 - [ ] MTU/path-change handling and fragmentation policy for payloads above the
       datagram limit (currently fail-closed `FrameTooLarge`).
-- [ ] Rekey-over-datagram story (control frames are stream-oriented today).
+- [x] Rekey-over-datagram story. **Done** (documented + glued + tested): the DH
+      ratchet rekey is driven by `Session` control messages over a **reliable
+      control channel** (QUIC-style separation — a lost ratchet message would
+      desync), then `SecureDatagramChannel::rekey_from_session(&session)` (and the
+      message channel's equivalent) adopts the rotated key. The datagram endpoint
+      retains previous keys, and datagrams carry their `key_id`, so an old-key
+      datagram reordered/delayed across a rekey still decrypts. Proven by
+      `datagram::tests::datagrams_decrypt_across_a_rekey_including_a_reordered_old_key_datagram`
+      (sends under key 0, rekeys, sends under key 1, then delivers the key-0
+      datagram *after* the rekey and both open). Module docs explain the flow.
 - [x] Anti-amplification guidance/limits for datagram adapters. **Done** for the
       raw-UDP adapter: opt-in `UdpDatagramTransport::with_anti_amplification(factor)`
       (`DEFAULT_AMPLIFICATION_FACTOR` = 3, QUIC-style) refuses to send once

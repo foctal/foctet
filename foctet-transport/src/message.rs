@@ -111,6 +111,20 @@ where
         self.endpoint.install_active_keys(keys);
     }
 
+    /// Adopts the session's current active traffic keys after it has rekeyed.
+    ///
+    /// Drive the DH-ratchet rekey on the [`Session`] (over a reliable control
+    /// channel), then call this on both peers to install the rotated key. The
+    /// previous key is retained, so a message sealed under the old key that is
+    /// still in flight opens correctly.
+    pub fn rekey_from_session(&mut self, session: &Session) -> Result<(), CoreError> {
+        let keys = session
+            .active_keys()
+            .ok_or(CoreError::InvalidSessionState)?;
+        self.endpoint.install_active_keys(keys);
+        Ok(())
+    }
+
     /// Returns a reference to the underlying transport.
     pub fn transport(&self) -> &T {
         &self.transport

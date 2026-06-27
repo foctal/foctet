@@ -21,6 +21,14 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Rekey over datagrams (P1, §3.3).** `SecureDatagramChannel::rekey_from_session`
+  (and the message channel's equivalent) adopts a session's rotated DH-ratchet
+  key after the rekey completes over a reliable control channel — the QUIC-style
+  separation where key updates ride a reliable stream and data rides datagrams.
+  Because each key has a `key_id` and the datagram endpoint retains previous
+  keys, an old-key datagram that arrives reordered or delayed *after* a rekey
+  still decrypts (verified by a cross-rekey reordering test). The datagram module
+  documents the flow.
 - **Streaming (chunked) HTTP bodies (P1, §4).** New `foctet_core::body_stream`
   (`StreamSealer` / `StreamOpener`) seals a body as an ordered sequence of
   per-chunk-authenticated frames instead of one buffered envelope: one
