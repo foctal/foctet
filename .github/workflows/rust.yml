@@ -39,6 +39,10 @@ jobs:
       run: cargo clippy --workspace --all-features --locked -- -D warnings
     - name: Wasm check (workers)
       run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown --locked
+    - name: Wasm check (foctet-wasm)
+      run: cargo check -p foctet-wasm --target wasm32-unknown-unknown --locked
+    - name: Wasm check (browser WebSocket transport)
+      run: cargo check -p foctet-transport --no-default-features --features transport-websock --target wasm32-unknown-unknown --locked
 
   test:
     name: Tests

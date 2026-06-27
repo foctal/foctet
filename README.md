@@ -65,11 +65,12 @@ Implemented and tested today:
 Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
 
 - A browser-WebTransport datagram adapter (QUIC and raw-UDP datagram adapters
-  exist).
-- A Cloudflare KV / Durable Object replay-store adapter (Redis is the durable
-  backend today; raw KV cannot satisfy the atomic check-and-insert contract).
-- A published npm package and browser-runner CI for the WASM SDK (the SDK and a
-  Node interop test exist; framed-session APIs over WASM are still pending).
+  exist; browser WebSocket is covered — the `WebsockMessageTransport` compiles
+  for wasm via the `websock-wasm` backend, and the WASM `FoctetSession` covers
+  WebTransport at the crypto layer with JS owning the socket).
+- A published npm package and a headless browser-runner (runtime) test for the
+  WASM SDK (the SDK, a framed session/handshake API, and a Node interop test
+  exist; only the npm release and in-browser test runner are pending).
 - Framework-integrated streaming (axum/Workers) request/response bodies — the
   streaming primitive and an `http`-level `HttpStreamSealer`/`HttpStreamOpener`
   exist, but wiring them into a specific framework's body stream is left to the

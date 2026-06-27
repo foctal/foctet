@@ -10,17 +10,20 @@
 //!   each Foctet frame is one binary WebSocket message, preserving message
 //!   boundaries. Pair it with [`crate::SecureMessageChannel`].
 
-use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Mutex;
-use websock::{Connection, Error as WebsockError, Message};
-use websock_tungstenite_mux as websock_mux;
+use futures_util::lock::Mutex;
+use websock::{Error as WebsockError, Message, WebSocketConnection};
 
 use crate::message::MessageTransport;
+
+#[cfg(feature = "transport-websock-mux")]
 use crate::{
     TokioTransportBuilder, TokioTransportChannel, TransportChannelError, TransportConfig,
     adapter::SplitIo,
 };
+#[cfg(feature = "transport-websock-mux")]
+use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
+#[cfg(feature = "transport-websock-mux")]
+use websock_tungstenite_mux as websock_mux;
 
 /// A [`MessageTransport`] over a raw (non-multiplexed) WebSocket connection.
 ///
@@ -29,8 +32,14 @@ use crate::{
 /// WebSocket framing (unlike the byte-stream mux helpers in this module, which
 /// treat the socket as an opaque stream).
 ///
-/// Negotiate a [`Session`] first (for example over a Foctet control stream or an
-/// out-of-band handshake), then wrap the connection:
+/// It is generic over the `websock` crate's cross-platform
+/// [`WebSocketConnection`] trait, so the same adapter works over the native
+/// (`websock-tungstenite`) connection **and** the browser
+/// (`websock-wasm`) WebSocket connection — a Rust/wasm front-end can run a
+/// `SecureMessageChannel` over a browser `WebSocket` with no JavaScript glue.
+///
+/// Negotiate a [`foctet_core::Session`] first (for example over a Foctet control
+/// stream or an out-of-band handshake), then wrap the connection:
 ///
 /// ```rust,ignore
 /// let transport = WebsockMessageTransport::new(connection);
@@ -41,40 +50,38 @@ use crate::{
 /// Sends and receives are serialized through an internal async lock, matching
 /// the sequential `&mut self` API of `SecureMessageChannel`. Incoming **text**
 /// frames are rejected — Foctet messages are always binary.
-pub struct WebsockMessageTransport<S> {
-    conn: Mutex<Connection<S>>,
+pub struct WebsockMessageTransport<C> {
+    conn: Mutex<C>,
 }
 
-impl<S> WebsockMessageTransport<S> {
-    /// Wraps an established WebSocket [`Connection`] as a message transport.
-    pub fn new(connection: Connection<S>) -> Self {
+impl<C> WebsockMessageTransport<C> {
+    /// Wraps an established WebSocket connection as a message transport.
+    pub fn new(connection: C) -> Self {
         Self {
             conn: Mutex::new(connection),
         }
     }
 
     /// Consumes the transport and returns the underlying connection.
-    pub fn into_inner(self) -> Connection<S> {
+    pub fn into_inner(self) -> C {
         self.conn.into_inner()
     }
 }
 
-impl<S> MessageTransport for WebsockMessageTransport<S>
+impl<C> MessageTransport for WebsockMessageTransport<C>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    C: WebSocketConnection,
 {
     type Error = WebsockError;
 
     async fn send_message(&self, message: Vec<u8>) -> Result<(), Self::Error> {
-        self.conn
-            .lock()
-            .await
-            .send(Message::Binary(message.into()))
-            .await
+        let mut conn = self.conn.lock().await;
+        WebSocketConnection::send(&mut *conn, Message::Binary(message.into())).await
     }
 
     async fn recv_message(&self) -> Result<Vec<u8>, Self::Error> {
-        match self.conn.lock().await.recv().await? {
+        let mut conn = self.conn.lock().await;
+        match WebSocketConnection::recv(&mut *conn).await? {
             Message::Binary(bytes) => Ok(bytes.to_vec()),
             Message::Text(_) => Err(WebsockError::Protocol(
                 "expected a binary Foctet message but received a text frame".into(),
@@ -88,6 +95,7 @@ where
 }
 
 /// Opens a bidirectional WebSocket-mux stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn open_secure_channel(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -99,6 +107,7 @@ pub async fn open_secure_channel(
 }
 
 /// Opens a bidirectional WebSocket-mux stream and applies a custom transport config.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn open_secure_channel_with(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -118,6 +127,7 @@ pub async fn open_secure_channel_with(
 }
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn open_secure_channel_with_handshake(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -135,6 +145,7 @@ pub async fn open_secure_channel_with_handshake(
 }
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn open_secure_channel_with_handshake_and_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -153,6 +164,7 @@ pub async fn open_secure_channel_with_handshake_and_config(
 }
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake with explicit auth config, and applies a custom transport config.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn open_secure_channel_with_handshake_and_auth_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -174,6 +186,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
 }
 
 /// Accepts a bidirectional WebSocket-mux stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn accept_secure_channel(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -185,6 +198,7 @@ pub async fn accept_secure_channel(
 }
 
 /// Accepts a bidirectional WebSocket-mux stream and applies a custom transport config.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn accept_secure_channel_with(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -204,6 +218,7 @@ pub async fn accept_secure_channel_with(
 }
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn accept_secure_channel_with_handshake(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -221,6 +236,7 @@ pub async fn accept_secure_channel_with_handshake(
 }
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn accept_secure_channel_with_handshake_and_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -239,6 +255,7 @@ pub async fn accept_secure_channel_with_handshake_and_config(
 }
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake with explicit auth config, and applies a custom transport config.
+#[cfg(feature = "transport-websock-mux")]
 pub async fn accept_secure_channel_with_handshake_and_auth_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -259,7 +276,8 @@ pub async fn accept_secure_channel_with_handshake_and_auth_config(
         .map_err(TransportChannelError::core)
 }
 
-#[cfg(test)]
+// Native loopback integration test (real TCP/WebSocket); not built for wasm.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::SecureMessageChannel;

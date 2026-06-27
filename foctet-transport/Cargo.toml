@@ -15,7 +15,11 @@ runtime-tokio = ["dep:tokio", "foctet-core/runtime-tokio", "dep:futures-sink"]
 runtime-futures = ["dep:futures-io", "dep:futures-sink", "dep:futures-util", "foctet-core/runtime-futures"]
 transport-muxtls = ["dep:muxtls"]
 transport-webtrans = ["dep:webtrans"]
-transport-websock = ["dep:websock", "dep:websock-tungstenite-mux"]
+# Cross-platform raw-WebSocket message transport (`WebsockMessageTransport`),
+# usable on native and in the browser (wasm) via the `websock` crate's backends.
+transport-websock = ["dep:websock", "dep:futures-util"]
+# Native multiplexed-WebSocket byte-stream helpers (require a Tokio runtime).
+transport-websock-mux = ["transport-websock", "runtime-tokio", "dep:websock-tungstenite-mux"]
 transport-quinn = ["dep:quinn", "dep:bytes"]
 
 [dependencies]
@@ -23,7 +27,7 @@ foctet-core = { workspace = true }
 pin-project-lite = "0.2"
 futures-io = { version = "0.3", optional = true }
 futures-sink = { version = "0.3", optional = true }
-futures-util = { version = "0.3", default-features = false, features = ["io"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["io", "std"], optional = true }
 tokio = { version = "1.48", features = ["io-util", "time", "sync"], optional = true }
 muxtls = { version = "0.1.0", default-features = false, optional = true }
 webtrans = { version = "0.4.0", default-features = false, optional = true }
@@ -57,7 +61,7 @@ required-features = ["runtime-tokio", "transport-webtrans"]
 [[example]]
 name = "websock_split"
 path = "examples/websock_split.rs"
-required-features = ["runtime-tokio", "transport-websock"]
+required-features = ["runtime-tokio", "transport-websock-mux"]
 
 [[example]]
 name = "quinn_split"

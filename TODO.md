@@ -337,8 +337,14 @@ enforcement remain.
       Concrete `WebsockMessageTransport` over the `websock` crate's raw
       connection now exists (`foctet-transport/src/websock.rs`), verified with a
       real plain-WebSocket loopback roundtrip
-      (`websock::tests::secure_message_channel_over_raw_websocket`). **Still
-      open:** a browser binding (see §3.4) and the `ByteStream` marker shape
+      (`websock::tests::secure_message_channel_over_raw_websocket`). It is now
+      **generic over `websock::WebSocketConnection`**, so the same adapter runs on
+      native (`websock-tungstenite`) **and the browser** (`websock-wasm`): the
+      `transport-websock` feature was split from the native-only
+      `transport-websock-mux`, `foctet-transport` compiles for
+      `wasm32-unknown-unknown` with `transport-websock` (a Rust/wasm front-end can
+      run a `SecureMessageChannel` over a browser `WebSocket` with no JS glue),
+      and CI gates that wasm build. **Still open:** the `ByteStream` marker shape
       below.
 - [~] `ByteStream` shape trait. The byte-stream secure path already exists
       (`FoctetFramed`/`FoctetStream` over `PollIo`, plus the Tokio/Futures
@@ -397,12 +403,15 @@ enforcement remain.
       **and** a concrete native impl `WebsockMessageTransport` over the `websock`
       crate's raw connection (one Foctet frame per binary WebSocket message),
       verified with a real plain-WebSocket loopback roundtrip in
-      `foctet-transport/src/websock.rs`. For the **browser**, the wasm
-      `FoctetSession` (§5, `foctet-wasm/src/session.rs`) covers raw WebSocket:
-      JS owns the `WebSocket` and exchanges the `Uint8Array` blobs that WASM
-      `sealMessage`/`openMessage` produce/consume (one frame per binary message).
-      **Still open:** a headless browser-runner test in CI and a documented
-      mux/backpressure definition.
+      `foctet-transport/src/websock.rs`. For the **browser**, there are now two
+      paths: (1) the wasm `FoctetSession` (§5, `foctet-wasm/src/session.rs`) where
+      JS owns the `WebSocket` and exchanges `Uint8Array` blobs; and (2) a
+      **Rust/wasm** path — `WebsockMessageTransport` is generic over
+      `websock::WebSocketConnection`, compiles for `wasm32` under
+      `transport-websock` (browser `websock-wasm` backend), and drives a
+      `SecureMessageChannel` directly from Rust with no JS glue (CI-gated wasm
+      build). **Still open:** a headless browser-runner *runtime* test and a
+      documented mux/backpressure definition.
 - [~] Browser WebTransport: the wasm `FoctetSession` (§5) protects data over
       both WebTransport **streams** (message mode: `newInitiator`/`sealMessage`)
       and WebTransport **datagrams** (datagram mode:

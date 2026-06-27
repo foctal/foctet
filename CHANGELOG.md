@@ -21,6 +21,17 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Browser (Rust/wasm) WebSocket message transport (P1, §3.4).**
+  `WebsockMessageTransport` is now generic over the `websock` crate's
+  cross-platform `WebSocketConnection` trait, so the same adapter drives a
+  `SecureMessageChannel` over both the native (`websock-tungstenite`) connection
+  and the **browser** (`websock-wasm`) `WebSocket` — a Rust/wasm front-end needs
+  no JavaScript glue. The `transport-websock` feature was split into the
+  cross-platform `transport-websock` (raw message transport, wasm-compatible) and
+  the native-only `transport-websock-mux` (multiplexed byte-stream helpers, Tokio
+  runtime); `foctet-transport` now compiles for `wasm32-unknown-unknown` under
+  `transport-websock`, and CI gates that build. **Breaking:** the multiplexed
+  `*_secure_channel*` helpers now require the `transport-websock-mux` feature.
 - **Rekey over datagrams (P1, §3.3).** `SecureDatagramChannel::rekey_from_session`
   (and the message channel's equivalent) adopts a session's rotated DH-ratchet
   key after the rekey completes over a reliable control channel — the QUIC-style
