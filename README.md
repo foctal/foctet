@@ -71,10 +71,11 @@ Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
 - A published npm package and a headless browser-runner (runtime) test for the
   WASM SDK (the SDK, a framed session/handshake API, and a Node interop test
   exist; only the npm release and in-browser test runner are pending).
-- Framework-integrated streaming (axum/Workers) request/response bodies — the
-  streaming primitive and an `http`-level `HttpStreamSealer`/`HttpStreamOpener`
-  exist, but wiring them into a specific framework's body stream is left to the
-  application.
+- Streaming **response**-body helpers for a specific framework — streaming
+  request bodies are turn-key (`foctet_http::axum::open_request_stream`, and the
+  framework-agnostic `HttpRequestStreamReader` for Workers), but producing a
+  streaming response body is currently left to the application (write the sealer's
+  stream header then each sealed chunk to the response stream).
 - A reviewed post-compromise-security claim: in-session rekey now uses a
   forward-secret, alternating **DH ratchet**, but its post-compromise guarantee
   is pending the required independent cryptographic review (see `SECURITY.md`).

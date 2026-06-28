@@ -462,8 +462,20 @@ enforcement remain.
       single-use via `ReplayStore` (message id consumed once per stream).
       9 tests (roundtrip, truncation, extension, reorder, wrong-context,
       tampered, wrong-recipient, HTTP roundtrip+replay, HTTP truncation).
-      **Still open:** turn-key axum/Workers body-stream wiring + backpressure
-      guidance (the primitive is framework-agnostic by design).
+      **Turn-key framework wiring done:** `foctet_core::StreamFrameDecoder`
+      reassembles the self-delimiting wire frames from arbitrary byte splits
+      (HTTP body data frames / Workers `ReadableStream` reads); the
+      framework-agnostic `foctet_http::HttpRequestStreamReader` (push-based) feeds
+      that into the opener, building it on the header (freshness + single-use
+      replay) and yielding plaintext chunks, with `finish()` rejecting a
+      truncated/cancelled body (`HttpError::StreamIncomplete`); and the axum
+      helper `foctet_http::axum::open_request_stream` drives it from an axum body
+      stream (callback per plaintext chunk, no whole-body buffering — natural
+      backpressure via the caller's consumption rate). Workers uses the same
+      framework-agnostic reader. Tested: decoder arbitrary-split reassembly,
+      reader split-body decode + replay rejection + truncation rejection, and a
+      real axum streaming-upload roundtrip. **Still open:** explicit backpressure
+      *tuning* guidance docs.
 - [ ] End-to-end Workers test under `wrangler`: key lookup, durable replay store,
       failure handling, response binding, key rotation, operational guide.
 

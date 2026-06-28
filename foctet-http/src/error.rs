@@ -34,4 +34,8 @@ pub enum HttpError {
     /// The anti-replay store failed.
     #[error("replay store error")]
     ReplayStore(#[source] crate::ReplayStoreError),
+    /// A streaming body ended before its authenticated final chunk (truncated or
+    /// cancelled); the partial plaintext must be discarded.
+    #[error("streaming body incomplete (no final chunk)")]
+    StreamIncomplete,
 }

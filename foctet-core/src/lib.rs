@@ -104,7 +104,7 @@ pub use body::{
 };
 pub use body_stream::{
     DecodedChunk, STREAM_CHUNK_OVERHEAD, STREAM_MAGIC, STREAM_NONCE_PREFIX_LEN, STREAM_PROFILE_V0,
-    STREAM_VERSION_V0, StreamOpener, StreamSealer,
+    STREAM_VERSION_V0, StreamFrameDecoder, StreamItem, StreamOpener, StreamSealer,
 };
 pub use control::{ControlMessage, ControlMessageKind};
 pub use crypto::{

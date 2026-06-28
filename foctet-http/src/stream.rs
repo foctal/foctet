@@ -23,7 +23,10 @@
 //! before that (truncation or a cancelled upload), the assembled plaintext MUST
 //! be discarded — `is_finished()` stays `false`.
 
-use foctet_core::{BodyEnvelopeLimits, DecodedChunk, StreamOpener, StreamSealer};
+use foctet_core::{
+    BodyEnvelopeError, BodyEnvelopeLimits, DecodedChunk, StreamFrameDecoder, StreamItem,
+    StreamOpener, StreamSealer,
+};
 
 use crate::{
     ContextBinding, ContextCarrier, HttpError, ProtectedContext, ReplayCheck, ReplayStore,
@@ -132,6 +135,124 @@ impl HttpStreamOpener {
     }
 }
 
+/// Turn-key, framework-agnostic reader for a context-bound streaming request
+/// body.
+///
+/// Feed it the raw body bytes as they arrive — from an `axum`/`hyper` body data
+/// stream, a Cloudflare Workers `ReadableStream`, or any other byte source — and
+/// it incrementally reassembles the stream frames ([`StreamFrameDecoder`]),
+/// builds an [`HttpStreamOpener`] when the header completes (validating freshness
+/// and single use against the replay store at that point), and returns decrypted
+/// plaintext chunks.
+///
+/// After the body ends, call [`HttpRequestStreamReader::finish`]: it errors with
+/// [`HttpError::StreamIncomplete`] unless the authenticated final chunk was seen,
+/// so a truncated or cancelled upload is rejected rather than silently accepted.
+///
+/// ```rust,ignore
+/// // axum handler sketch
+/// let (parts, body) = request.into_parts();
+/// let mut reader = HttpRequestStreamReader::new(
+///     parts, recipient_secret_key, &store, now, skew, ContextBinding::default(), &limits);
+/// let mut stream = body.into_data_stream();
+/// while let Some(frame) = stream.next().await {
+///     for plaintext in reader.push(&frame?)? {
+///         sink.write_all(&plaintext).await?; // process without buffering the whole body
+///     }
+/// }
+/// reader.finish()?; // rejects a truncated upload
+/// ```
+pub struct HttpRequestStreamReader<'s, S: ?Sized> {
+    decoder: StreamFrameDecoder,
+    opener: Option<HttpStreamOpener>,
+    parts: http::request::Parts,
+    recipient_secret_key: [u8; 32],
+    store: &'s S,
+    now_secs: u64,
+    max_skew_secs: u64,
+    binding: ContextBinding,
+    limits: BodyEnvelopeLimits,
+}
+
+impl<'s, S: ReplayStore + ?Sized> HttpRequestStreamReader<'s, S> {
+    /// Creates a reader bound to the request `parts` and replay `store`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        parts: http::request::Parts,
+        recipient_secret_key: [u8; 32],
+        store: &'s S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+        limits: &BodyEnvelopeLimits,
+    ) -> Self {
+        Self {
+            decoder: StreamFrameDecoder::new(limits),
+            opener: None,
+            parts,
+            recipient_secret_key,
+            store,
+            now_secs,
+            max_skew_secs,
+            binding,
+            limits: limits.clone(),
+        }
+    }
+
+    /// Feeds received body bytes and returns any plaintext chunks now available
+    /// (possibly none, if a frame is still incomplete).
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, HttpError> {
+        self.decoder.push(bytes);
+        let mut out = Vec::new();
+        while let Some(item) = self.decoder.decode_next().map_err(HttpError::OpenFailed)? {
+            match item {
+                StreamItem::Header(header) => {
+                    if self.opener.is_some() {
+                        return Err(HttpError::OpenFailed(BodyEnvelopeError::InvalidHeader(
+                            "duplicate stream header",
+                        )));
+                    }
+                    self.opener = Some(HttpStreamOpener::for_request(
+                        &self.parts,
+                        self.recipient_secret_key,
+                        &header,
+                        self.store,
+                        self.now_secs,
+                        self.max_skew_secs,
+                        self.binding,
+                        &self.limits,
+                    )?);
+                }
+                StreamItem::Chunk(chunk) => {
+                    let opener = self.opener.as_mut().ok_or(HttpError::OpenFailed(
+                        BodyEnvelopeError::InvalidHeader("chunk before stream header"),
+                    ))?;
+                    out.push(opener.open_chunk(&chunk)?.plaintext);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the authenticated final chunk has been opened.
+    pub fn is_finished(&self) -> bool {
+        self.opener
+            .as_ref()
+            .is_some_and(HttpStreamOpener::is_finished)
+    }
+
+    /// Consumes the reader, succeeding only if the stream reached its final
+    /// chunk; otherwise the body was truncated/cancelled
+    /// ([`HttpError::StreamIncomplete`]).
+    pub fn finish(self) -> Result<(), HttpError> {
+        if self.is_finished() {
+            Ok(())
+        } else {
+            Err(HttpError::StreamIncomplete)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +339,112 @@ mod tests {
             &limits,
         );
         assert!(matches!(replay, Err(HttpError::Replayed)));
+    }
+
+    #[test]
+    fn stream_reader_decodes_a_split_body_and_rejects_replay() {
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        let now = 3000;
+
+        // Seal a stream and lay it out as one contiguous request body:
+        // stream header followed by the self-delimiting chunks.
+        let carrier = ContextCarrier::generate(now, 60);
+        let (mut req_parts, _) = request().into_parts();
+        let (mut sealer, header) = HttpStreamSealer::for_request(
+            &req_parts,
+            &carrier,
+            ContextBinding::default(),
+            public,
+            b"kid",
+            &limits,
+        )
+        .expect("sealer");
+        carrier
+            .apply_to_headers(&mut req_parts.headers)
+            .expect("apply carrier");
+
+        let mut wire = header;
+        for part in [b"chunk-one ".as_slice(), b"chunk-two ", b"chunk-three"] {
+            let is_final = part == b"chunk-three";
+            wire.extend_from_slice(&sealer.seal_chunk(part, is_final).expect("seal"));
+        }
+
+        // Drive the reader with 5-byte body pieces (frames split across pushes).
+        let store = InMemoryReplayStore::new();
+        let mut reader = HttpRequestStreamReader::new(
+            req_parts.clone(),
+            secret,
+            &store,
+            now,
+            5,
+            ContextBinding::default(),
+            &limits,
+        );
+        let mut body = Vec::new();
+        for piece in wire.chunks(5) {
+            for plaintext in reader.push(piece).expect("push") {
+                body.extend_from_slice(&plaintext);
+            }
+        }
+        reader.finish().expect("stream completed");
+        assert_eq!(body, b"chunk-one chunk-two chunk-three");
+
+        // A second reader over the same request must be rejected as a replay when
+        // its header completes (the message id was already consumed).
+        let mut replay_reader = HttpRequestStreamReader::new(
+            req_parts,
+            secret,
+            &store,
+            now,
+            5,
+            ContextBinding::default(),
+            &limits,
+        );
+        assert!(matches!(
+            replay_reader.push(&wire),
+            Err(HttpError::Replayed)
+        ));
+    }
+
+    #[test]
+    fn stream_reader_finish_rejects_a_truncated_body() {
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        let now = 3100;
+
+        let carrier = ContextCarrier::generate(now, 60);
+        let (mut req_parts, _) = request().into_parts();
+        let (mut sealer, header) = HttpStreamSealer::for_request(
+            &req_parts,
+            &carrier,
+            ContextBinding::default(),
+            public,
+            b"kid",
+            &limits,
+        )
+        .expect("sealer");
+        carrier
+            .apply_to_headers(&mut req_parts.headers)
+            .expect("apply carrier");
+
+        // Only the non-final chunk reaches the reader; the final chunk is dropped.
+        let mut wire = header;
+        wire.extend_from_slice(&sealer.seal_chunk(b"partial", false).expect("seal"));
+        let _final = sealer.seal_chunk(b"rest", true).expect("seal final");
+
+        let store = InMemoryReplayStore::new();
+        let mut reader = HttpRequestStreamReader::new(
+            req_parts,
+            secret,
+            &store,
+            now,
+            5,
+            ContextBinding::default(),
+            &limits,
+        );
+        reader.push(&wire).expect("push");
+        assert!(matches!(reader.finish(), Err(HttpError::StreamIncomplete)));
     }
 
     #[test]

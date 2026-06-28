@@ -38,6 +38,7 @@
 //! partial plaintext. A truncated and a cancelled stream are indistinguishable,
 //! which is the safe outcome.
 
+use bytes::{Buf, BytesMut};
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
@@ -436,6 +437,124 @@ impl StreamOpener {
     }
 }
 
+/// Fixed-size prefix of a stream header before the variable key-id / wrapped-key
+/// fields: magic(8) + version(1) + profile(1) + nonce_prefix + eph_pub(32).
+const STREAM_HEADER_FIXED_PREFIX: usize = 8 + 1 + 1 + STREAM_NONCE_PREFIX_LEN + 32;
+
+/// Returns the full stream-header length once enough bytes are buffered to
+/// determine it, `None` if more bytes are needed, or an error if the
+/// length-prefix fields are invalid.
+fn stream_header_len(
+    buf: &[u8],
+    limits: &BodyEnvelopeLimits,
+) -> Result<Option<usize>, BodyEnvelopeError> {
+    if buf.len() < STREAM_HEADER_FIXED_PREFIX + 2 {
+        return Ok(None);
+    }
+    let key_id_len = u16::from_be_bytes([
+        buf[STREAM_HEADER_FIXED_PREFIX],
+        buf[STREAM_HEADER_FIXED_PREFIX + 1],
+    ]) as usize;
+    if key_id_len == 0 || key_id_len > limits.max_key_id_len {
+        return Err(BodyEnvelopeError::InvalidHeader("key_id_len"));
+    }
+    let wrapped_off = STREAM_HEADER_FIXED_PREFIX + 2 + key_id_len;
+    if buf.len() < wrapped_off + 2 {
+        return Ok(None);
+    }
+    let wrapped_len = u16::from_be_bytes([buf[wrapped_off], buf[wrapped_off + 1]]) as usize;
+    if wrapped_len != CONTENT_KEY_LEN + TAG_LEN {
+        return Err(BodyEnvelopeError::InvalidHeader("wrapped_key_len"));
+    }
+    let total = wrapped_off + 2 + wrapped_len;
+    if total > limits.max_header_bytes {
+        return Err(BodyEnvelopeError::LimitExceeded("header_len"));
+    }
+    // Only report the header as ready once all of its bytes have arrived.
+    if buf.len() < total {
+        return Ok(None);
+    }
+    Ok(Some(total))
+}
+
+/// One framed unit produced by a [`StreamFrameDecoder`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StreamItem {
+    /// The stream header (prologue), produced once before any chunk. Feed it to
+    /// [`StreamOpener::new`].
+    Header(Vec<u8>),
+    /// One complete chunk frame. Feed it to [`StreamOpener::open_chunk`].
+    Chunk(Vec<u8>),
+}
+
+/// Reassembles a streaming body's self-delimiting frames from arbitrarily split
+/// byte chunks (e.g. HTTP body data frames that do not align to Foctet chunk
+/// boundaries).
+///
+/// Push received bytes with [`Self::push`], then drain complete frames with
+/// [`Self::decode_next`]: it yields exactly one [`StreamItem::Header`] first,
+/// then [`StreamItem::Chunk`]s, returning `None` whenever more bytes are needed.
+/// This makes the streaming body usable over any byte transport — an axum/hyper
+/// request body, a Cloudflare Workers `ReadableStream`, or a raw socket.
+pub struct StreamFrameDecoder {
+    buf: BytesMut,
+    header_done: bool,
+    limits: BodyEnvelopeLimits,
+}
+
+impl StreamFrameDecoder {
+    /// Creates a decoder bounded by `limits` (header size, chunk ciphertext size).
+    pub fn new(limits: &BodyEnvelopeLimits) -> Self {
+        Self {
+            buf: BytesMut::new(),
+            header_done: false,
+            limits: limits.clone(),
+        }
+    }
+
+    /// Appends received bytes to the internal buffer.
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    /// Drains the next complete frame, or `None` if more bytes are needed.
+    pub fn decode_next(&mut self) -> Result<Option<StreamItem>, BodyEnvelopeError> {
+        if !self.header_done {
+            return match stream_header_len(&self.buf, &self.limits)? {
+                None => Ok(None),
+                Some(len) => {
+                    let header = self.buf[..len].to_vec();
+                    self.buf.advance(len);
+                    self.header_done = true;
+                    Ok(Some(StreamItem::Header(header)))
+                }
+            };
+        }
+
+        if self.buf.len() < STREAM_CHUNK_OVERHEAD {
+            return Ok(None);
+        }
+        // Chunk layout: index(8) ‖ flags(1) ‖ ct_len(4) ‖ ciphertext.
+        let ct_len =
+            u32::from_be_bytes([self.buf[9], self.buf[10], self.buf[11], self.buf[12]]) as usize;
+        if ct_len > self.limits.max_payload_len {
+            return Err(BodyEnvelopeError::LimitExceeded("chunk_ct_len"));
+        }
+        let total = STREAM_CHUNK_OVERHEAD + ct_len;
+        if self.buf.len() < total {
+            return Ok(None);
+        }
+        let chunk = self.buf[..total].to_vec();
+        self.buf.advance(total);
+        Ok(Some(StreamItem::Chunk(chunk)))
+    }
+
+    /// Returns whether the header has been decoded yet.
+    pub fn header_decoded(&self) -> bool {
+        self.header_done
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,6 +578,50 @@ mod tests {
         }
         assert!(sealer.is_finished());
         (header, out)
+    }
+
+    #[test]
+    fn decoder_reassembles_frames_from_arbitrary_byte_splits() {
+        let (secret, public) = recipient();
+        let context = b"ctx";
+        let parts: Vec<&[u8]> = vec![b"alpha", b"beta", b"gamma", b"delta"];
+        let (header, chunks) = seal_stream(public, context, &parts);
+
+        // The whole wire stream: header followed by the self-delimiting chunks.
+        let mut wire = header.clone();
+        for c in &chunks {
+            wire.extend_from_slice(c);
+        }
+
+        let limits = BodyEnvelopeLimits::default();
+        let mut decoder = StreamFrameDecoder::new(&limits);
+        let mut opener: Option<StreamOpener> = None;
+        let mut assembled = Vec::new();
+
+        // Feed the wire 3 bytes at a time to exercise frames split across pushes.
+        for piece in wire.chunks(3) {
+            decoder.push(piece);
+            while let Some(item) = decoder.decode_next().expect("decode") {
+                match item {
+                    StreamItem::Header(h) => {
+                        assert_eq!(h, header);
+                        opener =
+                            Some(StreamOpener::new(secret, &h, context, &limits).expect("opener"));
+                    }
+                    StreamItem::Chunk(c) => {
+                        let decoded = opener
+                            .as_mut()
+                            .expect("header before chunks")
+                            .open_chunk(&c)
+                            .expect("open chunk");
+                        assembled.extend_from_slice(&decoded.plaintext);
+                    }
+                }
+            }
+        }
+
+        assert!(opener.expect("opener built").is_finished());
+        assert_eq!(assembled, b"alphabetagammadelta");
     }
 
     #[test]

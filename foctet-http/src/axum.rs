@@ -6,11 +6,13 @@
 use ::axum::body::{Body, to_bytes};
 use ::axum::extract::Request as AxumRequest;
 use ::axum::response::Response as AxumResponse;
+use foctet_core::BodyEnvelopeLimits;
+use http_body_util::BodyExt;
 use thiserror::Error;
 
 use crate::{
     AsyncReplayStore, ContextBinding, ContextCarrier, HttpError, HttpOpenOptions, HttpOpener,
-    HttpSealOptions, HttpSealer, ReplayStore,
+    HttpRequestStreamReader, HttpSealOptions, HttpSealer, ReplayStore,
 };
 
 /// Error type for Axum adapter operations.
@@ -264,6 +266,8 @@ impl ::axum::response::IntoResponse for AxumError {
             ) => StatusCode::BAD_REQUEST,
             AxumError::Http(HttpError::ContextExpired) => StatusCode::UNAUTHORIZED,
             AxumError::Http(HttpError::OpenFailed(_)) => StatusCode::UNAUTHORIZED,
+            // A truncated/cancelled streaming body is a malformed request.
+            AxumError::Http(HttpError::StreamIncomplete) => StatusCode::BAD_REQUEST,
             AxumError::Http(HttpError::Replayed) => StatusCode::CONFLICT,
             AxumError::Http(HttpError::SealFailed(_) | HttpError::ReplayStore(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -351,6 +355,55 @@ where
     }
 }
 
+/// Opens a **streaming** Foctet request body, invoking `on_plaintext` for each
+/// decrypted chunk as it arrives — without buffering the whole body.
+///
+/// This is the turn-key Axum wiring for [`crate::HttpStreamSealer`]: it reads the
+/// request body frame by frame, reassembles the Foctet stream frames, validates
+/// the protected context's freshness and single use against `store` when the
+/// stream header arrives, and yields plaintext chunks through the callback. It
+/// fails with [`HttpError::StreamIncomplete`] (via [`AxumError::Http`]) if the
+/// body ends before the authenticated final chunk, so a truncated or cancelled
+/// upload is rejected.
+#[allow(clippy::too_many_arguments)]
+pub async fn open_request_stream<S, F>(
+    request: AxumRequest,
+    recipient_secret_key: [u8; 32],
+    store: &S,
+    now_secs: u64,
+    max_skew_secs: u64,
+    binding: ContextBinding,
+    limits: &BodyEnvelopeLimits,
+    mut on_plaintext: F,
+) -> Result<(), AxumError>
+where
+    S: ReplayStore + ?Sized,
+    F: FnMut(&[u8]) -> Result<(), AxumError>,
+{
+    let (parts, mut body) = request.into_parts();
+    let mut reader = HttpRequestStreamReader::new(
+        parts,
+        recipient_secret_key,
+        store,
+        now_secs,
+        max_skew_secs,
+        binding,
+        limits,
+    );
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(AxumError::BodyRead)?;
+        if let Ok(data) = frame.into_data() {
+            for plaintext in reader.push(&data)? {
+                on_plaintext(&plaintext)?;
+            }
+        }
+    }
+
+    reader.finish()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +413,64 @@ mod tests {
     use http::{Request, Response, StatusCode, Version, header};
     use rand_core::OsRng;
     use x25519_dalek::{PublicKey, StaticSecret};
+
+    #[tokio::test]
+    async fn open_request_stream_decodes_a_streaming_upload() {
+        use crate::{HttpStreamSealer, InMemoryReplayStore};
+
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_secret = recipient_priv.to_bytes();
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let limits = BodyEnvelopeLimits::default();
+        let now = 1234;
+
+        // Seal a streaming upload and lay it out as the request body.
+        let carrier = ContextCarrier::generate(now, 60);
+        let base = Request::builder()
+            .method("POST")
+            .uri("https://example.com/upload")
+            .body(())
+            .expect("request");
+        let (mut parts, _) = base.into_parts();
+        let (mut sealer, header) = HttpStreamSealer::for_request(
+            &parts,
+            &carrier,
+            ContextBinding::default(),
+            recipient_pub,
+            b"kid",
+            &limits,
+        )
+        .expect("sealer");
+        carrier
+            .apply_to_headers(&mut parts.headers)
+            .expect("apply carrier");
+
+        let mut wire = header;
+        for part in [b"axum ".as_slice(), b"streaming ", b"upload"] {
+            let is_final = part == b"upload";
+            wire.extend_from_slice(&sealer.seal_chunk(part, is_final).expect("seal"));
+        }
+
+        let request = Request::from_parts(parts, Body::from(wire));
+        let store = InMemoryReplayStore::new();
+        let mut body = Vec::new();
+        open_request_stream(
+            request,
+            recipient_secret,
+            &store,
+            now,
+            5,
+            ContextBinding::default(),
+            &limits,
+            |plaintext| {
+                body.extend_from_slice(plaintext);
+                Ok(())
+            },
+        )
+        .await
+        .expect("stream opened");
+        assert_eq!(body, b"axum streaming upload");
+    }
 
     #[tokio::test]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
