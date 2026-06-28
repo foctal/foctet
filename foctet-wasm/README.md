@@ -158,6 +158,24 @@ Regenerate the fixture with:
 cargo run -p foctet-wasm --example gen_interop_fixture > foctet-wasm/tests/interop_vector.json
 ```
 
+### Browser harness
+
+To exercise the SDK in a **real browser engine** (body envelope, context
+binding, Rust→JS interop, and a full `FoctetSession` handshake + message
+roundtrip), run the harness page:
+
+```sh
+./examples/browser/serve.sh        # Unix/macOS (serve.ps1 on Windows)
+# or: npm run browser
+# then open http://localhost:8011/examples/browser/index.html
+```
+
+This builds `pkg-web/` and serves it with a dependency-free Node static server
+(`examples/browser/serve.mjs`) — no Python or editor-specific config required.
+The page reports `passed`/`failed` on screen and as `window.__FOCTET_RESULT__`
+for a headless runner. See [`../tests.md`](../tests.md) for the full
+real-environment test plan.
+
 ## Scope and security
 
 The **body envelope** functions provide body-only protection: they encrypt and
