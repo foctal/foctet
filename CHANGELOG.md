@@ -21,6 +21,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **More fuzz targets + a transport support matrix (P1, §6/§3.1).** New fuzz
+  targets cover the untrusted-input parsers beyond `frame`/`archive`:
+  `control_message`, `handshake` (the state machine fed arbitrary control
+  messages), `body_envelope`, `stream_body` (streaming header + incremental
+  decoder), and `datagram_message` (datagram/message frame open). The README gains
+  a **Transport Support Matrix** documenting each adapter's shape, API, feature
+  flag, native/browser availability, and what verifies it.
 - **Unified `SecureChannel` shape trait + conformance suite (P1, §3.1/§3.2).**
   The three transport shapes now share one application contract: the new
   `foctet_transport::SecureChannel` trait (`send_payload`/`recv_payload`) is

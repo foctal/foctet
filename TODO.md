@@ -337,7 +337,10 @@ enforcement remain.
       advertised byte-stream backend (quinn bi-streams, WebTransport bi-streams,
       muxtls, websock-mux), which needs each backend's connection setup
       (TLS certs, endpoints) wired into the harness.
-- [ ] Publish an explicit **transport support matrix** (see `README`/`SPEC §5`).
+- [x] Publish an explicit **transport support matrix**. **Done:** README
+      "Transport Support Matrix" table (adapter × shape × API × feature × native ×
+      browser × what verifies it), with notes on the browser-WebTransport gaps and
+      the conformance-suite coverage.
 
 ### 3.2 Transport shape split
 - [x] `DatagramTransport` trait + generic `SecureDatagramChannel<T>`
@@ -568,9 +571,18 @@ enforcement remain.
       `rustsec/audit-check` (v2.0.0), and `EmbarkStudios/cargo-deny-action`
       (v2.0.9) are pinned to commit SHAs with the tag in a trailing comment.
 - [ ] Miri / sanitizers where applicable.
-- [ ] Fuzzing in CI with a corpus + time budget. Add fuzz targets beyond
-      frame/archive: **body envelope, control messages, handshake state machine,
-      replay behavior, HTTP adapter parsing, transport framing**.
+- [~] Fuzz targets beyond frame/archive. **Added** (`fuzz/fuzz_targets/`):
+      `control_message` (control-plane parser), `handshake` (state machine: any
+      decodable control fed to a fresh responder + initiator), `body_envelope`
+      (one-shot envelope parse/AEAD), `stream_body` (streaming header parser +
+      incremental `StreamFrameDecoder`), `datagram_message` (datagram + message
+      frame open). Replay behaviour is exercised inside the datagram/message
+      open paths; transport framing via the frame/datagram/message targets. Each
+      smoke-ran for several seconds (hundreds of thousands–millions of execs) with
+      no crashes; all compile-gated by `clippy --workspace --all-targets`. **Still
+      open:** an HTTP-adapter-specific target (header parsing is the `http`
+      crate's job), and wiring **fuzzing into CI** with a seeded corpus + time
+      budget.
 - [ ] Coverage of all transport integrations; mutation/negative protocol tests.
 - [ ] Cross-implementation (independent decoder) interop tests.
 - [ ] Vulnerability disclosure policy + security contact (started in

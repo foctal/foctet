@@ -81,6 +81,37 @@ Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
   is pending the required independent cryptographic review (see `SECURITY.md`).
 - An independent cryptographic review and a normative, versioned wire spec.
 
+## Transport Support Matrix
+
+Foctet protects three transport **shapes**, each with a raw transport trait and a
+secure channel. All channels share one application contract via the
+`foctet_transport::SecureChannel` trait, and a shared conformance suite
+(`foctet-transport/tests/conformance.rs`) runs the same checks against all three.
+
+| Adapter | Shape | API (`foctet_transport`) | Feature | Native | Browser (wasm) | Verified by |
+| --- | --- | --- | --- | --- | --- | --- |
+| Any byte stream (TCP, …) | byte stream | `TokioTransportBuilder` / `FuturesTransportBuilder` | `runtime-tokio` / `runtime-futures` | ✅ | via futures-io | conformance suite (duplex) |
+| QUIC bidirectional stream | byte stream | `quinn` | `transport-quinn` | ✅ | — | example |
+| WebTransport bidirectional stream | byte stream | `webtrans` | `transport-webtrans` | ✅ | — | example |
+| Multiplexed WebSocket | byte stream | `websock::*_secure_channel*` | `transport-websock-mux` | ✅ | — | example |
+| muxTLS | byte stream | `muxtls` | `transport-muxtls` | ✅ | — | example |
+| Raw WebSocket message | message | `websock::WebsockMessageTransport` | `transport-websock` | ✅ | ✅ (`websock-wasm`) | loopback roundtrip + conformance |
+| Generic message | message | `MessageTransport` + `SecureMessageChannel` | — | ✅ | ✅ | conformance suite |
+| QUIC datagram | datagram | `quinn::QuinnDatagramChannel` | `transport-quinn` | ✅ | — | real-connection roundtrip |
+| Raw UDP datagram | datagram | `udp::UdpDatagramTransport` (opt-in anti-amplification) | `runtime-tokio` | ✅ | — | real-socket roundtrip |
+| Generic datagram | datagram | `DatagramTransport` + `SecureDatagramChannel` | — | ✅ | — | conformance + rekey-over-datagram |
+| Browser session (JS owns the socket) | message / datagram | `foctet-wasm` `FoctetSession` | — | — | ✅ | native-tested inner logic |
+
+Notes:
+
+- **Browser WebTransport** (native and browser) and a **browser-WebTransport
+  datagram** adapter are not yet provided as Rust adapters; in the browser, the
+  WASM `FoctetSession` covers WebTransport at the crypto layer with JS owning the
+  socket.
+- The conformance suite currently runs against in-memory message/datagram
+  channels and a byte-stream duplex; wiring every real byte-stream backend (quinn
+  bi-streams, WebTransport, muxTLS, WebSocket-mux) into it is still open.
+
 ## Quick Start
 
 For async stream transports, the recommended path is `foctet-transport`:
