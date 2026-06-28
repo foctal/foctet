@@ -324,10 +324,19 @@ enforcement remain.
 ## 3. P1 — Transports (finish each; don't broaden claims)
 
 ### 3.1 Byte-stream conformance suite
-- [ ] One shared conformance test suite run against **every** byte-stream adapter:
-      TCP, quinn bi-streams, WebTransport bi-streams, multiplexed WebSocket.
-- [ ] Currently only in-memory split I/O + a couple of adapters are tested; add
-      runnable integration tests per advertised adapter.
+- [x] One shared conformance suite run against the three transport **shapes** via
+      the unified `SecureChannel` trait. **Done:** `foctet-transport/tests/conformance.rs`
+      runs the same checks (bidirectional round trip, ordering, large payload)
+      over an in-memory message channel, an in-memory datagram channel, and a
+      byte-stream channel (`TokioTransportBuilder` over `tokio::io::duplex`), so
+      the shapes stay behaviourally consistent.
+- [~] Per-adapter runnable integration tests. The shared suite covers the three
+      shapes; individual real-connection roundtrips already exist for several
+      adapters (quinn datagram, raw-UDP, websock message, plain-WebSocket
+      loopback). **Still open:** running the shared suite against *every*
+      advertised byte-stream backend (quinn bi-streams, WebTransport bi-streams,
+      muxtls, websock-mux), which needs each backend's connection setup
+      (TLS certs, endpoints) wired into the harness.
 - [ ] Publish an explicit **transport support matrix** (see `README`/`SPEC §5`).
 
 ### 3.2 Transport shape split
@@ -349,12 +358,16 @@ enforcement remain.
       `transport-websock-mux`, `foctet-transport` compiles for
       `wasm32-unknown-unknown` with `transport-websock` (a Rust/wasm front-end can
       run a `SecureMessageChannel` over a browser `WebSocket` with no JS glue),
-      and CI gates that wasm build. **Still open:** the `ByteStream` marker shape
-      below.
-- [~] `ByteStream` shape trait. The byte-stream secure path already exists
-      (`FoctetFramed`/`FoctetStream` over `PollIo`, plus the Tokio/Futures
-      builders); a thin `ByteStream` marker trait unifying it with the other two
-      shapes under a shared conformance suite is still open (ties into §3.1).
+      and CI gates that wasm build.
+- [x] `ByteStream` shape trait + unified channel abstraction. **Done**
+      (`foctet-transport/src/shape.rs`): `ByteStreamTransport` is the byte-stream
+      marker (any `futures_io::AsyncRead + AsyncWrite + Unpin`), the third shape
+      alongside `MessageTransport`/`DatagramTransport`. More usefully, the new
+      `SecureChannel` trait (`send_payload`/`recv_payload`) unifies the three at
+      the application-payload level and is implemented by `TokioTransportChannel`,
+      `FuturesTransportChannel`, `SecureMessageChannel`, and
+      `SecureDatagramChannel` — so generic code and the shared conformance suite
+      (§3.1) run over any shape.
 
 ### 3.3 Datagram support
 - [x] Datagram encoder/decoder: `foctet_core::datagram::DatagramEndpoint`

@@ -64,6 +64,7 @@ mod error;
 #[cfg(feature = "runtime-futures")]
 mod futures;
 pub mod message;
+pub mod shape;
 #[cfg(feature = "runtime-tokio")]
 mod tokio;
 
@@ -85,5 +86,8 @@ pub use error::TransportChannelError;
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
 pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};
+#[cfg(feature = "runtime-futures")]
+pub use shape::ByteStreamTransport;
+pub use shape::SecureChannel;
 #[cfg(feature = "runtime-tokio")]
 pub use tokio::{DEFAULT_HANDSHAKE_TIMEOUT, TokioTransportBuilder, TokioTransportChannel};

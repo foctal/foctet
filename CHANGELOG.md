@@ -21,6 +21,17 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Unified `SecureChannel` shape trait + conformance suite (P1, §3.1/§3.2).**
+  The three transport shapes now share one application contract: the new
+  `foctet_transport::SecureChannel` trait (`send_payload`/`recv_payload`) is
+  implemented by the byte-stream channels (`TokioTransportChannel`,
+  `FuturesTransportChannel`), `SecureMessageChannel`, and
+  `SecureDatagramChannel`, so generic code runs over any shape. A
+  `ByteStreamTransport` marker names the byte-stream shape alongside
+  `MessageTransport` / `DatagramTransport`. A shared conformance suite
+  (`tests/conformance.rs`) runs the same checks (bidirectional round trip,
+  ordering, larger payload) against all three shapes, keeping them behaviourally
+  consistent.
 - **Turn-key streaming-body framework wiring (P1, §4).** `foctet_core::StreamFrameDecoder`
   (+ `StreamItem`) reassembles a streaming body's self-delimiting frames from
   arbitrarily split byte chunks, so the stream works over any byte transport. On
