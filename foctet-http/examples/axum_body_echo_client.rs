@@ -1,12 +1,17 @@
-// Low-level body-only demo: it uses the deprecated stateless `seal_request`
-// path, which has no replay protection or HTTP-context binding. For production,
-// use the `*_with_context` API with a `ReplayStore` (see the workers-echo
-// example and the crate docs).
-#![allow(deprecated)]
+// Protected-context echo client: it uses the production-recommended
+// `seal_request_with_context` / `open_response_with_context` path. The request
+// carrier (message-id/timestamp/expiry) travels in `x-foctet-*` headers and is
+// bound into the AEAD together with the method/path/query, so a captured
+// request cannot be replayed onto a different route or re-sent after expiry.
+//
+// Only the body bytes are encrypted; the surrounding HTTP metadata stays
+// visible. Authenticate the outer transport (TLS) separately.
 
 use foctet_http::{
+    ContextBinding, ContextCarrier, DEFAULT_CONTEXT_TTL_SECS, DEFAULT_MAX_CLOCK_SKEW_SECS,
     HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer,
     http::{self},
+    unix_now_secs,
 };
 use reqwest::Client;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -24,14 +29,21 @@ async fn main() {
     ));
     let opener = HttpOpener::new(HttpOpenOptions::new(CLIENT_SECRET_KEY));
 
+    let now = unix_now_secs();
+    let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+    // Remember our request id so we can confirm the response answers it.
+    let request_message_id = carrier.message_id;
+
     let plaintext_request = b"hello axum".to_vec();
     let encrypted_request = sealer
-        .seal_request(
+        .seal_request_with_context(
             http::Request::builder()
                 .method("POST")
                 .uri(SERVER_URL)
                 .body(plaintext_request)
                 .expect("build request"),
+            carrier,
+            ContextBinding::default(),
         )
         .expect("seal request");
 
@@ -59,10 +71,20 @@ async fn main() {
     }
 
     let decrypted_response = opener
-        .open_response(response_builder.body(body).expect("build response"))
+        .open_response_with_context(
+            response_builder.body(body).expect("build response"),
+            unix_now_secs(),
+            DEFAULT_MAX_CLOCK_SKEW_SECS,
+        )
         .expect("open response");
 
+    // The response carrier echoes the request id it answers.
+    let response_carrier =
+        ContextCarrier::from_headers(decrypted_response.headers()).expect("response carrier");
+    let answered = response_carrier.request_message_id == Some(request_message_id);
+
     println!("status: {}", decrypted_response.status());
+    println!("answers our request id: {answered}");
     println!(
         "x-foctet-example: {}",
         decrypted_response
