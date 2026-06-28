@@ -102,10 +102,17 @@ tested, and independently reviewed:
    are still pending.
 4. **WASM/TypeScript SDK (partial).** The `foctet-wasm` crate ships a
    `wasm-bindgen` API for the body envelope (seal/open, context-bound variants,
-   `KeyPair`) with generated `.d.ts`, Node/browser/bundler builds, and a Node
-   interop test that opens Rust-produced envelopes. Still pending: a published
-   npm package, browser-runner CI, framed-session/handshake APIs over WASM, and
-   host-backed (non-extractable) key handling.
+   `KeyPair`) **and** a framed `FoctetSession` (authenticated handshake plus
+   ordered, replay-protected `sealMessage`/`openMessage` and a datagram mode),
+   with generated `.d.ts`, Node/browser/bundler builds, a Node interop test that
+   opens Rust-produced envelopes, and an in-browser runtime harness
+   (`foctet-wasm/examples/browser/index.html`). **WASM clock limitation:**
+   `wasm32-unknown-unknown` has no monotonic clock, so the *age-based* rekey
+   threshold is disabled there; the frame-count and byte-count thresholds still
+   apply, and a long-lived WASM session should drive rekey explicitly (in-session
+   rekey is not yet carried over the WASM message API). Still pending: a published
+   npm package, a headless browser-runner test wired into CI, and host-backed
+   (non-extractable) key handling.
 5. **Streaming HTTP bodies (partial).** A chunked streaming mode now exists
    (`foctet_core::body_stream`, plus `foctet_http`'s `HttpStreamSealer` /
    `HttpStreamOpener`): per-chunk AEAD with unique nonces, an authenticated

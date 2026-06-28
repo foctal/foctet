@@ -7,6 +7,8 @@
     "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
     "build:web": "wasm-pack build --target web --out-dir pkg-web",
     "build:bundler": "wasm-pack build --target bundler --out-dir pkg",
-    "test": "npm run build:node && node tests/node_interop.cjs"
+    "test": "npm run build:node && node tests/node_interop.cjs",
+    "browser": "npm run build:web && python3 -m http.server 8011",
+    "browser:harness": "echo 'open http://localhost:8011/examples/browser/index.html after `npm run browser`'"
   }
 }

@@ -1,7 +1,50 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
+
+use self::mono::MonoInstant;
+
+/// Monotonic clock abstraction for the age-based rekey threshold.
+///
+/// On native targets this is `std::time::Instant`. On `wasm32-unknown-unknown`
+/// there is no monotonic clock, so `Instant::now()` aborts the module; there the
+/// age-based rekey threshold is disabled (`elapsed()` always reports zero) while
+/// the frame-count and byte-count thresholds still apply, and callers are
+/// expected to drive rekey explicitly. See `SECURITY.md` for the WASM posture.
+mod mono {
+    use std::time::Duration;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Clone, Copy, Debug)]
+    pub(super) struct MonoInstant(std::time::Instant);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl MonoInstant {
+        pub(super) fn now() -> Self {
+            Self(std::time::Instant::now())
+        }
+
+        pub(super) fn elapsed(&self) -> Duration {
+            self.0.elapsed()
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[derive(Clone, Copy, Debug)]
+    pub(super) struct MonoInstant;
+
+    #[cfg(target_arch = "wasm32")]
+    impl MonoInstant {
+        pub(super) fn now() -> Self {
+            Self
+        }
+
+        pub(super) fn elapsed(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+}
 
 use crate::{
     CoreError,
@@ -80,7 +123,7 @@ pub struct Session {
     authenticated_peer_key: Option<[u8; 32]>,
     outbound_frames: u64,
     outbound_bytes: u64,
-    last_rekey_at: Instant,
+    last_rekey_at: MonoInstant,
 }
 
 impl Drop for Session {
@@ -136,7 +179,7 @@ impl Session {
                 authenticated_peer_key: None,
                 outbound_frames: 0,
                 outbound_bytes: 0,
-                last_rekey_at: Instant::now(),
+                last_rekey_at: MonoInstant::now(),
             },
             msg,
         )
@@ -165,7 +208,7 @@ impl Session {
             authenticated_peer_key: None,
             outbound_frames: 0,
             outbound_bytes: 0,
-            last_rekey_at: Instant::now(),
+            last_rekey_at: MonoInstant::now(),
         }
     }
 
@@ -255,7 +298,7 @@ impl Session {
                 self.can_rekey = false;
                 self.peer_authenticated = authenticated_peer.is_some();
                 self.authenticated_peer_key = authenticated_peer;
-                self.last_rekey_at = Instant::now();
+                self.last_rekey_at = MonoInstant::now();
 
                 let server_binding = server_hello_binding(
                     *eph_public,
@@ -313,7 +356,7 @@ impl Session {
                 self.can_rekey = true;
                 self.peer_authenticated = authenticated_peer.is_some();
                 self.authenticated_peer_key = authenticated_peer;
-                self.last_rekey_at = Instant::now();
+                self.last_rekey_at = MonoInstant::now();
                 Ok(None)
             }
             (
@@ -354,7 +397,7 @@ impl Session {
                 self.ratchet_root = new_root;
                 self.install_new_active_key(next);
                 self.can_rekey = true;
-                self.last_rekey_at = Instant::now();
+                self.last_rekey_at = MonoInstant::now();
                 Ok(None)
             }
             (_, SessionState::Active, ControlMessage::Error { .. }) => Ok(None),
@@ -450,7 +493,7 @@ impl Session {
 
         self.outbound_frames = 0;
         self.outbound_bytes = 0;
-        self.last_rekey_at = Instant::now();
+        self.last_rekey_at = MonoInstant::now();
 
         let transcript_binding =
             rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);

@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **WASM session abort on `Instant::now()` (P1, §5).** Creating or rekeying a
+  `Session` called `std::time::Instant::now()`, which aborts the module on
+  `wasm32-unknown-unknown` (no monotonic clock). This crashed the WASM
+  `FoctetSession` handshake at runtime even though native tests passed. The
+  session now uses an internal monotonic-clock abstraction: native targets keep
+  `std::time::Instant`; on `wasm32` the *age-based* rekey threshold is disabled
+  (frame-count and byte-count thresholds still apply). Caught by the new
+  in-browser harness; verified in Node and a real browser engine.
+
+### Added
+
+- **In-browser WASM runtime harness (P1, §5).**
+  `foctet-wasm/examples/browser/index.html` exercises the SDK in a real browser
+  engine: body-envelope roundtrip, context binding, Rust→JS wire compatibility
+  (the same `interop_vector.json` fixture as the Node test), and a full in-page
+  `FoctetSession` authenticated handshake + message exchange. Serve via
+  `npm run browser` (builds `pkg-web/` and starts a static server). Documented in
+  `tests.md` as the manual browser real-environment test pending a headless CI
+  runner.
+
 ### Deprecated
 
 - **Stateless full-HTTP-request seal/open APIs (P0, §1.3).** The body-only
