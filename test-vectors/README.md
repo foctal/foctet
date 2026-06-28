@@ -30,6 +30,17 @@ This directory contains deterministic vectors for interoperability and regressio
   - `single_archive_hex`: hex
   - `manifest_hex`: hex
   - `parts_hex`: array of hex strings
+- `rekey-v0.json` — one deterministic DH-ratchet rekey step (locks the in-session
+  rekey key schedule: `derive_ratchet_root` then `dh_ratchet_step`)
+  - `session_salt_hex`, `shared_secret_hex`: 32-byte hex (ratchet-root inputs)
+  - `ratchet_root_hex`: 32-byte hex (`derive_ratchet_root` output)
+  - `rekey_eph_private_hex`, `rekey_eph_public_hex`: 32-byte hex (the rekeying
+    side's fresh ephemeral)
+  - `peer_ratchet_public_hex`: 32-byte hex (the peer's current ratchet public)
+  - `rekey_dh_hex`: 32-byte hex (`X25519(rekey_eph_private, peer_ratchet_public)`)
+  - `new_key_id`: integer
+  - `new_ratchet_root_hex`, `rekey_key_c2s_hex`, `rekey_key_s2c_hex`: 32-byte hex
+    (`dh_ratchet_step` outputs)
 
 The archive vector is generated with fixed `ArchiveBuildSecrets` so repeated regeneration is byte-for-byte stable across runs.
 
