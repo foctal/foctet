@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Two-process transport examples + real-environment runbook (`tests.md`).**
+  `quinn_split` and `websock_split` gained a `--role server|client|loopback`
+  (plus `--addr`, `--tls-cert`/`--tls-key`, and a client `--wrong-identity` flag
+  for the identity-mismatch negative test), so the QUIC and WebSocket adapters
+  can be exercised across two processes / two hosts instead of only an in-process
+  loopback. The axum body-echo client gained `--replay` (re-sends the identical
+  sealed request to demonstrate the HTTP 409 replay rejection). `tests.md` is a
+  step-by-step runbook with exact commands, expected output, and negative tests
+  for every real-environment area; the verified flows (QUIC, WebSocket, axum
+  replay, WASM browser) are marked as such.
+
 ### Fixed
 
 - **WASM session abort on `Instant::now()` (P1, §5).** Creating or rekeying a

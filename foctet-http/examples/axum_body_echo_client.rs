@@ -47,16 +47,24 @@ async fn main() {
         )
         .expect("seal request");
 
-    let mut request_builder = client.post(SERVER_URL);
-    for (name, value) in encrypted_request.headers() {
-        request_builder = request_builder.header(name, value);
-    }
+    // Capture the sealed request (headers + body) so we can optionally re-send the
+    // exact same bytes to demonstrate replay rejection.
+    let sealed_headers = encrypted_request.headers().clone();
+    let sealed_body = encrypted_request.body().clone();
 
-    let response = request_builder
-        .body(encrypted_request.body().clone())
-        .send()
-        .await
-        .expect("send request");
+    let send_sealed = |client: &Client| {
+        let mut request_builder = client.post(SERVER_URL);
+        for (name, value) in &sealed_headers {
+            request_builder = request_builder.header(name, value);
+        }
+        request_builder.body(sealed_body.clone()).send()
+    };
+
+    // `--replay` re-sends the identical sealed request; the server's ReplayStore
+    // must reject the second one with HTTP 409 (single-use message id).
+    let replay = std::env::args().any(|arg| arg == "--replay");
+
+    let response = send_sealed(&client).await.expect("send request");
 
     let status = response.status();
     let version = response.version();
@@ -106,6 +114,18 @@ async fn main() {
         String::from_utf8_lossy(decrypted_response.body())
     );
     println!("note: request path, method, and headers are still outer HTTP metadata.");
+
+    if replay {
+        let replayed = send_sealed(&client).await.expect("send replay");
+        let replay_status = replayed.status();
+        println!("replay status: {replay_status}");
+        if replay_status == reqwest::StatusCode::CONFLICT {
+            println!("replay correctly rejected with 409 Conflict");
+        } else {
+            println!("UNEXPECTED: replay was not rejected with 409");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn demo_public_key(secret_key: [u8; 32]) -> [u8; 32] {

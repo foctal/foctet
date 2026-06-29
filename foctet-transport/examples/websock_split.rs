@@ -2,7 +2,7 @@ use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
 use foctet_transport::adapter::SplitIo;
 use foctet_transport::{TokioTransportBuilder, TransportConfig};
@@ -14,14 +14,40 @@ use websock_tungstenite_mux::{ClientBuilder, ServerBuilder};
 const STREAM_COUNT: usize = 2;
 const STREAM_TAG_LEN: usize = 4;
 
+/// How to run the example.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum Role {
+    /// Run both peers in one process over the loopback (quick smoke test).
+    #[default]
+    Loopback,
+    /// Run only the server: bind `--addr` and serve clients until Ctrl+C.
+    Server,
+    /// Run only the client: connect to a server at `--addr`.
+    Client,
+}
+
 #[derive(Debug, Parser)]
 struct Args {
-    /// TLS certificate path (PEM/DER). Use together with --tls-key.
+    /// Which side to run. `loopback` (default) runs both in one process; use
+    /// `server` and `client` in separate terminals / on two hosts.
+    #[arg(long, value_enum, default_value_t = Role::Loopback)]
+    role: Role,
+    /// Server: address to bind. Client: address to connect to.
+    /// Ignored for `loopback`. Default `127.0.0.1:4433`.
+    #[arg(long, default_value = "127.0.0.1:4433")]
+    addr: SocketAddr,
+    /// TLS certificate path (PEM/DER). Required for `server`/`client` roles
+    /// (server presents it; client trusts it). Use together with --tls-key on
+    /// the server.
     #[arg(long)]
     tls_cert: Option<PathBuf>,
-    /// TLS private key path (PEM/DER). Use together with --tls-cert.
+    /// TLS private key path (PEM/DER). Required for the `server` role.
     #[arg(long)]
     tls_key: Option<PathBuf>,
+    /// Client only: present an identity the server did NOT pin, to demonstrate
+    /// that identity-mismatch is rejected (the handshake must fail).
+    #[arg(long, default_value_t = false)]
+    wrong_identity: bool,
 }
 
 fn auth_config_pair(idx: usize) -> (SessionAuthConfig, SessionAuthConfig) {
@@ -36,6 +62,27 @@ fn auth_config_pair(idx: usize) -> (SessionAuthConfig, SessionAuthConfig) {
         .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
         .require_peer_authentication(true);
     (client, server)
+}
+
+fn server_auth_configs() -> Vec<SessionAuthConfig> {
+    (0..STREAM_COUNT)
+        .map(|idx| auth_config_pair(idx).1)
+        .collect()
+}
+
+fn client_auth_configs(wrong_identity: bool) -> Vec<SessionAuthConfig> {
+    (0..STREAM_COUNT)
+        .map(|idx| {
+            let client = auth_config_pair(idx).0;
+            if wrong_identity {
+                // Replace the local identity with one the server never pinned, so
+                // the server's `require_peer_authentication` check must reject.
+                client.with_local_identity(IdentityKeyPair::from_secret_key_bytes([0xFF; 32]))
+            } else {
+                client
+            }
+        })
+        .collect()
 }
 
 fn find_free_tcp_addr() -> Result<SocketAddr, Box<dyn Error + Send + Sync>> {
@@ -64,6 +111,21 @@ fn resolve_cert_pair(
         )?),
         _ => Err("both --tls-cert and --tls-key must be provided together".into()),
     }
+}
+
+fn load_cert_chain(
+    path: &std::path::Path,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, Box<dyn Error + Send + Sync>> {
+    let data = std::fs::read(path)?;
+    if path.extension().is_some_and(|ext| ext == "der") {
+        return Ok(vec![rustls::pki_types::CertificateDer::from(data)]);
+    }
+    let mut reader = std::io::BufReader::new(&data[..]);
+    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    if certs.is_empty() {
+        return Err("no certificate found in tls-cert".into());
+    }
+    Ok(certs)
 }
 
 fn build_client_tls(
@@ -102,31 +164,12 @@ fn take_tagged_auth(
     Ok((idx, auth))
 }
 
-async fn run_server(
-    addr: SocketAddr,
+/// Serve one accepted websock-mux session: bind a Foctet session per raw stream,
+/// echo each application payload back uppercased-tagged.
+async fn serve_session(
+    session: websock_tungstenite_mux::Session,
     server_auth_configs: Vec<SessionAuthConfig>,
-    server_tls: rustls::ServerConfig,
-    ready: oneshot::Sender<Result<(), String>>,
-    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let server = match ServerBuilder::new()
-        .with_addr(addr)
-        .with_default_alpn()
-        .with_tls_config(server_tls)
-        .build()
-        .await
-    {
-        Ok(server) => {
-            let _ = ready.send(Ok(()));
-            server
-        }
-        Err(err) => {
-            let _ = ready.send(Err(err.to_string()));
-            return Err(Box::new(err));
-        }
-    };
-    let session = server.accept().await?;
-
     let config = TransportConfig::default().with_app_stream_id(1);
     let builder = TokioTransportBuilder::new().with_config(config);
     let mut server_auth_configs = server_auth_configs
@@ -168,9 +211,6 @@ async fn run_server(
     while let Some(result) = tasks.join_next().await {
         result??;
     }
-
-    let _ = shutdown.await;
-
     Ok(())
 }
 
@@ -229,34 +269,115 @@ async fn run_client(
     Ok(())
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let args = Args::parse();
-    let (client_auth_configs, server_auth_configs): (Vec<_>, Vec<_>) =
-        (0..STREAM_COUNT).map(auth_config_pair).unzip();
-    let (cert_chain, key) = resolve_cert_pair(&args)?;
+/// Loopback: both peers in one process over an ephemeral port (quick smoke test).
+async fn run_loopback(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let (cert_chain, key) = resolve_cert_pair(args)?;
     let addr = find_free_tcp_addr()?;
-
     let client_tls = build_client_tls(&cert_chain)?;
     let server_tls = build_server_tls(cert_chain, key)?;
 
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let server_task = tokio::spawn(run_server(
-        addr,
-        server_auth_configs,
-        server_tls,
-        ready_tx,
-        shutdown_rx,
-    ));
+    let server_task = tokio::spawn(async move {
+        let server = match ServerBuilder::new()
+            .with_addr(addr)
+            .with_default_alpn()
+            .with_tls_config(server_tls)
+            .build()
+            .await
+        {
+            Ok(server) => {
+                let _ = ready_tx.send(Ok::<(), String>(()));
+                server
+            }
+            Err(err) => {
+                let _ = ready_tx.send(Err(err.to_string()));
+                return Err(Box::new(err) as Box<dyn Error + Send + Sync>);
+            }
+        };
+        let session = server.accept().await?;
+        serve_session(session, server_auth_configs()).await?;
+        let _ = shutdown_rx.await;
+        Ok(())
+    });
     ready_rx
         .await
         .map_err(|_| "websock server readiness channel closed")??;
 
-    run_client(addr, client_auth_configs, client_tls).await?;
+    run_client(addr, client_auth_configs(false), client_tls).await?;
     let _ = shutdown_tx.send(());
     server_task.await??;
 
     println!("websock multi-stream foctet E2EE example finished");
     Ok(())
+}
+
+/// Server role: bind `addr` and serve incoming sessions until Ctrl+C.
+async fn run_server_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if args.tls_cert.is_none() || args.tls_key.is_none() {
+        return Err(
+            "the `server` role requires --tls-cert and --tls-key (e.g. devcert/localhost.crt \
+             and devcert/localhost.key); the client must trust the same cert"
+                .into(),
+        );
+    }
+    let (cert_chain, key) = resolve_cert_pair(args)?;
+    let server_tls = build_server_tls(cert_chain, key)?;
+    let server = ServerBuilder::new()
+        .with_addr(args.addr)
+        .with_default_alpn()
+        .with_tls_config(server_tls)
+        .build()
+        .await?;
+    println!(
+        "websock server listening on wss://{} (Ctrl+C to stop)",
+        args.addr
+    );
+
+    loop {
+        let session = match server.accept().await {
+            Ok(session) => session,
+            Err(err) => {
+                eprintln!("accept failed: {err}");
+                continue;
+            }
+        };
+        println!("accepted a websock session");
+        match serve_session(session, server_auth_configs()).await {
+            Ok(()) => println!("served session"),
+            Err(err) => eprintln!("error serving session: {err}"),
+        }
+    }
+}
+
+/// Client role: connect to a server at `addr`.
+async fn run_client_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let Some(cert) = &args.tls_cert else {
+        return Err(
+            "the `client` role requires --tls-cert (the server's cert, to trust it; \
+             e.g. devcert/localhost.crt)"
+                .into(),
+        );
+    };
+    let cert_chain = load_cert_chain(cert)?;
+    let client_tls = build_client_tls(&cert_chain)?;
+    println!("websock client connecting to wss://{}", args.addr);
+    run_client(
+        args.addr,
+        client_auth_configs(args.wrong_identity),
+        client_tls,
+    )
+    .await?;
+    println!("websock client finished");
+    Ok(())
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let args = Args::parse();
+    match args.role {
+        Role::Loopback => run_loopback(&args).await,
+        Role::Server => run_server_role(&args).await,
+        Role::Client => run_client_role(&args).await,
+    }
 }
