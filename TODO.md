@@ -330,13 +330,15 @@ enforcement remain.
       over an in-memory message channel, an in-memory datagram channel, and a
       byte-stream channel (`TokioTransportBuilder` over `tokio::io::duplex`), so
       the shapes stay behaviourally consistent.
-- [~] Per-adapter runnable integration tests. The shared suite covers the three
-      shapes; individual real-connection roundtrips already exist for several
-      adapters (quinn datagram, raw-UDP, websock message, plain-WebSocket
-      loopback). **Still open:** running the shared suite against *every*
-      advertised byte-stream backend (quinn bi-streams, WebTransport bi-streams,
-      muxtls, websock-mux), which needs each backend's connection setup
-      (TLS certs, endpoints) wired into the harness.
+- [x] Per-adapter runnable integration tests. **Done:** the shared suite now
+      also runs over a **real loopback connection for every advertised
+      byte-stream backend** — quinn bi-streams, WebTransport bi-streams, muxtls,
+      and websock-mux — each with a self-signed localhost certificate and the
+      native Foctet handshake (`foctet-transport/tests/conformance.rs`,
+      feature-gated per adapter). Individual real-connection roundtrips for the
+      other shapes already existed (quinn datagram, raw-UDP, websock message).
+      This is what exposed (and now regression-guards) the async
+      duplicate-send-on-suspended-flush bug fixed in `secure_channel.rs`.
 - [x] Publish an explicit **transport support matrix**. **Done:** README
       "Transport Support Matrix" table (adapter × shape × API × feature × native ×
       browser × what verifies it), with notes on the browser-WebTransport gaps and
@@ -431,16 +433,24 @@ enforcement remain.
       `websock::WebSocketConnection`, compiles for `wasm32` under
       `transport-websock` (browser `websock-wasm` backend), and drives a
       `SecureMessageChannel` directly from Rust with no JS glue (CI-gated wasm
-      build). **Still open:** a headless browser-runner *runtime* test and a
-      documented mux/backpressure definition.
+      build). A **headless browser-runner runtime test** now exists at the
+      crypto layer: `foctet-wasm/tests/browser.rs` runs the full
+      `FoctetSession` handshake + message exchange in real headless Chrome
+      (CI job `wasm-browser-test`). **Still open:** a browser test driving a
+      real `WebSocket` connection end-to-end, and a documented
+      mux/backpressure definition.
 - [~] Browser WebTransport: the wasm `FoctetSession` (§5) protects data over
       both WebTransport **streams** (message mode: `newInitiator`/`sealMessage`)
       and WebTransport **datagrams** (datagram mode:
       `newDatagramInitiator`/`sealDatagram`, MTU-bounded via
       `DatagramEndpoint`, configurable `maxDatagramSize`). JS owns the transport;
       a session is locked to one framing mode so message/datagram traffic can
-      never share a `(key_id, stream_id)` nonce space. **Still open:** a native
-      WebTransport integration test and a headless browser-runner test.
+      never share a `(key_id, stream_id)` nonce space. The datagram-mode
+      session now has a **headless-Chrome runtime test**
+      (`foctet-wasm/tests/browser.rs::datagram_session_roundtrip`, CI job
+      `wasm-browser-test`); the native WebTransport byte-stream adapter is
+      covered by the real-connection conformance suite (§3.1). **Still open:**
+      a browser test driving a real WebTransport connection end-to-end.
 
 ---
 
@@ -511,7 +521,17 @@ enforcement remain.
       (`tests/interop_vector.json`) — real cross-language wire compatibility.
 - [ ] Publish the npm package (currently a private dev harness;
       `pkg-*` are build artifacts).
-- [ ] Browser-runner integration test in CI (wasm-bindgen-test / headless).
+- [x] Browser-runner integration test in CI (wasm-bindgen-test / headless).
+      **Done:** `foctet-wasm/tests/browser.rs` runs 4 `wasm-bindgen-test`
+      tests inside a real headless Chrome (body-envelope roundtrip, context
+      binding enforced, full authenticated `FoctetSession` handshake +
+      bidirectional messages + replay rejection, datagram-mode roundtrip +
+      wrong-mode rejection). Locally: `wasm-pack test --headless --chrome
+      foctet-wasm` (if wasm-pack's auto-downloaded chromedriver mismatches the
+      installed Chrome, point `CHROMEDRIVER` at a matching driver from Chrome
+      for Testing). CI: the `wasm-browser-test` job uses the runner's
+      preinstalled, version-matched Chrome + chromedriver. Verified locally:
+      4/4 pass in headless Chrome 149.
 - [x] Framed-session / handshake APIs over WASM. **Done**
       (`foctet-wasm/src/session.rs`): `FoctetSession` runs the native
       authenticated handshake (`newInitiator`/`newResponder` + `AuthConfig`,
@@ -529,7 +549,14 @@ enforcement remain.
       unavailable: WebCrypto has no portable non-extractable X25519/Ed25519 key
       type, so `KeyPair`/`IdentityKeyPair` expose raw bytes (README "Scope and
       security"). Revisit if/when a platform offers a usable non-extractable path.
-- [ ] Replace `interop/minimal_decoder.ts` (header-only) references with the SDK.
+- [x] Replace `interop/minimal_decoder.ts` (header-only) references with the SDK.
+      **Done** (`interop/README.md`): full seal/open from JS/TS now points at
+      the `foctet-wasm` SDK (Node + headless-browser tested); the minimal
+      decoder is kept, explicitly repositioned as the *independent*
+      header-level check (it is not generated from the Rust implementation,
+      so it can catch systematic encode/decode bugs a Rust-derived artifact
+      would reproduce — a stepping stone toward the §7 independent-vector
+      verification).
 
 ---
 
@@ -571,18 +598,23 @@ enforcement remain.
       `rustsec/audit-check` (v2.0.0), and `EmbarkStudios/cargo-deny-action`
       (v2.0.9) are pinned to commit SHAs with the tag in a trailing comment.
 - [ ] Miri / sanitizers where applicable.
-- [~] Fuzz targets beyond frame/archive. **Added** (`fuzz/fuzz_targets/`):
-      `control_message` (control-plane parser), `handshake` (state machine: any
-      decodable control fed to a fresh responder + initiator), `body_envelope`
-      (one-shot envelope parse/AEAD), `stream_body` (streaming header parser +
-      incremental `StreamFrameDecoder`), `datagram_message` (datagram + message
-      frame open). Replay behaviour is exercised inside the datagram/message
-      open paths; transport framing via the frame/datagram/message targets. Each
-      smoke-ran for several seconds (hundreds of thousands–millions of execs) with
-      no crashes; all compile-gated by `clippy --workspace --all-targets`. **Still
-      open:** an HTTP-adapter-specific target (header parsing is the `http`
-      crate's job), and wiring **fuzzing into CI** with a seeded corpus + time
-      budget.
+- [x] Fuzz targets beyond frame/archive + fuzzing in CI. **Added**
+      (`fuzz/fuzz_targets/`): `control_message` (control-plane parser),
+      `handshake` (state machine: any decodable control fed to a fresh
+      responder + initiator), `body_envelope` (one-shot envelope parse/AEAD),
+      `stream_body` (streaming header parser + incremental
+      `StreamFrameDecoder`), `datagram_message` (datagram + message frame
+      open). Replay behaviour is exercised inside the datagram/message open
+      paths; transport framing via the frame/datagram/message targets. All
+      compile-gated by `clippy --workspace --all-targets` on every PR.
+      **CI wiring done:** `.github/workflows/fuzz.yml` runs every target on a
+      weekly schedule (and `workflow_dispatch`, budget overridable) with a
+      per-target libFuzzer time budget, seeded from the committed corpus
+      `fuzz/seeds/<target>/` (valid frames/envelopes/archives/control messages
+      generated by `foctet/examples/gen_fuzz_seeds.rs`, sealed with the
+      targets' fixed keys so deep open paths run); crash artifacts are uploaded
+      on failure. An HTTP-adapter-specific target remains intentionally out of
+      scope (header parsing is the `http` crate's job).
 - [ ] Coverage of all transport integrations; mutation/negative protocol tests.
 - [ ] Cross-implementation (independent decoder) interop tests.
 - [ ] Vulnerability disclosure policy + security contact (started in
@@ -594,13 +626,35 @@ enforcement remain.
 
 ## 7. P2 — Stability, spec, scope
 
-- [ ] Complete **normative** spec matching code + vectors; version it.
-- [ ] Version-negotiation / compatibility / deprecation policy.
+- [~] Complete **normative** spec matching code + vectors; version it. The
+      spec's §0 implementation-status and §5.1 transport statements now match
+      the shipped surface, v0's deliberate *absence* of in-band negotiation is
+      stated normatively, and the threat-model section points at the full
+      document. **Still open:** a front-to-back normative pass (replace the
+      remaining "(draft)" markers, define conformance requirements per
+      section) and a spec version stamp decoupled from the crate version.
+- [x] Version-negotiation / compatibility / deprecation policy. **Done:**
+      `docs/POLICIES.md` §1 — what versions exist (wire / profile / crates),
+      the Draft-v0 rules (breaking allowed, vectors must move with the wire,
+      deprecation cycle before removal), the normative no-negotiation rule for
+      v0 with downgrade-resistant negotiation requirements for future
+      versions, and the v1 compatibility commitment.
 - [ ] Canonical vector suite verified by an **independent** implementation (not
       generated and checked within the same Rust workspace).
-- [ ] Full threat model doc: active MITM, endpoint compromise, relay compromise,
-      replay, rollback, metadata leakage, DoS, key loss.
-- [ ] Key lifecycle / rotation / incident-response / supported-version policy.
+      (`interop/minimal_decoder` covers the frame header independently; full
+      AEAD verification still needed.)
+- [x] Full threat model doc: active MITM, endpoint compromise, relay compromise,
+      replay, rollback, metadata leakage, DoS, key loss. **Done:**
+      `docs/THREAT_MODEL.md` (v1.0) — system/adversary model, ten threat
+      sections each with implemented defenses *and residual risks* (including
+      reordering/truncation/splicing, the WASM/JS boundary, and key loss),
+      explicit non-goals, and assurance status. Referenced from SPEC §3 and
+      SECURITY.md.
+- [x] Key lifecycle / rotation / incident-response / supported-version policy.
+      **Done:** `docs/POLICIES.md` §2 (per-key-kind lifecycle table, session
+      vs long-lived key rules, rotation and multi-recipient backup guidance)
+      and §3 (incident-response playbooks per key type, replay-store
+      compromise, monitoring signals). Supported versions: §1.2/§1.4.
 - [ ] Observability hooks (without exposing secrets).
 
 ---
