@@ -61,6 +61,25 @@ jobs:
         cargo test -p foctet-core --no-default-features --features runtime-futures --locked
         cargo test -p foctet-core --no-default-features --features runtime-tokio --locked
 
+  wasm-browser-test:
+    name: WASM browser tests (headless Chrome)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+        rustup target add wasm32-unknown-unknown
+    - name: Install wasm-pack
+      run: cargo install wasm-pack --locked
+    - name: Run in-browser tests (headless Chrome)
+      # Use the runner's preinstalled chromedriver, which matches the
+      # preinstalled Chrome; wasm-pack's auto-downloaded driver can mismatch.
+      run: |
+        export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
+        wasm-pack test --headless --chrome foctet-wasm
+
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
