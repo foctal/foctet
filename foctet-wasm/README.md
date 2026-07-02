@@ -158,6 +158,22 @@ Regenerate the fixture with:
 cargo run -p foctet-wasm --example gen_interop_fixture > foctet-wasm/tests/interop_vector.json
 ```
 
+### Headless browser tests
+
+`tests/browser.rs` runs `wasm-bindgen-test` tests in a real headless Chrome
+(body envelope, context binding, authenticated `FoctetSession` handshake +
+messages + replay rejection, datagram mode). CI runs them on every push/PR;
+locally:
+
+```sh
+wasm-pack test --headless --chrome foctet-wasm   # from the workspace root
+```
+
+If wasm-pack's auto-downloaded chromedriver is a major version ahead of your
+installed Chrome (symptom: `Error: http status: 404`), download the matching
+driver from [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+and set `CHROMEDRIVER=/path/to/chromedriver`.
+
 ### Browser harness
 
 To exercise the SDK in a **real browser engine** (body envelope, context
