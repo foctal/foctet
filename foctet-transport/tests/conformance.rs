@@ -159,3 +159,252 @@ async fn byte_stream_shape_conformance() {
         .expect("b channel");
     run_conformance(&mut a, &mut b).await;
 }
+
+// ---- Real-backend byte-stream conformance ----
+//
+// The same suite runs over a real loopback connection for every advertised
+// byte-stream backend: each test brings up the outer transport with a
+// self-signed localhost certificate, runs the native Foctet handshake over one
+// bidirectional stream, and then drives `run_conformance` end to end.
+
+#[cfg(all(feature = "runtime-tokio", feature = "transport-quinn"))]
+mod quinn_byte_stream {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::Arc;
+
+    use foctet_core::RekeyThresholds;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    use super::run_conformance;
+
+    #[tokio::test]
+    async fn quinn_byte_stream_conformance() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("self-signed cert");
+        let cert_der = CertificateDer::from(cert.cert);
+        let key_der =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let server_config = quinn::ServerConfig::with_single_cert(vec![cert_der.clone()], key_der)
+            .expect("server config");
+        let bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let server_ep = quinn::Endpoint::server(server_config, bind).expect("server endpoint");
+        let server_addr = server_ep.local_addr().expect("server addr");
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der).expect("add root");
+        let client_config =
+            quinn::ClientConfig::with_root_certificates(Arc::new(roots)).expect("client config");
+        let mut client_ep = quinn::Endpoint::client(bind).expect("client endpoint");
+        client_ep.set_default_client_config(client_config);
+
+        let server_task = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.expect("incoming");
+            let conn = incoming.await.expect("server connection");
+            (server_ep, conn)
+        });
+        let client_conn = client_ep
+            .connect(server_addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("client connection");
+        let (_server_ep, server_conn) = server_task.await.expect("server join");
+
+        let (client, server) = tokio::join!(
+            foctet_transport::quinn::open_secure_channel_with_handshake(
+                &client_conn,
+                RekeyThresholds::default(),
+            ),
+            foctet_transport::quinn::accept_secure_channel_with_handshake(
+                &server_conn,
+                RekeyThresholds::default(),
+            ),
+        );
+        let mut a = client.expect("client channel");
+        let mut b = server.expect("server channel");
+        run_conformance(&mut a, &mut b).await;
+    }
+}
+
+#[cfg(all(feature = "runtime-tokio", feature = "transport-muxtls"))]
+mod muxtls_byte_stream {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use foctet_core::RekeyThresholds;
+
+    use super::run_conformance;
+
+    #[tokio::test]
+    async fn muxtls_byte_stream_conformance() {
+        let (server_config, cert) =
+            muxtls::ServerConfig::self_signed_for_localhost().expect("self-signed cert");
+        let client_config =
+            muxtls::ClientConfig::with_custom_roots(vec![cert]).expect("client config");
+
+        let bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let server_ep = muxtls::Endpoint::server(bind, server_config)
+            .await
+            .expect("server endpoint");
+        let server_addr = server_ep.local_addr().expect("server addr");
+        let client_ep = muxtls::Endpoint::client(client_config);
+
+        let server_task = tokio::spawn(async move {
+            let conn = server_ep.accept().await.expect("server connection");
+            (server_ep, conn)
+        });
+        let client_conn = client_ep
+            .connect(server_addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("client connection");
+        let (_server_ep, server_conn) = server_task.await.expect("server join");
+
+        let (client, server) = tokio::join!(
+            foctet_transport::muxtls::open_secure_channel_with_handshake(
+                &client_conn,
+                RekeyThresholds::default(),
+            ),
+            foctet_transport::muxtls::accept_secure_channel_with_handshake(
+                &server_conn,
+                RekeyThresholds::default(),
+            ),
+        );
+        let mut a = client.expect("client channel");
+        let mut b = server.expect("server channel");
+        run_conformance(&mut a, &mut b).await;
+    }
+}
+
+#[cfg(all(feature = "runtime-tokio", feature = "transport-webtrans"))]
+mod webtrans_byte_stream {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use foctet_core::RekeyThresholds;
+
+    use super::run_conformance;
+
+    #[tokio::test]
+    async fn webtransport_byte_stream_conformance() {
+        let (cert_chain, key) = webtrans::tls::generate_self_signed_pair_der(vec![
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+        ])
+        .expect("self-signed cert");
+
+        // Reserve a free UDP port for the server (bind-and-release; the tiny
+        // race is acceptable for a loopback test).
+        let addr = {
+            let sock = std::net::UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                0,
+            )))
+            .expect("probe socket");
+            sock.local_addr().expect("probe addr")
+        };
+
+        let mut server = webtrans::ServerBuilder::new()
+            .with_addr(addr)
+            .with_certificate(cert_chain.clone(), key)
+            .expect("server");
+        let server_task = tokio::spawn(async move {
+            let request = server.accept().await.expect("server closed");
+            let session = request.ok().await.expect("server session");
+            (server, session)
+        });
+
+        let client = webtrans::ClientBuilder::new()
+            .with_server_certificates(cert_chain)
+            .expect("client");
+        let url =
+            url::Url::parse(&format!("https://127.0.0.1:{}", addr.port())).expect("server url");
+        let client_session = client.connect(url).await.expect("client session");
+        let (_server, server_session) = server_task.await.expect("server join");
+
+        let (client, server) = tokio::join!(
+            foctet_transport::webtrans::open_secure_channel_with_handshake(
+                &client_session,
+                RekeyThresholds::default(),
+            ),
+            foctet_transport::webtrans::accept_secure_channel_with_handshake(
+                &server_session,
+                RekeyThresholds::default(),
+            ),
+        );
+        let mut a = client.expect("client channel");
+        let mut b = server.expect("server channel");
+        run_conformance(&mut a, &mut b).await;
+    }
+}
+
+#[cfg(feature = "transport-websock-mux")]
+mod websock_mux_byte_stream {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use foctet_core::RekeyThresholds;
+
+    use super::run_conformance;
+
+    #[tokio::test]
+    async fn websocket_mux_byte_stream_conformance() {
+        let (cert_chain, key) = websock_tungstenite_mux::tls::generate_self_signed_pair_der(vec![
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+        ])
+        .expect("self-signed cert");
+
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in &cert_chain {
+            roots.add(cert.clone()).expect("add root");
+        }
+        let client_tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let server_tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)
+            .expect("server tls");
+
+        // Reserve a free TCP port (bind-and-release, same as the UDP probe).
+        let addr = {
+            let sock = std::net::TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                0,
+            )))
+            .expect("probe socket");
+            sock.local_addr().expect("probe addr")
+        };
+
+        let server = websock_tungstenite_mux::ServerBuilder::new()
+            .with_addr(addr)
+            .with_default_alpn()
+            .with_tls_config(server_tls)
+            .build()
+            .await
+            .expect("server");
+        let server_task = tokio::spawn(async move {
+            let session = server.accept().await.expect("server session");
+            (server, session)
+        });
+
+        let client = websock_tungstenite_mux::ClientBuilder::new()
+            .with_default_alpn()
+            .with_tls_config(client_tls)
+            .build();
+        let url = format!("wss://127.0.0.1:{}", addr.port());
+        let client_session = client.connect(&url).await.expect("client session");
+        let (_server, server_session) = server_task.await.expect("server join");
+
+        let (client, server) = tokio::join!(
+            foctet_transport::websock::open_secure_channel_with_handshake(
+                &client_session,
+                RekeyThresholds::default(),
+            ),
+            foctet_transport::websock::accept_secure_channel_with_handshake(
+                &server_session,
+                RekeyThresholds::default(),
+            ),
+        );
+        let mut a = client.expect("client channel");
+        let mut b = server.expect("server channel");
+        run_conformance(&mut a, &mut b).await;
+    }
+}
