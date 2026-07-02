@@ -35,6 +35,12 @@ Transport-agnostic end-to-end encryption layer for secure data transfer.
 
 See [`docs/recommended-deployments.md`](docs/recommended-deployments.md) for the recommended production composition patterns across transport E2EE, HTTP body envelopes, and archive/file delivery.
 
+Security documentation:
+
+- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — what Foctet defends against, residual risks, and explicit non-goals.
+- [`docs/POLICIES.md`](docs/POLICIES.md) — versioning/compatibility/deprecation, key lifecycle and rotation, incident response.
+- [`SECURITY.md`](SECURITY.md) — current security posture, known limitations, vulnerability reporting.
+
 ## Examples
 
 - Repository examples: [examples][examples-url]
@@ -91,10 +97,10 @@ secure channel. All channels share one application contract via the
 | Adapter | Shape | API (`foctet_transport`) | Feature | Native | Browser (wasm) | Verified by |
 | --- | --- | --- | --- | --- | --- | --- |
 | Any byte stream (TCP, …) | byte stream | `TokioTransportBuilder` / `FuturesTransportBuilder` | `runtime-tokio` / `runtime-futures` | ✅ | via futures-io | conformance suite (duplex) |
-| QUIC bidirectional stream | byte stream | `quinn` | `transport-quinn` | ✅ | — | example |
-| WebTransport bidirectional stream | byte stream | `webtrans` | `transport-webtrans` | ✅ | — | example |
-| Multiplexed WebSocket | byte stream | `websock::*_secure_channel*` | `transport-websock-mux` | ✅ | — | example |
-| muxTLS | byte stream | `muxtls` | `transport-muxtls` | ✅ | — | example |
+| QUIC bidirectional stream | byte stream | `quinn` | `transport-quinn` | ✅ | — | conformance suite (real connection) + example |
+| WebTransport bidirectional stream | byte stream | `webtrans` | `transport-webtrans` | ✅ | — | conformance suite (real connection) + example |
+| Multiplexed WebSocket | byte stream | `websock::*_secure_channel*` | `transport-websock-mux` | ✅ | — | conformance suite (real connection) + example |
+| muxTLS | byte stream | `muxtls` | `transport-muxtls` | ✅ | — | conformance suite (real connection) + example |
 | Raw WebSocket message | message | `websock::WebsockMessageTransport` | `transport-websock` | ✅ | ✅ (`websock-wasm`) | loopback roundtrip + conformance |
 | Generic message | message | `MessageTransport` + `SecureMessageChannel` | — | ✅ | ✅ | conformance suite |
 | QUIC datagram | datagram | `quinn::QuinnDatagramChannel` | `transport-quinn` | ✅ | — | real-connection roundtrip |
