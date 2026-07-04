@@ -192,6 +192,17 @@ The page reports `passed`/`failed` on screen and as `window.__FOCTET_RESULT__`
 for a headless runner. See [`../tests.md`](../tests.md) for the full
 real-environment test plan.
 
+A second page, `examples/browser/websocket.html`, drives the SDK as the
+handshake initiator over a real browser `WebSocket` against the native
+`websock_message_server` example (raw-message shape). Start that server first;
+see `tests.md` (§3.3).
+
+A third page, `examples/browser/webtransport.html`, drives the SDK (datagram
+mode) over a real browser `WebTransport` against the native
+`webtrans_datagram_split` example — handshake over a stream, data over
+datagrams, with the dev cert pinned via `serverCertificateHashes`. See
+`tests.md` (§3.5).
+
 ## Scope and security
 
 The **body envelope** functions provide body-only protection: they encrypt and

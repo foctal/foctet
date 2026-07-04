@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>foctet-wasm — browser WebTransport interop</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        max-width: 74ch;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      h1 { font-size: 1.2rem; }
+      #summary { font-weight: bold; margin: 1rem 0; }
+      ul { list-style: none; padding: 0; }
+      li { padding: 0.2rem 0; }
+      .ok::before { content: "✅ "; }
+      .fail::before { content: "❌ "; }
+      .fail { color: #c0392b; }
+      label { display: block; margin: 1rem 0 0.3rem; }
+      input { font: inherit; width: 100%; box-sizing: border-box; padding: 0.3rem; }
+      button { font: inherit; margin-top: 0.6rem; padding: 0.3rem 0.8rem; }
+      code { word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <h1>foctet-wasm — browser WebTransport interop</h1>
+    <p>
+      Drives the WASM <code>FoctetSession</code> (datagram mode) as the handshake
+      <strong>initiator</strong> over a real browser <code>WebTransport</code>
+      against the native <code>webtrans_datagram_split</code> responder (tests.md
+      §3.5). The authenticated handshake runs over a reliable bidi stream
+      (length-prefixed control frames); the sealed application data then flows as
+      WebTransport <strong>datagrams</strong> (one Foctet datagram frame each).
+    </p>
+    <p>
+      Start the native server first with the dev cert (from the repo root):
+      <br />
+      <code
+        >cargo run -p foctet-transport --example webtrans_datagram_split
+        --features "runtime-tokio transport-webtrans" -- --role server --addr
+        127.0.0.1:4470 --tls-cert devcert/localhost.crt --tls-key
+        devcert/localhost.key</code
+      >
+    </p>
+
+    <label for="url">Server WebTransport URL</label>
+    <input id="url" value="https://127.0.0.1:4470/" />
+    <label for="hash">Server certificate SHA-256 (paste <code>devcert/localhost.hex</code>)</label>
+    <input id="hash" placeholder="e.g. 3a7bf2… (64 hex chars, no colons)" />
+    <button id="run">Run test</button>
+
+    <div id="summary">Paste the cert hash, then press “Run test”.</div>
+    <ul id="results"></ul>
+
+    <script type="module">
+      import init, {
+        version,
+        IdentityKeyPair,
+        AuthConfig,
+        FoctetSession,
+      } from "../../pkg-web/foctet_wasm.js";
+
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const results = document.getElementById("results");
+      const summary = document.getElementById("summary");
+
+      // Demo identities shared with the native example (do not use in
+      // production). The browser is the initiator (CLIENT_SECRET); it pins the
+      // server's public key derived from SERVER_SECRET.
+      const CLIENT_SECRET = new Uint8Array(32).fill(0x41);
+      const SERVER_SECRET = new Uint8Array(32).fill(0x61);
+      const MESSAGES = ["hello from the browser 0", "hello from the browser 1"];
+      const ECHO_PREFIX = "webtrans datagram echo: ";
+
+      let passed = 0;
+      let failed = 0;
+
+      function record(name, ok, detail) {
+        const li = document.createElement("li");
+        li.className = ok ? "ok" : "fail";
+        li.textContent = name + (detail ? ` — ${detail}` : "");
+        results.appendChild(li);
+        if (ok) passed += 1;
+        else failed += 1;
+      }
+
+      function assert(cond, msg) {
+        if (!cond) throw new Error(msg || "assertion failed");
+      }
+
+      function fromHex(hex) {
+        const clean = hex.trim().replace(/[^0-9a-fA-F]/g, "");
+        assert(clean.length === 64, "cert hash must be 64 hex characters (SHA-256)");
+        const out = new Uint8Array(32);
+        for (let i = 0; i < 32; i += 1) out[i] = parseInt(clean.substr(i * 2, 2), 16);
+        return out;
+      }
+
+      // The native handshake framing over a stream is: u16 big-endian length +
+      // encoded control message. Match it exactly on the wire.
+      function frameControl(bytes) {
+        const out = new Uint8Array(2 + bytes.length);
+        out[0] = (bytes.length >> 8) & 0xff;
+        out[1] = bytes.length & 0xff;
+        out.set(bytes, 2);
+        return out;
+      }
+
+      // Accumulates stream chunks and hands back exactly one length-prefixed
+      // control message at a time.
+      class ControlReader {
+        constructor(reader) {
+          this.reader = reader;
+          this.buf = new Uint8Array(0);
+        }
+        async fill(n) {
+          while (this.buf.length < n) {
+            const { value, done } = await this.reader.read();
+            if (done) throw new Error("stream closed during handshake");
+            const merged = new Uint8Array(this.buf.length + value.length);
+            merged.set(this.buf);
+            merged.set(value, this.buf.length);
+            this.buf = merged;
+          }
+        }
+        async read() {
+          await this.fill(2);
+          const len = (this.buf[0] << 8) | this.buf[1];
+          await this.fill(2 + len);
+          const message = this.buf.slice(2, 2 + len);
+          this.buf = this.buf.slice(2 + len);
+          return message;
+        }
+      }
+
+      async function runRoundtrip(url, certHash) {
+        const clientIdentity = IdentityKeyPair.fromSecretKey(CLIENT_SECRET);
+        const serverPublic = IdentityKeyPair.fromSecretKey(SERVER_SECRET).publicKey;
+        const session = FoctetSession.newDatagramInitiator(
+          AuthConfig.authenticated(clientIdentity, serverPublic),
+          0,
+        );
+
+        const wt = new WebTransport(url, {
+          serverCertificateHashes: [{ algorithm: "sha-256", value: certHash }],
+        });
+        await wt.ready;
+
+        // 1) Authenticated handshake over one reliable bidi stream.
+        const stream = await wt.createBidirectionalStream();
+        const writer = stream.writable.getWriter();
+        const control = new ControlReader(stream.readable.getReader());
+        await writer.write(frameControl(session.initialHandshakeMessage()));
+        session.handleHandshakeMessage(await control.read());
+        assert(session.isEstablished(), "handshake did not establish");
+        assert(session.peerAuthenticated(), "server identity not authenticated");
+
+        // 2) Application data as WebTransport datagrams (one frame each).
+        const dgramWriter = wt.datagrams.writable.getWriter();
+        const dgramReader = wt.datagrams.readable.getReader();
+        const echoes = [];
+        for (const message of MESSAGES) {
+          await dgramWriter.write(session.sealDatagram(0, 0, enc.encode(message)));
+          const { value, done } = await dgramReader.read();
+          if (done) throw new Error("datagram stream closed early");
+          echoes.push(dec.decode(session.openDatagram(value).plaintext));
+        }
+        wt.close();
+        return echoes;
+      }
+
+      async function runTest() {
+        results.innerHTML = "";
+        passed = 0;
+        failed = 0;
+        summary.textContent = "Running…";
+        summary.className = "";
+        const url = document.getElementById("url").value.trim();
+        const hashHex = document.getElementById("hash").value;
+
+        try {
+          if (typeof WebTransport === "undefined") {
+            throw new Error("this browser has no WebTransport support");
+          }
+          const certHash = fromHex(hashHex);
+          const echoes = await runRoundtrip(url, certHash);
+          record("WebTransport connect + authenticated handshake (over a stream)", true);
+          MESSAGES.forEach((message, index) => {
+            const expected = ECHO_PREFIX + message;
+            record(
+              `datagram ${index}: echoed correctly`,
+              echoes[index] === expected,
+              echoes[index] === expected ? undefined : `got: ${echoes[index]}`,
+            );
+          });
+        } catch (err) {
+          record("WebTransport roundtrip", false, String(err && err.message ? err.message : err));
+        }
+
+        summary.textContent = `${passed} passed, ${failed} failed`;
+        summary.className = failed === 0 ? "ok" : "fail";
+        window.__FOCTET_RESULT__ = { passed, failed };
+      }
+
+      await init();
+      document.title += ` (v${version()})`;
+      document.getElementById("run").addEventListener("click", runTest);
+    </script>
+  </body>
+</html>
