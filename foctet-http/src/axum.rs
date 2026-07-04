@@ -2,6 +2,33 @@
 //!
 //! These adapters preserve the surrounding HTTP request and response metadata.
 //! Only the body bytes are protected by the Foctet envelope.
+//!
+//! # Body limits and backpressure
+//!
+//! Every opener bounds the request body (`max_body_bytes`) **before**
+//! decryption, so a hostile client cannot make the server buffer or decrypt
+//! an unbounded body. Recommended values:
+//!
+//! - **One-shot envelopes** (`open_request_with_context`): size for your
+//!   actual payloads, not your tolerance — typical API bodies fit in
+//!   **1–4 MiB**; treat ≥ 16 MiB as a signal to switch to the streaming path.
+//!   The whole ciphertext is buffered in memory, so the worst-case memory per
+//!   in-flight request is `max_body_bytes` × concurrency; set your HTTP
+//!   server's concurrency limit (e.g. `tower::limit::ConcurrencyLimitLayer`)
+//!   with that product in mind.
+//! - **Streaming bodies** ([`open_request_stream`]): memory use is bounded by
+//!   the chunk size (default ≤ 64 KiB sealed) rather than the body size —
+//!   prefer it for uploads beyond a few MiB. Backpressure is natural: chunks
+//!   are decrypted only as your callback consumes them, so a slow consumer
+//!   slows the sender through the HTTP layer's own flow control. Tuning: the
+//!   sealer's chunk size trades per-chunk overhead (AEAD tag + frame header,
+//!   ~tens of bytes) against buffering granularity — **64 KiB–256 KiB** chunks
+//!   are a good default; below ~4 KiB the overhead dominates, above ~1 MiB you
+//!   lose backpressure granularity and hold larger buffers.
+//!
+//! Whichever path you use, reject early: the context (freshness, replay,
+//! route binding) is verified from the headers/stream header **before** body
+//! chunks are processed, so replayed or expired requests cost no decryption.
 
 use ::axum::body::{Body, to_bytes};
 use ::axum::extract::Request as AxumRequest;

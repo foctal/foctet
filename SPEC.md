@@ -5,7 +5,9 @@ Foctet Protocol Specification (Draft v0)
 ----------
 
 *   **Status**: Draft v0 (work-in-progress). **Not production-ready.** See `SECURITY.md` for the current security posture and known limitations, and `docs/THREAT_MODEL.md` for the full threat model.
-*   **Implementation status**: This specification describes the target protocol. As of this revision, the implemented surface is: **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket / muxtls, all covered by a real-connection conformance suite), the **message shape** (raw WebSocket, native + browser), the **datagram API** (`foctet_core::datagram`) with QUIC and raw-UDP adapters (opt-in anti-amplification) and rekey-over-datagram via a reliable control channel, the one-shot body envelope and archive formats, streaming HTTP bodies with per-chunk AEAD, an HTTP protected-context + anti-replay layer (in-memory / Redis / Cloudflare Durable Object stores), the DH-ratchet rekey, and a **WASM/TypeScript SDK** (`foctet-wasm`) covering the body envelope **and** the framed session (message + datagram modes), tested in headless Chrome in CI. Still pending items are marked "(pending)" in place; the largest are a published npm package, a browser-WebTransport datagram *adapter* (the WASM session covers the crypto layer), and the independent security review.
+*   **Spec version**: `foctet-spec/0.3-draft`. The specification is versioned independently of the crate versions: crates may release without spec changes, and this stamp only changes when normative content changes. Any wire-level change MUST bump this stamp and move `test-vectors/` in the same commit (see the compatibility policy below).
+*   **Conformance language**: The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119/8174. Unless a section is explicitly marked *informative*, requirements stated with these key words are normative for Draft v0 implementations; an implementation that violates a MUST is not a conforming Foctet implementation even if it interoperates with this codebase.
+*   **Implementation status**: This specification describes the target protocol. As of this revision, the implemented surface is: **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket / muxtls, all covered by a real-connection conformance suite), the **message shape** (raw WebSocket, native + browser), the **datagram API** (`foctet_core::datagram`) with QUIC and raw-UDP adapters (opt-in anti-amplification) and rekey-over-datagram via a reliable control channel, the one-shot body envelope and archive formats, streaming HTTP bodies with per-chunk AEAD, an HTTP protected-context + anti-replay layer (in-memory / Redis / Cloudflare Durable Object stores), the DH-ratchet rekey, and a **WASM/TypeScript SDK** (`foctet-wasm`) covering the body envelope **and** the framed session (message + datagram modes, including in-session rekey), tested in headless Chrome in CI, plus a browser-WebTransport datagram adapter (`foctet_transport::webtrans_browser`). The canonical vectors are additionally verified by an independent non-Rust implementation (`interop/verify_vectors.mjs`, in CI). Still pending items are marked "(pending)" in place; the largest are a published npm package, an end-to-end Workers/`wrangler` test, and the independent security review.
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
@@ -23,7 +25,7 @@ Foctet Protocol Specification (Draft v0)
 ### 1.1 Primary Goals
 
 *   **E2EE / Zero-Knowledge**: Intermediaries (relays, storage providers) MUST NOT be able to decrypt payloads.
-*   **Transport-agnostic**: Works over QUIC, WebTransport, TLS-TCP, WSS, plain TCP, or any byte stream, and over datagram transports via a dedicated datagram API (QUIC datagram adapter shipped; raw-UDP and browser-WebTransport datagram adapters pending — see §5.1).
+*   **Transport-agnostic**: Works over QUIC, WebTransport, TLS-TCP, WSS, plain TCP, or any byte stream, and over datagram transports via a dedicated datagram API (QUIC, raw-UDP, and browser-WebTransport datagram adapters shipped — see §5.1).
 *   **Thin core, strong invariants**: Minimal primitives with strict security guarantees.
 *   **Archiveable**: Encrypted data MUST be representable as a file (or multiple files) for offline distribution and later reassembly.
 
@@ -121,9 +123,16 @@ Relays forward frames without decryption and SHOULD NOT require any Foctet aware
 Foctet Core can run over:
 
 *   **Byte stream** transports (TCP, TLS-TCP, WSS, QUIC/WebTransport bidirectional streams): requires Foctet framing delimiter/length prefix.
-*   **Datagram** transports (UDP, QUIC datagram, WebTransport datagram): each datagram MUST contain exactly one complete, bounded frame; the maximum datagram size MUST be configured at or below the transport MTU; replay state MUST be committed only after AEAD authentication; and anti-amplification limits MUST be applied at the transport layer. This uses a dedicated datagram API (`foctet_core::datagram::DatagramEndpoint`) that is separate from the byte-stream API and MUST NOT be approximated by reusing the stream API. QUIC (`foctet_transport::quinn::QuinnDatagramChannel`) and raw-UDP (`foctet_transport::udp::UdpDatagramTransport`, opt-in anti-amplification) adapters are implemented; a browser-WebTransport datagram *adapter* is still pending (the WASM `FoctetSession` datagram mode covers the crypto layer with JS owning the transport).
+*   **Datagram** transports (UDP, QUIC datagram, WebTransport datagram): each datagram MUST contain exactly one complete, bounded frame; the maximum datagram size MUST be configured at or below the transport MTU; replay state MUST be committed only after AEAD authentication; and anti-amplification limits MUST be applied at the transport layer. This uses a dedicated datagram API (`foctet_core::datagram::DatagramEndpoint`) that is separate from the byte-stream API and MUST NOT be approximated by reusing the stream API. QUIC (`foctet_transport::quinn::QuinnDatagramChannel`), raw-UDP (`foctet_transport::udp::UdpDatagramTransport`, opt-in anti-amplification), and browser-WebTransport (`foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`, wasm32, over `WebTransport.datagrams`) adapters are implemented. See §5.1.1 for the normative MTU/fragmentation policy.
 
 Transport MUST provide a method to send/receive bytes. Reliability is not required but affects upper-layer behavior.
+
+#### 5.1.1 Datagram MTU, path changes, and fragmentation (normative)
+
+*   **Foctet does not fragment.** A payload whose sealed frame would exceed the configured maximum datagram size MUST be rejected fail-closed (`FrameTooLarge`) before any bytes are sent. Implementations MUST NOT split one application payload across multiple datagrams at the Foctet layer: fragments would be independently lost/reordered, and reassembly state would create a pre-authentication resource-exhaustion surface. Applications that need larger payloads MUST use a byte-stream or message shape instead, or segment **above** Foctet so that every segment is an independent, self-contained payload.
+*   **Configured size, not probed size.** The maximum datagram size is configuration (`DatagramConfig::max_datagram_size`, default `DEFAULT_MAX_DATAGRAM_SIZE`), clamped to the transport's reported limit where one exists (QUIC's `max_datagram_size`, WebTransport's `maxDatagramSize`). Foctet performs no path-MTU discovery of its own.
+*   **Path changes.** If the underlying path MTU drops below the configured size mid-session (mobility, tunnel changes), transports that enforce their own limit (QUIC, WebTransport) will surface send failures; the raw-UDP adapter cannot detect this, so deployments over raw UDP SHOULD choose a conservative size that survives expected paths (the common guidance is ≤ 1200 bytes of datagram, matching QUIC's pre-validation default) rather than an interface-MTU-derived value. On persistent send failures after a suspected path change, callers SHOULD lower the configured size (new endpoint/config) or re-establish the session; silently truncating or fragmenting is not permitted.
+*   **Oversize received datagrams** MUST be rejected without allocation proportional to the claimed length (bounded by `DatagramConfig` limits), as with the stream shape's `max_ciphertext_len`.
 
 ### 5.2 Core Concepts
 
@@ -163,7 +172,7 @@ Immediately followed by:
 **AAD** MUST include the entire header from `magic` through `ct_len`.
 `magic` MUST be present in Draft v0.
 
-### 6.3 Flags (draft)
+### 6.3 Flags (normative)
 
 *   bit0: `HAS_ROUTING` (routing info present at higher layer / relay envelope)
 *   bit1: `IS_CONTROL` (control frame vs application data)
@@ -279,16 +288,17 @@ Foctet supports two modes:
 
 Draft v0 defines **Native**.
 
-### 8.2 Native Handshake Outline (draft)
+### 8.2 Native Handshake (normative)
 
-*   Each side generates ephemeral X25519 key pair.
-*   Exchange ephemeral public keys in control frames.
-*   Derive shared secret `ss = X25519(eph_priv, peer_eph_pub)`.
+*   Each side generates an ephemeral X25519 key pair.
+*   Ephemeral public keys are exchanged in control frames (§8.2.1 for the authentication trailer; the exact control-message wire layouts are fixed by `test-vectors/handshake-v0.json` and verified by the independent decoder in `interop/`).
+*   Derive shared secret `ss = X25519(eph_priv, peer_eph_pub)`. An all-zero `ss` MUST be rejected.
 *   Derive traffic keys:
     *   `prk = HKDF-Extract(salt=session_salt, IKM=ss)`
     *   `key_c2s = HKDF-Expand(prk, info="foctet c2s", L=keylen)`
     *   `key_s2c = HKDF-Expand(prk, info="foctet s2c", L=keylen)`
-*   Optional: bind to static identity keys (Ed25519) by signing transcript.
+*   Transcript bindings MUST be verified before any key material is used: `client_transcript_binding = SHA-256("foctet hs client" || client_eph_public || session_salt [|| channel-binding mix])` and `server_transcript_binding = SHA-256("foctet hs server" || client_eph_public || server_eph_public || session_salt [|| channel-binding mix])`, where the optional channel-binding mix is `"foctet channel-binding" || len(binding) as u64-be || binding` and is included only when a non-empty channel binding is configured (both sides MUST agree).
+*   Identity binding (Ed25519 transcript signatures, §8.2.1–8.2.2) is REQUIRED by default; running without it demands an explicit opt-in or a typed channel binding (§8.3).
 
 ### 8.2.1 Handshake Authentication Payload
 

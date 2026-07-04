@@ -53,13 +53,16 @@ Implemented and tested today:
 - Transport-agnostic encrypted framing for **byte streams** and split send/recv
   transports (TCP, QUIC/WebTransport bidirectional streams, multiplexed WebSocket).
 - A **datagram API** (`foctet_core::datagram`, one frame per datagram) with QUIC
-  (`foctet_transport::quinn::QuinnDatagramChannel`) and raw-UDP
-  (`foctet_transport::udp::UdpDatagramTransport`) adapters.
+  (`foctet_transport::quinn::QuinnDatagramChannel`), raw-UDP
+  (`foctet_transport::udp::UdpDatagramTransport`), and browser-WebTransport
+  (`foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`, wasm32)
+  adapters.
 - A **message API** (`foctet_core::message`, one frame per reliable/ordered
   message) with a generic `MessageTransport` shape (`foctet_transport::message`).
-- A **WASM/TypeScript SDK** (`foctet-wasm`) for the body envelope, with generated
-  `.d.ts` and Node/browser/bundler builds (verified against Rust-produced
-  envelopes).
+- A **WASM/TypeScript SDK** (`foctet-wasm`) for the body envelope **and** the
+  framed session (authenticated handshake, message + datagram modes, in-session
+  DH-ratchet rekey), with generated `.d.ts` and Node/browser/bundler builds —
+  verified against Rust-produced envelopes and in real headless Chrome in CI.
 - **HTTP protected-context replay defense**: a versioned, domain-separated
   context schema (`foctet-http`'s `ProtectedContext`, `x-foctet-*` carrier
   headers) that binds method/path/query/message-id/timestamp/expiry into the
@@ -70,13 +73,9 @@ Implemented and tested today:
 
 Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
 
-- A browser-WebTransport datagram adapter (QUIC and raw-UDP datagram adapters
-  exist; browser WebSocket is covered — the `WebsockMessageTransport` compiles
-  for wasm via the `websock-wasm` backend, and the WASM `FoctetSession` covers
-  WebTransport at the crypto layer with JS owning the socket).
-- A published npm package and a headless browser-runner (runtime) test for the
-  WASM SDK (the SDK, a framed session/handshake API, and a Node interop test
-  exist; only the npm release and in-browser test runner are pending).
+- A published npm package for the WASM SDK (the SDK, its framed session API,
+  the Node interop test, and the headless-Chrome CI tests all exist; only the
+  npm release is pending).
 - Streaming **response**-body helpers for a specific framework — streaming
   request bodies are turn-key (`foctet_http::axum::open_request_stream`, and the
   framework-agnostic `HttpRequestStreamReader` for Workers), but producing a
@@ -106,17 +105,21 @@ secure channel. All channels share one application contract via the
 | QUIC datagram | datagram | `quinn::QuinnDatagramChannel` | `transport-quinn` | ✅ | — | real-connection roundtrip |
 | Raw UDP datagram | datagram | `udp::UdpDatagramTransport` (opt-in anti-amplification) | `runtime-tokio` | ✅ | — | real-socket roundtrip |
 | Generic datagram | datagram | `DatagramTransport` + `SecureDatagramChannel` | — | ✅ | — | conformance + rekey-over-datagram |
-| Browser session (JS owns the socket) | message / datagram | `foctet-wasm` `FoctetSession` | — | — | ✅ | native-tested inner logic |
+| Browser WebTransport datagram | datagram | `webtrans_browser::BrowserWebTransportDatagrams` | `transport-webtrans-browser` | — | ✅ | headless-Chrome roundtrip (mock duplex) |
+| Browser session (JS owns the socket) | message / datagram | `foctet-wasm` `FoctetSession` | — | — | ✅ | headless-Chrome tests + native-tested inner logic |
 
 Notes:
 
-- **Browser WebTransport** (native and browser) and a **browser-WebTransport
-  datagram** adapter are not yet provided as Rust adapters; in the browser, the
-  WASM `FoctetSession` covers WebTransport at the crypto layer with JS owning the
-  socket.
-- The conformance suite currently runs against in-memory message/datagram
-  channels and a byte-stream duplex; wiring every real byte-stream backend (quinn
-  bi-streams, WebTransport, muxTLS, WebSocket-mux) into it is still open.
+- The **browser-WebTransport datagram adapter** is duck-typed over the
+  `WebTransport.datagrams` duplex (JS opens the connection and hands the duplex
+  to wasm); its stream plumbing is exercised in headless Chrome against
+  in-page WHATWG streams — an end-to-end test against a live HTTP/3 server is
+  still open.
+- The conformance suite runs the same checks over in-memory message/datagram
+  channels, a byte-stream duplex, **and a real loopback connection for every
+  advertised byte-stream backend** (quinn bi-streams, WebTransport bi-streams,
+  muxTLS, WebSocket-mux), each with a self-signed localhost certificate and
+  the native Foctet handshake.
 
 ## Quick Start
 

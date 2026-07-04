@@ -6,6 +6,85 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Centralized protocol limits expanded (P1, §2.4).** `ProtocolLimits` now
+  also carries `max_plaintext_len` (enforced on every async/sync send path
+  before encryption), `max_buffered_tx_bytes` (bounds the async framed
+  transport's outbound queue; exceeding it fails with the new
+  `CoreError::OutboundBufferLimitExceeded` instead of growing memory
+  unboundedly — a rejected send consumes no sequence number), and
+  `handshake_timeout` (the transport builders' `DEFAULT_HANDSHAKE_TIMEOUT` now
+  aliases `foctet_core::DEFAULT_HANDSHAKE_TIMEOUT`). Control-plane input is
+  hard-bounded by the new `MAX_CONTROL_MESSAGE_LEN` (rejected in
+  `ControlMessage::decode` before inspection), and the distinct-inbound-stream
+  bound via `max_replay_windows` is documented on the struct.
+
+- **Connection-level handshake rate limiting (P1, §2.4).**
+  `foctet_transport::HandshakeRateLimiter` — a shareable token bucket
+  (sustained rate + burst) consulted before any handshake work; fails fast
+  with the new `CoreError::HandshakeRateLimited`. Integrated convenience:
+  `TokioTransportBuilder::establish_responder_with_auth_timeout_and_limiter`.
+  Drop-cancellation semantics of all `establish_*` futures are now documented
+  (`rate_limit` module docs).
+
+- **In-session rekey over the WASM session API (P1, §5).** `FoctetSession`
+  gains `forceRekey()` / `canRekey` / `handleControlMessage()` /
+  `activeKeyId`: the alternating DH-ratchet rekey now runs over the wasm
+  message *and* datagram modes (rekey control messages travel over the
+  reliable channel; the framing endpoint adopts the rotated key and retains
+  previous generations, so in-flight / reordered old-key frames still open).
+  `Session::can_rekey()` accessor added in core. Tested natively and in
+  headless Chrome.
+
+- **Observability hooks without secrets (P2, §7).** New
+  `foctet_core::observe` module: a `SessionObserver` trait receives
+  `SessionEvent`s (`HandshakeCompleted`, `RekeyInitiated`, `RekeyApplied`,
+  `ControlRejected`) carrying only public metadata — never key bytes or
+  plaintext (`Session::with_observer` / `set_observer`). Replay-protection
+  rejections are surfaced as counters (`ReplayProtector::rejections`,
+  `replay_rejections()` on `FoctetFramed`, `SyncIo`, `MessageEndpoint`,
+  `DatagramEndpoint`) for replay/flooding monitoring.
+
+- **Independent (non-Rust) verification of the canonical vectors (P1/P2,
+  §6/§7).** `interop/verify_vectors.mjs` re-implements the Draft v0 key
+  schedule, frame AEAD (full XChaCha20-Poly1305 open with header-as-AAD, plus
+  tamper negative controls), handshake transcript bindings, Ed25519 identity
+  verification, and the DH-ratchet rekey step on the audited `@noble`
+  libraries — zero shared code with the Rust workspace — and checks every
+  committed vector. Runs in CI (`interop-verify` job), replacing the
+  header-only `minimal_decoder` as the independent check.
+
+- **Browser WebTransport datagram adapter (P1, §3.3).**
+  `foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`
+  (`transport-webtrans-browser` feature, wasm32) implements
+  `DatagramTransport` over a `WebTransport.datagrams` duplex handed in from
+  JS, duck-typed via `js-sys` reflection (avoids web-sys's unstable-APIs cfg;
+  clamps to the browser's `maxDatagramSize`). Verified in headless Chrome
+  against in-page WHATWG streams end to end through
+  `SecureDatagramChannel` (roundtrip both directions + oversize fail-closed);
+  wasm build gated in CI.
+
+- **Miri in CI (P2, §6).** New `miri` job runs the parser / state-machine /
+  crypto-framing test modules of `foctet-core` (replay bitmap shifting,
+  TLV/control/frame parsing, sequence allocation, AEAD framing) under Miri on
+  nightly.
+
+- **Out-of-order rekey negative test (P1, §2.6).** A `Rekey` naming the *next*
+  expected `old_key_id` (skipping ahead, internally consistent binding) is
+  rejected, session state is unchanged, and the genuine in-order rekey still
+  applies (`session.rs::rekey_delivered_ahead_of_order_is_rejected_and_state_is_unchanged`).
+
+- **Documentation hardening (P1/P2).** SPEC: version stamp
+  (`foctet-spec/0.3-draft`, decoupled from crate versions), RFC 2119
+  conformance language, normative §5.1.1 datagram MTU/path-change/
+  fragmentation policy (no fragmentation, fail-closed, ≤1200-byte raw-UDP
+  guidance), and the handshake outline promoted to normative (binding hash
+  definitions in place of the "(draft)" markers). `ContextBinding::with_authority`
+  now documents the required authority normalization steps; axum module docs
+  give recommended body limits and streaming backpressure tuning; the
+  WebSocket module documents its mux/backpressure contract; SECURITY.md
+  finalizes the vulnerability-report channels, response SLA
+  (ack ≤ 7 d / triage ≤ 14 d / fix or advisory ≤ 90 d), and scope.
+
 - **Two-process transport examples + real-environment runbook (`tests.md`).**
   `quinn_split` and `websock_split` gained a `--role server|client|loopback`
   (plus `--addr`, `--tls-cert`/`--tls-key`, and a client `--wrong-identity` flag

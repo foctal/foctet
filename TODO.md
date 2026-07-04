@@ -42,6 +42,15 @@ protect arbitrary TCP/UDP/QUIC/WebSocket/WebTransport payloads, HTTP bodies
 - [x] **P2** Bounded replay-window map.
 - [x] Body-envelope context-binding primitive (`*_with_context`).
 - [x] `SECURITY.md`; README/SPEC claims corrected.
+- [x] **2026-07 implementation batch:** `ProtocolLimits` completed (plaintext /
+  buffered-tx / control-size / handshake-timeout / distinct-stream bounds),
+  handshake rate limiting + cancellation docs, WASM in-session rekey,
+  observability hooks + replay counters, browser-WebTransport datagram
+  adapter (headless-Chrome tested), independent `@noble`-based vector
+  verification in CI, Miri CI job, out-of-order-rekey negative test, and a
+  docs batch (normative SPEC pass + `foctet-spec/0.3-draft` stamp, datagram
+  MTU policy, authority normalization, body-limit/backpressure guidance,
+  WebSocket mux/backpressure contract, SECURITY response SLA).
 
 **Not production-ready until every P0 and P1 below is `[x]` and externally
 reviewed.** Do not use "production-ready" / "v1 stable" wording before
@@ -119,9 +128,13 @@ enforcement remain.
       in `foctet-http/src/workers.rs`), reconstructing `http::request::Parts`
       (method/URI/headers) from `worker::Request` so the same protected-context
       binding used by Axum applies to Workers.
-- [~] Optional selected-header binding + authority normalization guidance.
+- [x] Optional selected-header binding + authority normalization guidance.
       Header binding done for requests (see §1.2 above); authority
-      normalization guidance still open.
+      normalization guidance now documented on
+      `ContextBinding::with_authority` (`foctet-http/src/context.rs`):
+      lowercase host, punycode form, default-port stripping, and
+      server-side reconstruction source — with the explicit recommendation to
+      leave the binding off when those can't be guaranteed.
 - **Gate:** block production HTTP/Workers recommendations until durable store +
   default-enforcement land.
 
@@ -219,42 +232,51 @@ enforcement remain.
       construction is the alternating DH-ratchet, not improvised per-message).
 
 ### 2.4 Centralized protocol limits (P2 in review, do early)
-- [~] One public `ProtocolLimits`. Done for the **stream** shape:
-      `foctet_core::limits::ProtocolLimits` (`foctet-core/src/limits.rs`) covers
-      max inbound ciphertext length, retained previous keys, replay-window size,
-      and the distinct-replay-window cap, with documented defaults
-      (`DEFAULT_MAX_CIPHERTEXT_LEN`, `DEFAULT_MAX_RETAINED_KEYS`) and a
-      `replay_protector()` constructor. **Still open:** max plaintext, buffered
-      (outbound `tx`) bytes, distinct stream IDs, control-message size, handshake
-      duration, and outstanding-work bounds are not yet part of the struct.
-- [~] Apply consistently. `FoctetFramed` + `SyncIo` now take `with_limits(...)` /
-      expose `limits()`, routing their old `with_max_ciphertext_len` /
-      `with_max_retained_keys` setters through `ProtocolLimits`; the replay
-      window/cap are now configurable on these paths. **Still open:** datagram
-      (`DatagramConfig`) and HTTP/body (`BodyEnvelopeLimits`) keep their own
-      shape-specific limit types (different in kind — MTU-bounded / whole-buffer);
-      archive APIs not yet wired. A future step may unify them under one umbrella
-      type or have them share more constants.
+- [x] One public `ProtocolLimits`. **Done** for the stream shape, now covering
+      every bound the review asked for: max inbound ciphertext length,
+      **max outbound plaintext length** (`max_plaintext_len`, enforced on every
+      async/sync send path before encryption), **buffered outbound bytes**
+      (`max_buffered_tx_bytes`, bounds `FoctetFramed`'s `tx` queue — exceeding
+      it fails with `CoreError::OutboundBufferLimitExceeded` and consumes no
+      sequence number), retained previous keys, replay-window size, the
+      distinct-replay-window cap (which is also the documented bound on
+      **distinct inbound stream IDs**, one window per `(key_id, stream_id)`),
+      and the **handshake deadline** (`handshake_timeout`;
+      `foctet_transport::DEFAULT_HANDSHAKE_TIMEOUT` aliases
+      `foctet_core::DEFAULT_HANDSHAKE_TIMEOUT`). **Control-message size** is
+      hard-bounded by `MAX_CONTROL_MESSAGE_LEN`, rejected in
+      `ControlMessage::decode` before inspection. All defaults documented;
+      tests for enforcement + no-nonce-consumed-on-reject.
+- [~] Apply consistently. `FoctetFramed` + `SyncIo` take `with_limits(...)` /
+      expose `limits()`; plaintext/tx bounds enforced on all their send paths.
+      **Still open (deliberate):** datagram (`DatagramConfig`) and HTTP/body
+      (`BodyEnvelopeLimits`) keep their own shape-specific limit types
+      (different in kind — MTU-bounded / whole-buffer); archive APIs not wired.
 - [x] Replay-window count cap (`DEFAULT_MAX_REPLAY_WINDOWS`) — first piece, now
       configurable on the stream paths via `ProtocolLimits::max_replay_windows`.
 - [x] Bound outbound plaintext/frame length before `u32` ct_len conversion
       (`crypto::checked_ciphertext_len` in `foctet-core/src/crypto.rs`,
       shared by `encrypt_frame`, used by every sync/async send path).
       Still pending: the broader `ProtocolLimits` unification above.
-- [~] Handshake read **timeout** + connection-level rate limit + cancellation.
+- [x] Handshake read **timeout** + connection-level rate limit + cancellation.
       Timeout done for the Tokio path: `TokioTransportBuilder::establish_*_with_timeout`
       / `establish_*_with_auth_and_timeout` / `establish_*_with_default_timeout`
       (`DEFAULT_HANDSHAKE_TIMEOUT` = 10s) in `foctet-transport/src/tokio.rs`,
       using `tokio::time::timeout` and a new `CoreError::HandshakeTimeout`;
       `quinn`/`websock`/`webtrans`/`muxtls` all build on this builder so they
       gain it once their call sites switch to the timeout variants. The
-      runtime-agnostic `FuturesTransportBuilder` now has parity via
+      runtime-agnostic `FuturesTransportBuilder` has parity via
       `establish_initiator_with_auth_and_timeout` /
-      `establish_responder_with_auth_and_timeout`, which take a caller-supplied
-      timer *future* (e.g. `tokio::time::sleep`, an async-io timer, a browser
-      timer) and race it against the handshake with a `std`-only `poll_fn`
-      (`CoreError::HandshakeTimeout` on expiry; verified by stalled-handshake
-      tests). Still missing: a connection-level rate limit and cancellation.
+      `establish_responder_with_auth_and_timeout` (caller-supplied timer
+      future raced against the handshake; stalled-handshake tests). **Rate
+      limit done:** `foctet_transport::HandshakeRateLimiter`
+      (`rate_limit.rs`) — a shareable token bucket (sustained rate + burst)
+      consulted before any handshake work, failing fast with
+      `CoreError::HandshakeRateLimited`; integrated via
+      `establish_responder_with_auth_timeout_and_limiter`; tested (burst,
+      refill, shared bucket, clamping). **Cancellation done:** all
+      `establish_*` futures are drop-cancellable (state lives in the future);
+      documented in the `rate_limit` module docs.
 
 ### 2.5 Key-material ergonomics
 - [x] Make secret-bearing types non-`Clone` where practical; zeroizing wrappers.
@@ -314,10 +336,13 @@ enforcement remain.
       `rekey_message_with_stale_old_key_id_is_rejected`,
       `rekey_message_with_forged_transcript_binding_is_rejected`,
       `control_message_unexpected_for_current_state_is_rejected`.
-- [ ] Out-of-order rekey delivery (a `Rekey` for the *next* expected
-      `old_key_id`, not just a stale one), and rollback at the ratchet-design
-      level — these depend on §2.3's ratchet decision, not just test coverage
-      of the current symmetric-rekey state machine.
+- [x] Out-of-order rekey delivery (a `Rekey` for the *next* expected
+      `old_key_id`, not just a stale one): rejected with the session state
+      unchanged and the genuine in-order rekey still applying afterwards
+      (`session.rs::rekey_delivered_ahead_of_order_is_rejected_and_state_is_unchanged`).
+      Rollback at the ratchet level is covered by the replayed-rekey and
+      stale-`old_key_id` tests (a rekey can never re-apply or roll the chain
+      back), matching §2.3's alternating-DH-ratchet design.
 
 ---
 
@@ -394,10 +419,27 @@ enforcement remain.
       §3.3 item below). Otherwise this adapter only moves bytes, unlike
       QUIC/WebTransport which provide connection + peer auth for free. Verified
       with a real-socket roundtrip test (`udp::tests::roundtrip_over_real_udp_sockets`).
-- [ ] Browser WebTransport datagram adapter (implement `DatagramTransport`
-      for it).
-- [ ] MTU/path-change handling and fragmentation policy for payloads above the
-      datagram limit (currently fail-closed `FrameTooLarge`).
+- [x] Browser WebTransport datagram adapter. **Done**
+      (`foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`,
+      `transport-webtrans-browser` feature, wasm32): implements
+      `DatagramTransport` over the `WebTransport.datagrams` duplex handed in
+      from JS, duck-typed via `js-sys` reflection (avoids web-sys's
+      unstable-APIs cfg flag; anything shaped
+      `{ readable, writable, maxDatagramSize? }` works), clamping to the
+      browser-reported `maxDatagramSize`. Verified in **real headless Chrome**
+      end to end through `SecureDatagramChannel` against in-page WHATWG
+      streams (roundtrip both directions + oversize fail-closed;
+      `foctet-wasm/tests/browser.rs`); the wasm build is a CI gate. An E2E
+      test against a live HTTP/3 server remains out of CI scope.
+- [x] MTU/path-change handling and fragmentation policy. **Done** as a
+      normative policy (SPEC §5.1.1): Foctet does not fragment — oversize
+      payloads fail closed (`FrameTooLarge`) before sending; the maximum is
+      configuration clamped to the transport's reported limit (QUIC /
+      WebTransport), with ≤1200-byte guidance for raw UDP (no PMTUD of its
+      own); on path-MTU drops, QUIC/WebTransport surface send failures and
+      callers lower the configured size or re-establish — silent truncation
+      and Foctet-layer fragmentation are prohibited (reassembly would be a
+      pre-auth DoS surface).
 - [x] Rekey-over-datagram story. **Done** (documented + glued + tested): the DH
       ratchet rekey is driven by `Session` control messages over a **reliable
       control channel** (QUIC-style separation — a lost ratchet message would
@@ -436,9 +478,16 @@ enforcement remain.
       build). A **headless browser-runner runtime test** now exists at the
       crypto layer: `foctet-wasm/tests/browser.rs` runs the full
       `FoctetSession` handshake + message exchange in real headless Chrome
-      (CI job `wasm-browser-test`). **Still open:** a browser test driving a
-      real `WebSocket` connection end-to-end, and a documented
-      mux/backpressure definition.
+      (CI job `wasm-browser-test`). **Mux/backpressure definition done:**
+      `foctet-transport/src/websock.rs` module docs now state the normative
+      contract — one raw connection ⇔ one session (logical `stream_id` mux
+      shares the connection's ordering/flow control, head-of-line blocking
+      acknowledged; real per-stream mux via `websock-tungstenite-mux`),
+      backpressure delegated to socket readiness with at most one buffered
+      in-flight message per direction, inbound size bounded by
+      `MessageConfig::max_message_size` pre-allocation. **Still open:** a
+      browser test driving a real `WebSocket` connection end-to-end (needs a
+      live server next to the headless-browser harness).
 - [~] Browser WebTransport: the wasm `FoctetSession` (§5) protects data over
       both WebTransport **streams** (message mode: `newInitiator`/`sealMessage`)
       and WebTransport **datagrams** (datagram mode:
@@ -449,8 +498,13 @@ enforcement remain.
       session now has a **headless-Chrome runtime test**
       (`foctet-wasm/tests/browser.rs::datagram_session_roundtrip`, CI job
       `wasm-browser-test`); the native WebTransport byte-stream adapter is
-      covered by the real-connection conformance suite (§3.1). **Still open:**
-      a browser test driving a real WebTransport connection end-to-end.
+      covered by the real-connection conformance suite (§3.1); and the
+      **Rust/wasm datagram adapter** (§3.3, `BrowserWebTransportDatagrams`)
+      is exercised in headless Chrome through `SecureDatagramChannel` against
+      in-page WHATWG streams. In-session **rekey** now also runs over the wasm
+      session (message + datagram modes, headless-Chrome tested). **Still
+      open:** a browser test driving a real WebTransport connection
+      end-to-end (needs a live HTTP/3 server next to the harness).
 
 ---
 
@@ -473,8 +527,11 @@ enforcement remain.
       `AxumOpener::open_request_with_async_store` call in the handler.
 - [x] Durable replay store interface (`AsyncReplayStore`) + Redis backend for
       multi-instance deployments (see §1.2).
-- [~] Safe default body limits: Axum opener bounds via `max_body_bytes`; document
-      recommended values and add backpressure guidance.
+- [x] Safe default body limits: Axum opener bounds via `max_body_bytes`.
+      **Docs done** (`foctet-http/src/axum.rs` module docs): recommended
+      values (1–4 MiB one-shot; switch to streaming ≥ 16 MiB), the
+      `max_body_bytes × concurrency` memory budget with a concurrency-limit
+      pairing, and reject-early ordering (context verified before body work).
 - [x] Streaming HTTP mode: per-chunk AEAD, unique nonces, final authenticated
       manifest/length, cancellation, context/replay binding. **Done.** Core
       primitive `foctet_core::body_stream` (`StreamSealer`/`StreamOpener`): one
@@ -500,8 +557,9 @@ enforcement remain.
       backpressure via the caller's consumption rate). Workers uses the same
       framework-agnostic reader. Tested: decoder arbitrary-split reassembly,
       reader split-body decode + replay rejection + truncation rejection, and a
-      real axum streaming-upload roundtrip. **Still open:** explicit backpressure
-      *tuning* guidance docs.
+      real axum streaming-upload roundtrip. Backpressure *tuning* guidance now
+      documented (`foctet-http/src/axum.rs` module docs: 64–256 KiB chunk-size
+      sweet spot, overhead vs granularity trade-off).
 - [ ] End-to-end Workers test under `wrangler`: key lookup, durable replay store,
       failure handling, response binding, key rotation, operational guide.
 
@@ -542,8 +600,14 @@ enforcement remain.
       `IdentityKeyPair` (Ed25519) and `DecodedMessage`. Inner logic is
       native-tested (handshake roundtrip, peer pinning, replay, fail-closed,
       unexpected-peer rejection); the `wasm32-unknown-unknown` build is verified.
-      **Still open:** in-session rekey is not carried over this message API yet
-      (matches the datagram/message-shape rekey gap).
+      **In-session rekey done:** `forceRekey()` / `canRekey` /
+      `handleControlMessage()` / `activeKeyId` carry the alternating
+      DH-ratchet rekey over both wasm framing modes (rekey messages travel on
+      the reliable channel; the endpoint adopts rotated keys and retains
+      previous generations so in-flight/reordered old-key frames still open;
+      `Session::can_rekey()` added in core). Tested natively (turn
+      alternation, old-key frame across rekey, datagram reorder across rekey)
+      and in headless Chrome.
 - [~] Host-backed / non-extractable key handling where the platform allows it;
       document zeroization limits across the boundary. **Documented** as
       unavailable: WebCrypto has no portable non-extractable X25519/Ed25519 key
@@ -597,7 +661,14 @@ enforcement remain.
       maintain an update process. **Done:** `actions/checkout` (v4.3.1),
       `rustsec/audit-check` (v2.0.0), and `EmbarkStudios/cargo-deny-action`
       (v2.0.9) are pinned to commit SHAs with the tag in a trailing comment.
-- [ ] Miri / sanitizers where applicable.
+- [~] Miri / sanitizers where applicable. **Miri done:** new `miri` CI job
+      runs the parser / state-machine / crypto-framing modules of
+      `foctet-core` (replay bitmap shifting, TLV/control/frame parsing,
+      sequence allocation, AEAD framing — 28 tests, ~1 min) under Miri on
+      nightly; the full suite (handshakes, Ed25519) is impractically slow
+      under Miri. Sanitizers (ASan/TSan) not wired — the workspace is
+      `#![forbid(unsafe_code)]` throughout, so their marginal value over Miri
+      is low; revisit if unsafe or FFI ever lands.
 - [x] Fuzz targets beyond frame/archive + fuzzing in CI. **Added**
       (`fuzz/fuzz_targets/`): `control_message` (control-plane parser),
       `handshake` (state machine: any decodable control fed to a fresh
@@ -615,10 +686,25 @@ enforcement remain.
       targets' fixed keys so deep open paths run); crash artifacts are uploaded
       on failure. An HTTP-adapter-specific target remains intentionally out of
       scope (header parsing is the `http` crate's job).
-- [ ] Coverage of all transport integrations; mutation/negative protocol tests.
-- [ ] Cross-implementation (independent decoder) interop tests.
-- [ ] Vulnerability disclosure policy + security contact (started in
-      `SECURITY.md`) — finalize contact + response SLA.
+- [~] Coverage of all transport integrations; mutation/negative protocol tests.
+      Every advertised byte-stream backend runs the real-connection
+      conformance suite (§3.1); datagram (QUIC, raw-UDP, browser-WT) and
+      message (WebSocket native+browser) shapes have real roundtrips; the
+      negative-protocol matrix (§2.6) is extensive. **Still open:** systematic
+      mutation testing (e.g. `cargo-mutants`) as a test-suite-strength gauge.
+- [x] Cross-implementation (independent decoder) interop tests. **Done:**
+      `interop/verify_vectors.mjs` re-implements the Draft v0 key schedule,
+      frame AEAD (full XChaCha20-Poly1305 open, header-as-AAD, tamper
+      negatives), handshake transcript bindings + Ed25519 identity
+      verification, and the DH-ratchet step on the audited `@noble` libraries
+      (zero shared code with this workspace), verifying every committed vector
+      — 38 checks, run in CI (`interop-verify` job). Supersedes the
+      header-only `minimal_decoder` (kept as a minimal reference).
+- [x] Vulnerability disclosure policy + security contact. **Done:**
+      `SECURITY.md` now names the channels (GitHub private vulnerability
+      reporting as canonical, maintainer email fallback), a response SLA
+      (acknowledge ≤ 7 days, triage ≤ 14 days, fix/advisory ≤ 90 days with
+      coordinated disclosure), and an explicit in/out-of-scope list.
 - [ ] **Independent cryptographic design & implementation review** (mandatory
       before v1; covers protocol, Rust impl, WASM/JS boundary, HTTP mode).
 
@@ -626,23 +712,29 @@ enforcement remain.
 
 ## 7. P2 — Stability, spec, scope
 
-- [~] Complete **normative** spec matching code + vectors; version it. The
-      spec's §0 implementation-status and §5.1 transport statements now match
-      the shipped surface, v0's deliberate *absence* of in-band negotiation is
-      stated normatively, and the threat-model section points at the full
-      document. **Still open:** a front-to-back normative pass (replace the
-      remaining "(draft)" markers, define conformance requirements per
-      section) and a spec version stamp decoupled from the crate version.
+- [x] Complete **normative** spec matching code + vectors; version it.
+      **Done:** the spec carries an independent version stamp
+      (`foctet-spec/0.3-draft`, §0 — bumped only on normative change, moving
+      `test-vectors/` in the same commit) and an RFC 2119/8174 conformance
+      statement (unmarked sections are normative; violating a MUST is
+      non-conforming). The remaining "(draft)" markers are gone: §6.3 Flags
+      and §8.2 Native Handshake are normative (the handshake section now
+      specifies the transcript-binding hashes, the channel-binding mix, the
+      all-zero-DH rejection, and the auth-required-by-default rule), and
+      §5.1.1 adds the normative datagram MTU/fragmentation policy. §0
+      implementation-status matches the shipped surface. Vector layouts are
+      pinned by the independent verifier (§6).
 - [x] Version-negotiation / compatibility / deprecation policy. **Done:**
       `docs/POLICIES.md` §1 — what versions exist (wire / profile / crates),
       the Draft-v0 rules (breaking allowed, vectors must move with the wire,
       deprecation cycle before removal), the normative no-negotiation rule for
       v0 with downgrade-resistant negotiation requirements for future
       versions, and the v1 compatibility commitment.
-- [ ] Canonical vector suite verified by an **independent** implementation (not
-      generated and checked within the same Rust workspace).
-      (`interop/minimal_decoder` covers the frame header independently; full
-      AEAD verification still needed.)
+- [x] Canonical vector suite verified by an **independent** implementation (not
+      generated and checked within the same Rust workspace). **Done:**
+      `interop/verify_vectors.mjs` on `@noble` — full AEAD, handshake,
+      identity-auth, and rekey-ratchet verification of every committed vector,
+      in CI. See §6 for details.
 - [x] Full threat model doc: active MITM, endpoint compromise, relay compromise,
       replay, rollback, metadata leakage, DoS, key loss. **Done:**
       `docs/THREAT_MODEL.md` (v1.0) — system/adversary model, ten threat
@@ -655,7 +747,15 @@ enforcement remain.
       vs long-lived key rules, rotation and multi-recipient backup guidance)
       and §3 (incident-response playbooks per key type, replay-store
       compromise, monitoring signals). Supported versions: §1.2/§1.4.
-- [ ] Observability hooks (without exposing secrets).
+- [x] Observability hooks (without exposing secrets). **Done:**
+      `foctet_core::observe` — `SessionObserver` receives `SessionEvent`s
+      (`HandshakeCompleted` with role + peer-auth flag, `RekeyInitiated`,
+      `RekeyApplied`, `ControlRejected`) carrying only public metadata, wired
+      via `Session::with_observer`/`set_observer` (synchronous, keep cheap);
+      plus replay-rejection counters (`ReplayProtector::rejections`,
+      `replay_rejections()` on `FoctetFramed` / `SyncIo` / `MessageEndpoint` /
+      `DatagramEndpoint`) as the replay/flooding monitoring signal. Tested
+      (`session.rs::observer_sees_handshake_rekey_and_rejections_without_secrets`).
 
 ---
 
@@ -663,29 +763,48 @@ enforcement remain.
 
 All must be true before using either phrase:
 
-- [ ] Every P0 and P1 finding fixed and regression-tested.
-- [ ] Spec complete, normative, versioned, and matches code + vectors.
+- [~] Every P0 and P1 finding fixed and regression-tested. Remaining P1s:
+      npm publish (§5), Workers `wrangler` E2E (§4), browser live-server E2E
+      (§3.4), and the independent review items.
+- [x] Spec complete, normative, versioned, and matches code + vectors
+      (`foctet-spec/0.3-draft`, RFC 2119 conformance language, no remaining
+      draft markers; vectors pinned by the independent verifier).
 - [ ] Authenticated peer identity or explicit authenticated-channel binding is
-      mandatory for production constructors.
-- [ ] HTTP has authenticated protected context + replay defense, or is explicitly
-      excluded from the production promise.
-- [ ] Advertised transport matrix has real implementations + integration/
-      conformance tests.
-- [ ] WASM/TypeScript truly shipped + tested, or excluded from the claim.
+      mandatory for production constructors (the `unauthenticated_for_testing`
+      convenience constructors still exist pending the §2.1 API-freeze
+      decision).
+- [x] HTTP has authenticated protected context + replay defense (protected
+      context + atomic durable stores; stateless family deprecated).
+- [x] Advertised transport matrix has real implementations + integration/
+      conformance tests (README matrix; real-connection conformance for every
+      byte-stream backend; real roundtrips for datagram/message shapes incl.
+      the browser-WT datagram adapter in headless Chrome).
+- [~] WASM/TypeScript truly shipped + tested, or excluded from the claim —
+      tested (Node interop + headless Chrome in CI, incl. rekey), but not yet
+      **shipped** to npm.
 - [ ] Independent security review complete; findings resolved or publicly tracked.
-- [ ] cargo-audit/license checks, fuzzing, reproducible builds, CI coverage, and
-      a vulnerability-response process active.
-- [ ] Documented compatibility, deprecation, key-management, incident-response,
-      and supported-version policies.
+- [x] cargo-audit/license checks, fuzzing, reproducible builds, CI coverage,
+      Miri, independent vector verification, and a vulnerability-response
+      process (SECURITY.md SLA) active.
+- [x] Documented compatibility, deprecation, key-management, incident-response,
+      and supported-version policies (`docs/POLICIES.md`, SECURITY.md).
 
 ---
 
 ## Suggested next step
 
-The most immediate, low-risk release hygiene work is **§6**: restore formatting
-and require format, locked builds, and all-feature tests in CI. Then complete
-**§1.2/§1.3** by making durable, context-bound HTTP replay protection the
-production-default story and correcting the public documentation. The remaining
-production sequence is: normative spec/interop → transport conformance and
-operational scope → supply-chain/fuzz/browser/Workers validation → independent
-security review.
+The implementable engineering surface is now essentially complete: limits,
+rate limiting, observability, WASM rekey, the browser-WT datagram adapter,
+Miri, and independent vector verification all landed, and the spec is
+normative and versioned. What remains is **release/process work**, in order:
+
+1. **API-freeze decision** (§1.2 hard enforcement of context-bound HTTP APIs;
+   §2.1 removing/renaming the `unauthenticated_for_testing` convenience
+   constructors) — a deliberate breaking pass, best done as its own release.
+2. **npm publish** of `foctet-wasm` (§5) and the **Workers `wrangler` E2E**
+   (§4) — both are packaging/environment work, not code gaps.
+3. **Independent cryptographic review** (§2.3/§6) — the final, mandatory gate;
+   everything above is review-ready input for it.
+
+Do not use "production-ready" / "v1 stable" wording until §8 is all green —
+the review gate in particular.

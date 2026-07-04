@@ -20,15 +20,37 @@ key-lifecycle, and incident-response policies are in `docs/POLICIES.md`.
 ## Reporting a vulnerability
 
 Please report suspected vulnerabilities privately. Do **not** open a public issue
-for security problems.
+or pull request for security problems.
 
-- Use GitHub's **private vulnerability reporting** ("Report a vulnerability") on
-  this repository, or
-- email the maintainer at the address listed on the crate/repository profile.
+**Contact (in order of preference):**
 
-Include a description, affected crate/version, and a reproduction if possible.
-We aim to acknowledge reports within 7 days. Coordinated disclosure is preferred;
-please allow time for a fix before any public discussion.
+1. GitHub's **private vulnerability reporting** ("Security" → "Report a
+   vulnerability") on this repository — the canonical channel; it keeps the
+   report, discussion, and advisory in one place.
+2. If you cannot use GitHub, email the maintainer at the address listed on the
+   repository/crates.io profile, with `[foctet security]` in the subject.
+
+Include a description, the affected crate(s) and version(s), impact as you
+understand it, and a reproduction if possible.
+
+**Response targets (best-effort; this is a volunteer-maintained project):**
+
+- **Acknowledgement** within **7 days** of the report.
+- **Triage and severity assessment** (confirmed / not a vulnerability /
+  needs more info) within **14 days**.
+- **Fix or public advisory** within **90 days** for confirmed issues, sooner
+  for critical ones; if a fix needs longer we will say so and agree on a
+  disclosure date with you.
+
+Coordinated disclosure is preferred: please allow the fix to ship before public
+discussion. Credit is given in the advisory unless you ask otherwise. There is
+currently no bug bounty.
+
+**In scope:** the `foctet-*` crates in this repository, the wire format and key
+schedule as specified in `SPEC.md`, the WASM/JS boundary, and the committed CI
+supply-chain configuration. **Out of scope:** vulnerabilities in third-party
+dependencies (report upstream; we will pick up the fix), and issues requiring a
+compromised endpoint (see `docs/THREAT_MODEL.md` for the trust boundary).
 
 ## Supported versions
 

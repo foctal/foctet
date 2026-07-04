@@ -107,6 +107,31 @@ impl ContextBinding {
     }
 
     /// Sets whether the authority is bound.
+    ///
+    /// # Authority normalization (read before enabling)
+    ///
+    /// The authority is bound as **raw bytes**: `example.com`,
+    /// `EXAMPLE.COM`, `example.com:443`, and a punycoded form are four
+    /// different values, and any client/server disagreement fails
+    /// authentication. HTTP infrastructure routinely rewrites this value
+    /// (proxies adding default ports, clients title-casing `Host`, HTTP/2
+    /// `:authority` vs HTTP/1.1 `Host` differences), so before enabling,
+    /// both peers MUST derive the authority through the same normalization:
+    ///
+    /// 1. lowercase the host,
+    /// 2. IDNA/punycode-encode it (bind the `xn--…` form, never the Unicode
+    ///    form),
+    /// 3. strip the port when it is the scheme default (`:443` for https,
+    ///    `:80` for http) and keep it otherwise,
+    /// 4. on the server, reconstruct from the same source the client bound
+    ///    (the request-target/`:authority` when present, else `Host`) —
+    ///    **before** any reverse-proxy rewriting, or configure the expected
+    ///    external authority statically instead of trusting headers.
+    ///
+    /// If you cannot guarantee all four, leave this off: method, path,
+    /// query, message ID, and expiry already prevent route substitution and
+    /// replay, and an unverifiable authority binding only produces spurious
+    /// failures (or, worse, pressure to disable protection entirely).
     pub fn with_authority(mut self, bind_authority: bool) -> Self {
         self.bind_authority = bind_authority;
         self

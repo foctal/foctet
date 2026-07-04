@@ -9,6 +9,29 @@
 //! - **Discrete messages over a raw WebSocket** ([`WebsockMessageTransport`]):
 //!   each Foctet frame is one binary WebSocket message, preserving message
 //!   boundaries. Pair it with [`crate::SecureMessageChannel`].
+//!
+//! # Multiplexing and backpressure (normative for these adapters)
+//!
+//! - **Raw (message) shape:** one WebSocket connection carries one Foctet
+//!   session. Foctet's `stream_id` provides *logical* multiplexing inside that
+//!   session (independent replay windows per `(key_id, stream_id)`), but all
+//!   streams share the connection's ordering and flow control — a slow
+//!   consumer stalls every logical stream (head-of-line blocking, as with any
+//!   single WebSocket). Do not share one connection between independent
+//!   sessions: frames from two sessions would be indistinguishable at the
+//!   transport layer.
+//! - **Mux shape:** `websock-tungstenite-mux` provides real per-stream
+//!   multiplexing; each mux stream carries exactly one Foctet channel, and the
+//!   mux layer owns fairness between streams.
+//! - **Backpressure** is delegated to the WebSocket implementation: sends
+//!   await the underlying socket's readiness (TCP flow control), and receives
+//!   are pulled one message at a time — this adapter never buffers more than
+//!   the single in-flight message per direction. Sender-side queueing above
+//!   the socket (e.g. an unbounded channel feeding this adapter) reintroduces
+//!   unbounded memory; if you add a queue, bound it. Oversized inbound
+//!   messages are rejected by [`foctet_core::MessageConfig`]'s
+//!   `max_message_size` before allocation, so a hostile peer cannot force
+//!   unbounded buffering at the Foctet layer.
 
 use futures_util::lock::Mutex;
 use websock::{Error as WebsockError, Message, WebSocketConnection};
