@@ -43,6 +43,8 @@ jobs:
       run: cargo check -p foctet-wasm --target wasm32-unknown-unknown --locked
     - name: Wasm check (browser WebSocket transport)
       run: cargo check -p foctet-transport --no-default-features --features transport-websock --target wasm32-unknown-unknown --locked
+    - name: Wasm check (browser WebTransport datagram adapter)
+      run: cargo check -p foctet-transport --no-default-features --features transport-webtrans-browser --target wasm32-unknown-unknown --locked
 
   test:
     name: Tests
@@ -79,6 +81,36 @@ jobs:
       run: |
         export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
         wasm-pack test --headless --chrome foctet-wasm
+
+  miri:
+    name: Miri (foctet-core protocol logic)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup nightly toolchain with Miri
+      run: |
+        rustup toolchain install nightly --profile minimal --component miri
+        rustup default nightly
+    - name: Run Miri on the parser / state-machine / crypto-framing modules
+      # The full suite (handshakes, Ed25519) is impractically slow under Miri;
+      # this filtered set covers the modules where memory-safety subtleties
+      # live (replay bitmap shifting, TLV/control/frame parsing, sequence
+      # allocation, AEAD framing) and finishes in a couple of minutes.
+      run: cargo miri test -p foctet-core --no-default-features --locked -- replay:: payload:: limits:: control:: sequence:: crypto:: frame::
+
+  interop-verify:
+    name: Independent vector verification (Node)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    # Verifies the canonical test vectors with an implementation that shares
+    # no code with the Rust workspace (@noble crypto + a from-spec decoder),
+    # catching systematic bugs the Rust-derived artifacts would reproduce.
+    - name: Verify vectors independently
+      working-directory: interop
+      run: |
+        npm ci
+        npm test
 
   msrv:
     name: MSRV (1.88)
