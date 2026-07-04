@@ -14,8 +14,10 @@ const HANDSHAKE_CONTROL_MAX_LEN: usize = 1024;
 /// Default deadline for [`TokioTransportBuilder::establish_initiator_with_timeout`]
 /// and the responder/auth variants: enough for a two-message round trip over a
 /// slow network, short enough to bound a stalled or hostile peer's hold on
-/// server resources.
-pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// server resources. This is the same value as
+/// [`foctet_core::ProtocolLimits::handshake_timeout`]'s default, so the
+/// centralized limits struct remains the single documented source.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = foctet_core::DEFAULT_HANDSHAKE_TIMEOUT;
 
 /// Builder for the recommended Tokio-based transport integration path.
 #[derive(Clone, Copy, Debug, Default)]
@@ -204,6 +206,29 @@ impl TokioTransportBuilder {
                 .await
                 .map_err(|_| CoreError::HandshakeTimeout)??;
         self.build(io, session)
+    }
+
+    /// Rate-limited responder handshake: consults `limiter` **before** doing
+    /// any handshake work, failing fast with
+    /// [`CoreError::HandshakeRateLimited`] when admission control is
+    /// saturated, then runs
+    /// [`Self::establish_responder_with_auth_and_timeout`]. Intended for
+    /// accept loops that share one [`crate::HandshakeRateLimiter`] across all
+    /// inbound connections.
+    pub async fn establish_responder_with_auth_timeout_and_limiter<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+        timeout: Duration,
+        limiter: &crate::HandshakeRateLimiter,
+    ) -> Result<TokioTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        limiter.admit()?;
+        self.establish_responder_with_auth_and_timeout(io, thresholds, auth, timeout)
+            .await
     }
 
     /// Convenience wrapper using [`DEFAULT_HANDSHAKE_TIMEOUT`] and the

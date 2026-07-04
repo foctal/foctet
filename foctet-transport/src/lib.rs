@@ -64,6 +64,8 @@ mod error;
 #[cfg(feature = "runtime-futures")]
 mod futures;
 pub mod message;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod rate_limit;
 pub mod shape;
 #[cfg(feature = "runtime-tokio")]
 mod tokio;
@@ -78,6 +80,8 @@ pub mod udp;
 pub mod websock;
 #[cfg(feature = "transport-webtrans")]
 pub mod webtrans;
+#[cfg(all(target_arch = "wasm32", feature = "transport-webtrans-browser"))]
+pub mod webtrans_browser;
 
 pub use adapter::SplitIo;
 pub use config::TransportConfig;
@@ -86,8 +90,12 @@ pub use error::TransportChannelError;
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
 pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};
+#[cfg(not(target_arch = "wasm32"))]
+pub use rate_limit::HandshakeRateLimiter;
 #[cfg(feature = "runtime-futures")]
 pub use shape::ByteStreamTransport;
 pub use shape::SecureChannel;
 #[cfg(feature = "runtime-tokio")]
 pub use tokio::{DEFAULT_HANDSHAKE_TIMEOUT, TokioTransportBuilder, TokioTransportChannel};
+#[cfg(all(target_arch = "wasm32", feature = "transport-webtrans-browser"))]
+pub use webtrans_browser::{BrowserWebTransportDatagrams, BrowserWebTransportError};
