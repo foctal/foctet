@@ -46,12 +46,23 @@
 //! never share a `(key_id, stream_id)` sequence space (which would reuse a
 //! nonce).
 //!
-//! # Scope
+//! # In-session rekey
 //!
-//! In-session rekey is **not** driven over this API yet (the control channel is
-//! used only for the initial handshake), matching the datagram and native
-//! message-shape limitation. Establish a fresh session rather than reusing one
-//! indefinitely.
+//! The authenticated DH-ratchet rekey is carried over this API too. Rekey
+//! control messages must travel over a **reliable, ordered** channel (the same
+//! one used for the handshake — a lost or reordered ratchet message would
+//! desynchronize the root chain), even when data flows as datagrams:
+//!
+//! - The side whose turn it is (see `canRekey`; the initiator holds the first
+//!   turn, and turns alternate) calls `forceRekey()` and sends the returned
+//!   bytes over the reliable channel.
+//! - The peer feeds them to `handleControlMessage()` (alias of
+//!   `handleHandshakeMessage`), which rotates its keys and hands the turn back.
+//!
+//! Frames sealed under the previous key are still opened after a rekey (the
+//! endpoint retains previous key generations and each frame names its
+//! `key_id`), so in-flight messages and reordered datagrams survive the
+//! rotation.
 
 use foctet_core::{
     ChannelBinding, ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram,
@@ -368,6 +379,41 @@ impl FoctetSession {
         self.handle_handshake_inner(message).map_err(core_to_js)
     }
 
+    /// Feeds a received control message (handshake *or* in-session rekey),
+    /// returning an optional reply to send. Alias of
+    /// [`Self::handle_handshake_message`] with a name that matches its full
+    /// role: after the handshake, feed the peer's rekey messages here so this
+    /// side rotates to the new traffic keys.
+    #[wasm_bindgen(js_name = handleControlMessage)]
+    pub fn handle_control_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
+        self.handle_handshake_inner(message).map_err(core_to_js)
+    }
+
+    /// Whether it is this side's turn to initiate the next rekey (the DH
+    /// ratchet alternates between peers; the initiator holds the first turn).
+    #[wasm_bindgen(js_name = canRekey)]
+    pub fn can_rekey(&self) -> bool {
+        self.session.can_rekey()
+    }
+
+    /// Performs one DH-ratchet rekey step and returns the control message to
+    /// send to the peer **over the reliable channel**. This side's keys rotate
+    /// immediately; the peer rotates when it feeds the message to
+    /// [`Self::handle_control_message`].
+    ///
+    /// Throws when it is the peer's turn to rekey (`canRekey() === false`).
+    #[wasm_bindgen(js_name = forceRekey)]
+    pub fn force_rekey(&mut self) -> Result<Vec<u8>, JsError> {
+        self.force_rekey_inner().map_err(core_to_js)
+    }
+
+    /// The identifier of the traffic key currently used for sealing, or
+    /// `undefined` before the handshake completes.
+    #[wasm_bindgen(getter, js_name = activeKeyId)]
+    pub fn active_key_id(&self) -> Option<u8> {
+        self.session.active_keys().map(|k| k.key_id)
+    }
+
     /// Whether the handshake has completed and traffic keys are available.
     #[wasm_bindgen(js_name = isEstablished)]
     pub fn is_established(&self) -> bool {
@@ -462,7 +508,37 @@ impl FoctetSession {
         let control = ControlMessage::decode(message)?;
         let reply = self.session.handle_control(&control)?;
         self.ensure_endpoint();
+        // A rekey control message rotates the session's active key; adopt it
+        // on the framing endpoint so subsequent seals use the new key while
+        // retained previous keys still open in-flight frames.
+        self.sync_endpoint_keys();
         Ok(reply.map(|msg| msg.encode()))
+    }
+
+    fn force_rekey_inner(&mut self) -> Result<Vec<u8>, CoreError> {
+        let msg = self.session.force_rekey()?;
+        self.sync_endpoint_keys();
+        Ok(msg.encode())
+    }
+
+    /// Installs the session's current active key on the framing endpoint
+    /// (no-op before the endpoint exists; the endpoint keeps previous key
+    /// generations for frames still in flight across the rotation).
+    fn sync_endpoint_keys(&mut self) {
+        if let (Some(endpoint), Some(keys)) = (self.endpoint.as_mut(), self.session.active_keys()) {
+            match endpoint {
+                SessionEndpoint::Message(e) => {
+                    if e.active_key_id() != keys.key_id {
+                        e.install_active_keys(keys);
+                    }
+                }
+                SessionEndpoint::Datagram(e) => {
+                    if e.active_key_id() != keys.key_id {
+                        e.install_active_keys(keys);
+                    }
+                }
+            }
+        }
     }
 
     /// Builds the framing endpoint (matching the session's mode) once the
@@ -744,6 +820,131 @@ mod tests {
             .expect("server hello");
         // The initiator must reject the responder whose identity it did not pin.
         assert!(initiator.handle_handshake_inner(&server_hello).is_err());
+    }
+
+    #[test]
+    fn in_session_rekey_rotates_keys_and_traffic_continues() {
+        let mut initiator =
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+        let mut responder =
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+        drive_handshake(&mut initiator, &mut responder);
+
+        let key_before = initiator.session.active_keys().expect("key").key_id;
+
+        // The initiator holds the first ratchet turn; the responder does not.
+        assert!(initiator.session.can_rekey());
+        assert!(!responder.session.can_rekey());
+        assert!(responder.force_rekey_inner().is_err());
+
+        // A frame sealed under the old key, delivered after the rekey below,
+        // must still open (previous key generations are retained).
+        let old_key_frame = initiator
+            .seal_message_inner(1, 0, b"sealed before rekey")
+            .expect("seal under old key");
+
+        let rekey = initiator.force_rekey_inner().expect("initiator rekeys");
+        assert!(
+            !initiator.session.can_rekey(),
+            "after rekeying, the turn passes to the peer"
+        );
+        responder
+            .handle_handshake_inner(&rekey)
+            .expect("responder applies rekey");
+        assert!(responder.session.can_rekey(), "turn handed to responder");
+
+        let key_after = initiator.session.active_keys().expect("key").key_id;
+        assert_eq!(key_after, key_before + 1, "active key must rotate");
+
+        // Traffic continues under the new key in both directions.
+        let frame = initiator
+            .seal_message_inner(1, 0, b"after rekey")
+            .expect("seal under new key");
+        let opened = responder.open_message_inner(&frame).expect("open");
+        assert_eq!(opened.plaintext, b"after rekey");
+        assert_eq!(opened.header.key_id, key_after);
+
+        let back = responder.seal_message_inner(1, 0, b"reply").expect("seal");
+        assert_eq!(
+            initiator.open_message_inner(&back).expect("open").plaintext,
+            b"reply"
+        );
+
+        // The pre-rekey frame still opens under the retained previous key.
+        assert_eq!(
+            responder
+                .open_message_inner(&old_key_frame)
+                .expect("old-key frame still opens")
+                .plaintext,
+            b"sealed before rekey"
+        );
+
+        // And the responder can now take its turn.
+        let rekey_back = responder.force_rekey_inner().expect("responder rekeys");
+        initiator
+            .handle_handshake_inner(&rekey_back)
+            .expect("initiator applies the responder's rekey");
+        assert_eq!(
+            initiator.session.active_keys().expect("key").key_id,
+            key_after + 1
+        );
+        let frame = initiator
+            .seal_message_inner(1, 0, b"third key")
+            .expect("seal");
+        assert_eq!(
+            responder
+                .open_message_inner(&frame)
+                .expect("open")
+                .plaintext,
+            b"third key"
+        );
+    }
+
+    #[test]
+    fn in_session_rekey_works_in_datagram_mode() {
+        let mut initiator = FoctetSession::initiator_with_kind(
+            SessionAuthConfig::unauthenticated_for_testing(),
+            TransportKind::Datagram {
+                max_datagram_size: 0,
+            },
+        );
+        let mut responder = FoctetSession::responder_with_kind(
+            SessionAuthConfig::unauthenticated_for_testing(),
+            TransportKind::Datagram {
+                max_datagram_size: 0,
+            },
+        );
+        drive_handshake(&mut initiator, &mut responder);
+
+        // Seal a datagram under the old key, deliver it *after* the rekey —
+        // the loss/reorder-tolerant shape must still open it.
+        let old_key_datagram = initiator
+            .seal_datagram_inner(2, 0, b"reordered across rekey")
+            .expect("seal under old key");
+
+        // The rekey control message itself travels over the reliable channel.
+        let rekey = initiator.force_rekey_inner().expect("initiator rekeys");
+        responder
+            .handle_handshake_inner(&rekey)
+            .expect("responder applies rekey");
+
+        let fresh = initiator
+            .seal_datagram_inner(2, 0, b"after rekey")
+            .expect("seal under new key");
+        assert_eq!(
+            responder
+                .open_datagram_inner(&fresh)
+                .expect("open new-key datagram")
+                .plaintext,
+            b"after rekey"
+        );
+        assert_eq!(
+            responder
+                .open_datagram_inner(&old_key_datagram)
+                .expect("open reordered old-key datagram")
+                .plaintext,
+            b"reordered across rekey"
+        );
     }
 
     #[test]
