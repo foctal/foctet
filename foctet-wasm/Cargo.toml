@@ -26,6 +26,11 @@ getrandom = { version = "0.2", features = ["js"] }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # In-browser integration tests: `wasm-pack test --headless --chrome foctet-wasm`.
 wasm-bindgen-test = "0.3"
+# Exercises the browser WebTransport datagram adapter against in-page mock
+# streams inside real headless Chrome (see tests/browser.rs).
+foctet-transport = { path = "../foctet-transport", version = "0.2.0", default-features = false, features = ["transport-webtrans-browser"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
