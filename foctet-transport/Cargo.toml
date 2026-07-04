@@ -55,6 +55,7 @@ rcgen = "0.14"
 url = "2"
 clap = { version = "4", features = ["derive"] }
 rustls-pemfile = "2"
+bytes = "1"
 
 [[example]]
 name = "muxtls_split"
@@ -75,3 +76,18 @@ required-features = ["runtime-tokio", "transport-websock-mux"]
 name = "quinn_split"
 path = "examples/quinn_split.rs"
 required-features = ["runtime-tokio", "transport-quinn"]
+
+[[example]]
+name = "udp_datagram_split"
+path = "examples/udp_datagram_split.rs"
+required-features = ["runtime-tokio"]
+
+[[example]]
+name = "websock_message_server"
+path = "examples/websock_message_server.rs"
+required-features = ["runtime-tokio", "transport-websock"]
+
+[[example]]
+name = "webtrans_datagram_split"
+path = "examples/webtrans_datagram_split.rs"
+required-features = ["runtime-tokio", "transport-webtrans"]

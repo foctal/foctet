@@ -37,6 +37,14 @@ cargo run -p foctet --example secure_channel_sync
 - `foctet-transport/examples/webtrans_split.rs` (`--features transport-webtrans`)
 - `foctet-transport/examples/websock_split.rs` (`--features transport-websock-mux`)
 - `foctet-transport/examples/muxtls_split.rs` (`--features transport-muxtls`)
+- `foctet-transport/examples/udp_datagram_split.rs` (`--features runtime-tokio`) —
+  raw-UDP datagrams with the handshake over a TCP control channel + anti-amplification
+- `foctet-transport/examples/websock_message_server.rs` (`--features "runtime-tokio transport-websock"`) —
+  native raw-WebSocket message responder; counterpart for the browser WASM SDK
+  (`foctet-wasm/examples/browser/websocket.html`)
+- `foctet-transport/examples/webtrans_datagram_split.rs` (`--features "runtime-tokio transport-webtrans"`) —
+  native WebTransport responder (handshake over a stream, data over datagrams);
+  counterpart for the browser page (`foctet-wasm/examples/browser/webtransport.html`)
 
 These examples all use authenticated Foctet handshakes and `SessionAuthConfig`. They
 are the best reference when integrating Foctet with existing stream transports. Each
