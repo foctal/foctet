@@ -115,6 +115,7 @@ pub struct ReplayProtector {
     windows: HashMap<(u8, u32), ReplayWindow>,
     window_size: u64,
     max_windows: usize,
+    rejections: u64,
 }
 
 impl ReplayProtector {
@@ -125,6 +126,7 @@ impl ReplayProtector {
             windows: HashMap::new(),
             window_size,
             max_windows: DEFAULT_MAX_REPLAY_WINDOWS,
+            rejections: 0,
         }
     }
 
@@ -140,6 +142,18 @@ impl ReplayProtector {
         self.windows.len()
     }
 
+    /// Returns how many frames this protector has rejected (duplicates,
+    /// frames outside the window, and window-capacity rejections) since
+    /// creation.
+    ///
+    /// This is an observability counter, not a security signal by itself:
+    /// lossy/reordering transports legitimately produce occasional
+    /// rejections, but a sustained rise indicates replay or flooding
+    /// activity. It carries no key material.
+    pub fn rejections(&self) -> u64 {
+        self.rejections
+    }
+
     /// Validates and records sequence number for `(key_id, stream_id)`.
     ///
     /// Returns [`CoreError::ReplayCapacityExceeded`] when a previously unseen
@@ -151,18 +165,23 @@ impl ReplayProtector {
         stream_id: u32,
         seq: u64,
     ) -> Result<(), CoreError> {
-        match self.windows.get_mut(&(key_id, stream_id)) {
+        let result = match self.windows.get_mut(&(key_id, stream_id)) {
             Some(w) => w.check_and_record(seq),
             None => {
                 if self.windows.len() >= self.max_windows {
-                    return Err(CoreError::ReplayCapacityExceeded);
+                    Err(CoreError::ReplayCapacityExceeded)
+                } else {
+                    let mut w = ReplayWindow::new(self.window_size);
+                    let result = w.check_and_record(seq);
+                    self.windows.insert((key_id, stream_id), w);
+                    result
                 }
-                let mut w = ReplayWindow::new(self.window_size);
-                let result = w.check_and_record(seq);
-                self.windows.insert((key_id, stream_id), w);
-                result
             }
+        };
+        if result.is_err() {
+            self.rejections = self.rejections.saturating_add(1);
         }
+        result
     }
 }
 

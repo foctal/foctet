@@ -81,6 +81,8 @@ pub mod io;
 pub mod limits;
 /// Message-oriented endpoint (one frame per discrete message) for raw WebSocket.
 pub mod message;
+/// Observability hooks for session lifecycle events (no key material exposed).
+pub mod observe;
 /// TLV payload encoding/decoding helpers for encrypted application bytes.
 pub mod payload;
 /// Replay-window tracking and duplicate-frame protection.
@@ -106,7 +108,7 @@ pub use body_stream::{
     DecodedChunk, STREAM_CHUNK_OVERHEAD, STREAM_MAGIC, STREAM_NONCE_PREFIX_LEN, STREAM_PROFILE_V0,
     STREAM_VERSION_V0, StreamFrameDecoder, StreamItem, StreamOpener, StreamSealer,
 };
-pub use control::{ControlMessage, ControlMessageKind};
+pub use control::{ControlMessage, ControlMessageKind, MAX_CONTROL_MESSAGE_LEN};
 pub use crypto::{
     Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
     derive_ratchet_root, derive_traffic_keys, dh_ratchet_step, encrypt_frame, make_nonce,
@@ -120,11 +122,15 @@ pub use frame::{
     DRAFT_MAGIC, FRAME_HEADER_LEN, FoctetFramed, FoctetStream, Frame, FrameHeader,
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, WIRE_VERSION_V0,
 };
-pub use limits::{DEFAULT_MAX_CIPHERTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS, ProtocolLimits};
+pub use limits::{
+    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_MAX_BUFFERED_TX_BYTES, DEFAULT_MAX_CIPHERTEXT_LEN,
+    DEFAULT_MAX_PLAINTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS, ProtocolLimits,
+};
 pub use message::{
     DEFAULT_MAX_MESSAGE_SIZE, DecodedMessage, MESSAGE_FRAME_OVERHEAD, MessageConfig,
     MessageEndpoint,
 };
+pub use observe::{SessionEvent, SessionObserver};
 pub use payload::{Tlv, decode_tlvs, encode_tlvs, tlv_type};
 pub use replay::{
     DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow,
@@ -211,6 +217,10 @@ pub enum CoreError {
     /// Frame exceeds configured size limits.
     #[error("frame exceeds configured limit")]
     FrameTooLarge,
+    /// Outbound frame buffer exceeded its configured limit before the
+    /// underlying I/O drained it; flush pending frames and retry.
+    #[error("outbound buffer limit exceeded")]
+    OutboundBufferLimitExceeded,
     /// Unexpected EOF while reading/writing frame bytes.
     #[error("unexpected eof")]
     UnexpectedEof,
@@ -238,4 +248,8 @@ pub enum CoreError {
     /// The handshake did not complete within the configured deadline.
     #[error("handshake timed out")]
     HandshakeTimeout,
+    /// A handshake was refused by connection-level admission control
+    /// (rate limiting); retry later or drop the connection.
+    #[error("handshake rate limited")]
+    HandshakeRateLimited,
 }

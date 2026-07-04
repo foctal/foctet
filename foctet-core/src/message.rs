@@ -146,6 +146,14 @@ impl MessageEndpoint {
         self.active_key_id
     }
 
+    /// Returns how many inbound frames this endpoint's replay protection has
+    /// rejected since creation (see
+    /// [`crate::ReplayProtector::rejections`]); an observability counter that
+    /// carries no key material.
+    pub fn replay_rejections(&self) -> u64 {
+        self.replay.rejections()
+    }
+
     /// Returns known key IDs, active first.
     pub fn known_key_ids(&self) -> Vec<u8> {
         self.keys.iter().map(|k| k.key_id).collect()

@@ -435,6 +435,13 @@ impl<T> SyncIo<T> {
         self.active_key_id
     }
 
+    /// Returns how many inbound frames this transport's replay protection has
+    /// rejected since creation (see [`crate::ReplayProtector::rejections`]);
+    /// an observability counter that carries no key material.
+    pub fn replay_rejections(&self) -> u64 {
+        self.replay.rejections()
+    }
+
     /// Returns known key IDs, active first.
     pub fn known_key_ids(&self) -> Vec<u8> {
         self.keys.iter().map(|k| k.key_id).collect()
@@ -491,6 +498,9 @@ impl<T: Read + Write> SyncIo<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
+        if plaintext.len() > self.limits.max_plaintext_len {
+            return Err(CoreError::FrameTooLarge);
+        }
         let frame = encrypt_frame(
             keys,
             self.outbound_direction,
@@ -823,6 +833,23 @@ mod tests {
             .recv()
             .expect_err("frame exceeding the configured ciphertext limit must be rejected");
         assert!(matches!(err, CoreError::FrameTooLarge));
+    }
+
+    #[test]
+    fn send_rejects_plaintext_over_the_configured_limit() {
+        use crate::limits::ProtocolLimits;
+
+        let keys = test_keys();
+        let mut io = SyncIo::new(MockIo::default(), keys, Direction::S2C, Direction::C2S)
+            .with_limits(ProtocolLimits::default().with_max_plaintext_len(4));
+
+        let err = io
+            .send(b"way past the limit")
+            .expect_err("oversized plaintext must be rejected before encryption");
+        assert!(matches!(err, CoreError::FrameTooLarge));
+        assert!(io.io.outbound.is_empty(), "nothing may be written");
+
+        io.send(b"ok").expect("small payload still sends");
     }
 
     #[test]

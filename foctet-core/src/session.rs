@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -54,6 +54,7 @@ use crate::{
         Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, derive_ratchet_root,
         derive_traffic_keys, dh_ratchet_step, random_session_salt,
     },
+    observe::{ObserverHandle, SessionEvent, SessionObserver},
 };
 
 /// Role of this endpoint in the native handshake.
@@ -124,6 +125,7 @@ pub struct Session {
     outbound_frames: u64,
     outbound_bytes: u64,
     last_rekey_at: MonoInstant,
+    observer: ObserverHandle,
 }
 
 impl Drop for Session {
@@ -180,6 +182,7 @@ impl Session {
                 outbound_frames: 0,
                 outbound_bytes: 0,
                 last_rekey_at: MonoInstant::now(),
+                observer: ObserverHandle::default(),
             },
             msg,
         )
@@ -209,6 +212,7 @@ impl Session {
             outbound_frames: 0,
             outbound_bytes: 0,
             last_rekey_at: MonoInstant::now(),
+            observer: ObserverHandle::default(),
         }
     }
 
@@ -254,8 +258,32 @@ impl Session {
         }
     }
 
+    /// Installs an observer notified of session lifecycle events
+    /// (see [`crate::observe`]). Events carry no key material.
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn SessionObserver>) -> Self {
+        self.observer.set(observer);
+        self
+    }
+
+    /// Installs an observer on an existing session; see [`Self::with_observer`].
+    pub fn set_observer(&mut self, observer: Arc<dyn SessionObserver>) {
+        self.observer.set(observer);
+    }
+
     /// Applies an incoming control message and optionally returns a response.
     pub fn handle_control(
+        &mut self,
+        msg: &ControlMessage,
+    ) -> Result<Option<ControlMessage>, CoreError> {
+        let result = self.handle_control_inner(msg);
+        if result.is_err() {
+            self.observer.emit(SessionEvent::ControlRejected);
+        }
+        result
+    }
+
+    fn handle_control_inner(
         &mut self,
         msg: &ControlMessage,
     ) -> Result<Option<ControlMessage>, CoreError> {
@@ -299,6 +327,10 @@ impl Session {
                 self.peer_authenticated = authenticated_peer.is_some();
                 self.authenticated_peer_key = authenticated_peer;
                 self.last_rekey_at = MonoInstant::now();
+                self.observer.emit(SessionEvent::HandshakeCompleted {
+                    role: self.role,
+                    peer_authenticated: self.peer_authenticated,
+                });
 
                 let server_binding = server_hello_binding(
                     *eph_public,
@@ -357,6 +389,10 @@ impl Session {
                 self.peer_authenticated = authenticated_peer.is_some();
                 self.authenticated_peer_key = authenticated_peer;
                 self.last_rekey_at = MonoInstant::now();
+                self.observer.emit(SessionEvent::HandshakeCompleted {
+                    role: self.role,
+                    peer_authenticated: self.peer_authenticated,
+                });
                 Ok(None)
             }
             (
@@ -398,6 +434,10 @@ impl Session {
                 self.install_new_active_key(next);
                 self.can_rekey = true;
                 self.last_rekey_at = MonoInstant::now();
+                self.observer.emit(SessionEvent::RekeyApplied {
+                    old_key_id: *old_key_id,
+                    new_key_id: *new_key_id,
+                });
                 Ok(None)
             }
             (_, SessionState::Active, ControlMessage::Error { .. }) => Ok(None),
@@ -453,6 +493,16 @@ impl Session {
         Ok(None)
     }
 
+    /// Whether it is this side's turn to initiate the next DH-ratchet rekey.
+    ///
+    /// Rekeys strictly alternate: the initiator holds the first turn, and each
+    /// applied rekey hands the turn to the other side. When this returns
+    /// `false`, [`Session::force_rekey`] fails with
+    /// [`CoreError::RekeyNotPermitted`].
+    pub fn can_rekey(&self) -> bool {
+        self.state == SessionState::Active && self.can_rekey
+    }
+
     /// Forces an immediate rekey (one DH-ratchet step) and returns the `Rekey`
     /// control message to send to the peer.
     ///
@@ -494,6 +544,11 @@ impl Session {
         self.outbound_frames = 0;
         self.outbound_bytes = 0;
         self.last_rekey_at = MonoInstant::now();
+
+        self.observer.emit(SessionEvent::RekeyInitiated {
+            old_key_id,
+            new_key_id,
+        });
 
         let transcript_binding =
             rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);
@@ -1107,6 +1162,131 @@ mod tests {
             .handle_control(&forged_rekey)
             .expect_err("rekey from an unrecognized old_key_id must be rejected");
         assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
+
+    #[test]
+    fn observer_sees_handshake_rekey_and_rejections_without_secrets() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<SessionEvent>>);
+        impl SessionObserver for Recorder {
+            fn on_session_event(&self, event: SessionEvent) {
+                self.0.lock().expect("recorder lock").push(event);
+            }
+        }
+
+        let client_events = Arc::new(Recorder::default());
+        let server_events = Arc::new(Recorder::default());
+
+        let (client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut client = client.with_observer(client_events.clone());
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        )
+        .with_observer(server_events.clone());
+
+        let server_hello = server
+            .handle_control(&hello)
+            .expect("server handles hello")
+            .expect("server hello");
+        client
+            .handle_control(&server_hello)
+            .expect("client finalizes");
+
+        assert_eq!(
+            *client_events.0.lock().expect("lock"),
+            vec![SessionEvent::HandshakeCompleted {
+                role: HandshakeRole::Initiator,
+                peer_authenticated: false,
+            }]
+        );
+        assert_eq!(
+            *server_events.0.lock().expect("lock"),
+            vec![SessionEvent::HandshakeCompleted {
+                role: HandshakeRole::Responder,
+                peer_authenticated: false,
+            }]
+        );
+
+        // Rekey: initiator emits RekeyInitiated, receiver RekeyApplied.
+        let rekey = client.force_rekey().expect("client rekeys");
+        server.handle_control(&rekey).expect("server applies");
+        assert_eq!(
+            client_events.0.lock().expect("lock").last(),
+            Some(&SessionEvent::RekeyInitiated {
+                old_key_id: 0,
+                new_key_id: 1,
+            })
+        );
+        assert_eq!(
+            server_events.0.lock().expect("lock").last(),
+            Some(&SessionEvent::RekeyApplied {
+                old_key_id: 0,
+                new_key_id: 1,
+            })
+        );
+
+        // A rejected control message (replayed rekey) emits ControlRejected.
+        assert!(server.handle_control(&rekey).is_err());
+        assert_eq!(
+            server_events.0.lock().expect("lock").last(),
+            Some(&SessionEvent::ControlRejected)
+        );
+    }
+
+    #[test]
+    fn rekey_delivered_ahead_of_order_is_rejected_and_state_is_unchanged() {
+        // Out-of-order delivery in the *forward* direction: the receiver is
+        // active on key `k`, but a `Rekey` arrives that rotates away from
+        // `k + 1` — the transition a *future* rekey would name, as if a later
+        // ratchet message overtook the pending one. Even with a transcript
+        // binding that is internally consistent for its own key ids, it must
+        // be rejected (the ratchet chain cannot skip a step), and the session
+        // must remain usable: the correctly ordered rekey still applies.
+        let (mut client, mut server) = active_pair();
+
+        let active_id = server.active_keys().expect("server active key").key_id;
+        let ahead_old = active_id.wrapping_add(1);
+        let ahead_new = active_id.wrapping_add(2);
+        let ratchet_public = [0x42; 32];
+        let ahead_rekey = ControlMessage::Rekey {
+            old_key_id: ahead_old,
+            new_key_id: ahead_new,
+            ratchet_public,
+            transcript_binding: rekey_binding(
+                ahead_old,
+                ahead_new,
+                &ratchet_public,
+                server.session_salt,
+            ),
+        };
+
+        let err = server
+            .handle_control(&ahead_rekey)
+            .expect_err("a rekey skipping ahead of the active key must be rejected");
+        assert!(matches!(err, CoreError::UnexpectedControlMessage));
+
+        // No key was installed and the ratchet did not advance: the genuine
+        // in-order rekey from the peer still lands on both sides.
+        assert_eq!(
+            server.active_keys().expect("server key").key_id,
+            active_id,
+            "rejected rekey must not rotate the active key"
+        );
+        let rekey = client.force_rekey().expect("client force rekey");
+        server
+            .handle_control(&rekey)
+            .expect("in-order rekey still applies after the rejected one");
+        assert_eq!(
+            client.active_keys().expect("client key"),
+            server.active_keys().expect("server key"),
+            "both sides must still converge on the same key"
+        );
     }
 
     #[test]

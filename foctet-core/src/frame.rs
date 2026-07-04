@@ -308,6 +308,13 @@ impl<T> FoctetFramed<T> {
         self.active_key_id
     }
 
+    /// Returns how many inbound frames this transport's replay protection has
+    /// rejected since creation (see [`crate::ReplayProtector::rejections`]);
+    /// an observability counter that carries no key material.
+    pub fn replay_rejections(&self) -> u64 {
+        self.replay.rejections()
+    }
+
     /// Installs new active keys and retains previous keys.
     pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.keys.retain(|k| k.key_id != keys.key_id);
@@ -359,17 +366,38 @@ impl<T> FoctetFramed<T> {
                 actual: key_id,
             })?
             .clone();
+        self.enqueue_encrypted(&keys, flags, stream_id, plaintext)
+    }
+
+    /// Encrypts one frame and appends it to the outbound buffer, enforcing the
+    /// configured plaintext and buffered-bytes limits. The sequence number is
+    /// only committed once the frame is actually enqueued, so a rejected send
+    /// consumes no nonce.
+    fn enqueue_encrypted(
+        &mut self,
+        keys: &KeyHandle,
+        flags: u8,
+        stream_id: u32,
+        plaintext: &[u8],
+    ) -> Result<(), CoreError> {
+        if plaintext.len() > self.limits.max_plaintext_len {
+            return Err(CoreError::FrameTooLarge);
+        }
         let frame = encrypt_frame(
-            &keys,
+            keys,
             self.outbound_direction,
             flags,
             stream_id,
             self.next_seq.current(),
             plaintext,
         )?;
+        let bytes = frame.to_bytes();
+        if self.tx.len().saturating_add(bytes.len()) > self.limits.max_buffered_tx_bytes {
+            return Err(CoreError::OutboundBufferLimitExceeded);
+        }
         let next_seq = self.next_seq.prepared_next()?;
         self.next_seq.commit(next_seq);
-        self.tx.extend_from_slice(&frame.to_bytes());
+        self.tx.extend_from_slice(&bytes);
         Ok(())
     }
 }
@@ -398,18 +426,7 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
     ) -> Result<(), CoreError> {
         let this = self.get_mut();
         let active = this.active_keys()?.clone();
-        let frame = encrypt_frame(
-            &active,
-            this.outbound_direction,
-            flags,
-            stream_id,
-            this.next_seq.current(),
-            plaintext,
-        )?;
-        let next_seq = this.next_seq.prepared_next()?;
-        this.next_seq.commit(next_seq);
-        this.tx.extend_from_slice(&frame.to_bytes());
-        Ok(())
+        this.enqueue_encrypted(&active, flags, stream_id, plaintext)
     }
 
     /// Enqueues a control payload frame.
@@ -627,18 +644,7 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
     fn start_send(self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
         let this = self.get_mut();
         let active = this.active_keys()?.clone();
-        let frame = encrypt_frame(
-            &active,
-            this.outbound_direction,
-            this.default_flags,
-            this.default_stream_id,
-            this.next_seq.current(),
-            &item,
-        )?;
-        let next_seq = this.next_seq.prepared_next()?;
-        this.next_seq.commit(next_seq);
-        this.tx.extend_from_slice(&frame.to_bytes());
-        Ok(())
+        this.enqueue_encrypted(&active, this.default_flags, this.default_stream_id, &item)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -897,6 +903,86 @@ mod tests {
             Poll::Ready(Some(Ok(frame))) => assert_eq!(frame.plaintext, b"hello"),
             other => panic!("expected the genuine seq=0 frame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn start_send_rejects_plaintext_over_the_configured_limit() {
+        use crate::limits::ProtocolLimits;
+
+        let eph_a = EphemeralKeyPair::generate();
+        let eph_b = EphemeralKeyPair::generate();
+        let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
+        let salt = random_session_salt();
+        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
+
+        let mut framed =
+            FoctetFramed::new(MemoryIo::default(), keys, Direction::C2S, Direction::C2S)
+                .with_limits(ProtocolLimits::default().with_max_plaintext_len(4));
+
+        let err = Pin::new(&mut framed)
+            .start_send_with(0, 0, b"way past the limit")
+            .expect_err("oversized plaintext must be rejected before encryption");
+        assert!(matches!(err, CoreError::FrameTooLarge));
+
+        // A rejected send must not consume a sequence number: the next small
+        // frame still starts at seq 0 and decrypts.
+        Pin::new(&mut framed)
+            .start_send_with(0, 0, b"ok")
+            .expect("small payload still sends");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(&mut framed).poll_flush(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("flush failed: {other:?}"),
+        }
+        let outbound = framed.get_ref().outbound.clone();
+        framed.get_mut().push_inbound(&outbound);
+        match Pin::new(&mut framed).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                assert_eq!(frame.plaintext, b"ok");
+                assert_eq!(frame.header.seq, 0);
+            }
+            other => panic!("unexpected poll_next: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enqueue_fails_once_the_tx_buffer_limit_is_hit() {
+        use crate::limits::ProtocolLimits;
+
+        let eph_a = EphemeralKeyPair::generate();
+        let eph_b = EphemeralKeyPair::generate();
+        let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
+        let salt = random_session_salt();
+        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
+
+        // Budget: exactly one small frame fits, a second enqueue without a
+        // flush must fail closed instead of growing the buffer unboundedly.
+        let one_frame_budget = super::FRAME_HEADER_LEN + b"payload".len() + 16;
+        let mut framed =
+            FoctetFramed::new(MemoryIo::default(), keys, Direction::C2S, Direction::C2S)
+                .with_limits(
+                    ProtocolLimits::default().with_max_buffered_tx_bytes(one_frame_budget),
+                );
+
+        Pin::new(&mut framed)
+            .start_send_with(0, 0, b"payload")
+            .expect("first frame fits the budget");
+        let err = Pin::new(&mut framed)
+            .start_send_with(0, 0, b"payload")
+            .expect_err("second frame must exceed the buffered-tx budget");
+        assert!(matches!(err, CoreError::OutboundBufferLimitExceeded));
+
+        // Draining the buffer makes room again.
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(&mut framed).poll_flush(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("flush failed: {other:?}"),
+        }
+        Pin::new(&mut framed)
+            .start_send_with(0, 0, b"payload")
+            .expect("after draining, sending works again");
     }
 
     #[test]
