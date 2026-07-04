@@ -49,8 +49,13 @@ async fn main() {
         store: InMemoryReplayStore::new(),
     });
 
+    // `/foctet-elsewhere` is wired to the *same* handler purely so the client's
+    // `--wrong-path` negative test can deliver a request sealed for `/foctet`
+    // onto a different route: the handler still runs, but the path bound into
+    // the AEAD no longer matches, so opening fails closed with HTTP 401.
     let app = Router::new()
         .route("/foctet", post(handle_foctet))
+        .route("/foctet-elsewhere", post(handle_foctet))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")

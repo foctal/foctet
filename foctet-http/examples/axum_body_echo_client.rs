@@ -19,6 +19,10 @@ use x25519_dalek::{PublicKey, StaticSecret};
 const SERVER_SECRET_KEY: [u8; 32] = [0x11; 32];
 const CLIENT_SECRET_KEY: [u8; 32] = [0x22; 32];
 const SERVER_URL: &str = "http://127.0.0.1:3000/foctet";
+// A different route on the same server, used by `--wrong-path` to deliver a
+// request sealed for `/foctet` onto another path (the AEAD binds the path, so
+// the server rejects it with 401).
+const SERVER_URL_ALT: &str = "http://127.0.0.1:3000/foctet-elsewhere";
 
 #[tokio::main]
 async fn main() {
@@ -29,8 +33,25 @@ async fn main() {
     ));
     let opener = HttpOpener::new(HttpOpenOptions::new(CLIENT_SECRET_KEY));
 
+    // `--replay` re-sends the identical sealed request; the server's ReplayStore
+    // must reject the second one with HTTP 409 (single-use message id).
+    let replay = std::env::args().any(|arg| arg == "--replay");
+    // `--wrong-path` posts a request sealed for `/foctet` to `/foctet-elsewhere`;
+    // the path is bound into the AEAD, so the server must reject it with 401.
+    let wrong_path = std::env::args().any(|arg| arg == "--wrong-path");
+    // `--expired` seals with an already-elapsed expiry (fresh timestamp skew, but
+    // past `expiry_secs`); the server must reject it with 401.
+    let expired = std::env::args().any(|arg| arg == "--expired");
+
     let now = unix_now_secs();
-    let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+    // For `--expired`, backdate the carrier so `now` is already past its expiry
+    // while the timestamp still passes the clock-skew check.
+    let carrier = if expired {
+        let age = DEFAULT_CONTEXT_TTL_SECS + DEFAULT_MAX_CLOCK_SKEW_SECS + 10;
+        ContextCarrier::generate(now.saturating_sub(age), DEFAULT_CONTEXT_TTL_SECS)
+    } else {
+        ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS)
+    };
     // Remember our request id so we can confirm the response answers it.
     let request_message_id = carrier.message_id;
 
@@ -52,17 +73,34 @@ async fn main() {
     let sealed_headers = encrypted_request.headers().clone();
     let sealed_body = encrypted_request.body().clone();
 
-    let send_sealed = |client: &Client| {
-        let mut request_builder = client.post(SERVER_URL);
+    let send_sealed_to = |client: &Client, url: &str| {
+        let mut request_builder = client.post(url);
         for (name, value) in &sealed_headers {
             request_builder = request_builder.header(name, value);
         }
         request_builder.body(sealed_body.clone()).send()
     };
+    let send_sealed = |client: &Client| send_sealed_to(client, SERVER_URL);
 
-    // `--replay` re-sends the identical sealed request; the server's ReplayStore
-    // must reject the second one with HTTP 409 (single-use message id).
-    let replay = std::env::args().any(|arg| arg == "--replay");
+    // `--wrong-path` / `--expired` are single-shot negative tests: the one request
+    // must be rejected with 401, and there is no encrypted response to open.
+    if wrong_path || expired {
+        let (label, url) = if wrong_path {
+            ("wrong-path", SERVER_URL_ALT)
+        } else {
+            ("expired", SERVER_URL)
+        };
+        let response = send_sealed_to(&client, url).await.expect("send request");
+        let status = response.status();
+        println!("{label} status: {status}");
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            println!("{label} correctly rejected with 401 Unauthorized");
+        } else {
+            println!("UNEXPECTED: {label} was not rejected with 401");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let response = send_sealed(&client).await.expect("send request");
 
