@@ -1,0 +1,16 @@
+{
+  "name": "foctet-interop-verify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Independent (non-Rust) verification of the canonical Foctet Draft v0 test vectors",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node verify_vectors.mjs"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@noble/ciphers": "2.0.1",
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1"
+  }
+}
