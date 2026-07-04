@@ -131,7 +131,7 @@ bidirectional encrypted streams across two processes.
 - [ ] **Network impairment:** between the two, apply loss/latency
   (`tc qdisc add dev <if> root netem loss 5% delay 50ms` on Linux, or `dnctl`
   /`pfctl` on macOS) and confirm QUIC recovers and frames still authenticate.
-- [ ] **Long-lived / rekey:** see §7.
+- [x] **Long-lived / rekey:** see §7 (turn-key via `--messages` / `--rekey-frames`).
 
 ### 3.2 WebSocket (`websock-mux`, `wss://`) — VERIFIED two-process
 
@@ -165,10 +165,30 @@ websock client finished
 
 `WebsockMessageTransport` is generic over `websock::WebSocketConnection` and
 compiles for `wasm32` under `transport-websock` (browser `websock-wasm` backend).
-CI build-checks it; a real browser run is still open.
+CI build-checks it; a real browser run is covered below.
 - [x] Build check: `cargo check -p foctet-transport --no-default-features --features transport-websock --target wasm32-unknown-unknown`.
-- [ ] Real run: build a tiny wasm front-end that drives a `SecureMessageChannel`
-  over a browser `WebSocket` against the §3.2 server, served like §6.
+- [x] **Real browser run** — the browser drives the WASM `FoctetSession` as the
+  handshake *initiator* over a real `WebSocket` against the native
+  `websock_message_server` responder (raw-message shape, the counterpart the
+  browser SDK produces). Both speak one Foctet frame per binary WS message.
+
+  Terminal A — native responder:
+  ```bash
+  cargo run -p foctet-transport --example websock_message_server \
+    --features "runtime-tokio transport-websock" -- --role server --addr 127.0.0.1:4460
+  ```
+  Terminal B — serve the wasm page (rebuilds `pkg-web`):
+  ```bash
+  cd foctet-wasm && npm run browser   # serves http://localhost:8011/...
+  ```
+  Open `http://localhost:8011/examples/browser/websocket.html`. Expected on the
+  page: **3 passed, 0 failed** (WebSocket connect + authenticated handshake, then
+  two messages echoed). The server logs `handshake complete; peer authenticated`
+  and `echoed … byte(s)`. *(Verified in a real browser: authenticated
+  browser-initiator ↔ native-responder handshake + sealed message echo.)*
+
+  A native `--role client` / `--role loopback` drives the same wire format
+  without a browser (`… --role loopback`), useful for a quick smoke test.
 
 ### 3.4 muxtls — loopback smoke only
 
@@ -182,11 +202,38 @@ the peer authenticator), so it ships as a one-process smoke test:
 ### 3.5 WebTransport (`webtrans`) — loopback smoke + browser is the real target
 
 - [x] Loopback: `cargo run -p foctet-transport --example webtrans_split --features "transport-webtrans runtime-tokio"`.
-- [ ] **Browser client** against a native server is the meaningful test, via the
-  WASM `FoctetSession` (§6) driving a real `WebTransport` (streams *and*
-  datagrams). Needs the cert's SHA-256 in `serverCertificateHashes`
-  (`devcert/localhost.hex`) and a browser page. This is the missing
-  native↔browser WebTransport integration test (TODO §3.3/§3.4).
+- [x] **Browser client against a native server** — `webtrans_datagram_split`
+  (`--role server`) is the native responder; the WASM `FoctetSession`
+  (datagram mode) is the browser initiator. The authenticated handshake runs
+  over a reliable bidi stream (the byte-framed Foctet handshake), then the sealed
+  application data flows as WebTransport **datagrams** (one Foctet datagram frame
+  each — the shape `sealDatagram`/`openDatagram` produce).
+
+  First refresh the dev cert (ECDSA P-256, ≤14-day validity — required for
+  `serverCertificateHashes`): `cd devcert && ./generate.sh && cd ..`.
+
+  Terminal A — native responder with the dev cert:
+  ```bash
+  cargo run -p foctet-transport --example webtrans_datagram_split \
+    --features "runtime-tokio transport-webtrans" -- --role server \
+    --addr 127.0.0.1:4470 --tls-cert devcert/localhost.crt --tls-key devcert/localhost.key
+  ```
+  Terminal B — serve the wasm page (rebuilds `pkg-web`):
+  ```bash
+  cd foctet-wasm && npm run browser   # serves http://localhost:8011/...
+  ```
+  Open `http://localhost:8011/examples/browser/webtransport.html`, paste the
+  contents of `devcert/localhost.hex` into the cert-hash field, and press **Run
+  test**. Expected: **3 passed, 0 failed** (WebTransport connect + authenticated
+  handshake over a stream, then two datagrams echoed). The server logs
+  `handshake complete; peer authenticated` and `echoed … byte(s)`. *(Verified in
+  a real browser: authenticated browser-initiator ↔ native-responder handshake
+  over a WebTransport stream + sealed datagram echo.)*
+
+  A native `--role client` / `--role loopback` drives the same wire format
+  (handshake over a stream, data over datagrams) without a browser — a quick
+  smoke test for the protocol. The streams-only `webtrans_split` remains the
+  loopback smoke test for the stream path.
 
 ### 3.6 Raw UDP datagram + anti-amplification (TODO §3.5)
 
@@ -195,12 +242,34 @@ endpoints):
 - [x] `cargo test -p foctet-transport --features runtime-tokio udp::` runs
   `roundtrip_over_real_udp_sockets` and `anti_amplification_caps_sends_until_validated`
   (a spoofable peer is capped at `factor × received` until `mark_peer_validated()`).
-- [ ] **Cross-host** UDP (real path/MTU/NAT) needs a two-process driver. Pattern:
-  establish the Foctet session over a reliable control channel (e.g. the §3.1
-  QUIC/TCP handshake), then build `SecureDatagramChannel::from_active_session`
-  over a *connected* `UdpDatagramTransport` on each side and exchange datagrams;
-  enable `UdpDatagramTransport::with_anti_amplification(3)` on the unvalidated
-  side. (No turn-key example yet — see TODO §3.5.)
+- [x] **Two-process driver** — `udp_datagram_split` runs the authenticated Foctet
+  handshake over a reliable TCP control channel, then builds
+  `SecureDatagramChannel::from_active_session` over a *connected*
+  `UdpDatagramTransport` on each side and exchanges datagrams. The server enables
+  `with_anti_amplification(3)`, so it refuses an unsolicited send until the first
+  client datagram validates the address, then calls `mark_peer_validated()`.
+  ```bash
+  cargo build -p foctet-transport --example udp_datagram_split --features runtime-tokio
+  BIN=target/debug/examples/udp_datagram_split
+  ```
+  **Terminal A (server):**
+  ```bash
+  $BIN --role server --control-addr 127.0.0.1:4455 --udp-addr 127.0.0.1:4456
+  ```
+  **Terminal B (client):**
+  ```bash
+  $BIN --role client --control-addr 127.0.0.1:4455 --datagrams 3
+  ```
+  Server logs (proves the amplifier is capped until validation):
+  ```
+  anti-amplification: refused to send before validation (WouldBlock) — ok
+  received first client datagram — marked peer validated, cap lifted
+  server echoed 3 datagram(s)
+  ```
+  Client prints each `client datagram N got: udp echo N reply to: ...` (exit 0).
+- [ ] **Cross-host** UDP (real path/MTU/NAT): run the same two processes on two
+  hosts — swap `--control-addr`/`--udp-addr` for the server's routable addresses.
+  Confirm datagrams still authenticate through real NAT/MTU.
 
 ---
 
@@ -241,9 +310,20 @@ message-id/timestamp bound into the AEAD; the response answers the request id.
   ```
   (exits non-zero if the replay was *not* rejected). Proves the `ReplayStore`
   enforces single use over the wire.
-- [ ] **Route substitution / expiry:** modify the client to POST the sealed body
-  to a different path, or seal with a past expiry, and confirm the server returns
-  401 (the path and timestamp are bound into the AEAD).
+- [x] **Route substitution / expiry:** both are turn-key negative tests.
+  ```bash
+  target/debug/examples/axum_body_echo_client --wrong-path   # sealed for /foctet, POSTed to /foctet-elsewhere
+  target/debug/examples/axum_body_echo_client --expired      # sealed with an already-elapsed expiry
+  ```
+  Each expects (and asserts, exiting non-zero otherwise):
+  ```
+  wrong-path correctly rejected with 401 Unauthorized
+  expired correctly rejected with 401 Unauthorized
+  ```
+  Proves the path (`OpenFailed` → 401) and the expiry (`ContextExpired` → 401)
+  are bound into the AEAD / enforced. The server exposes a second route
+  (`/foctet-elsewhere`) wired to the same handler purely so the path-mismatch
+  reaches the opener rather than 404-ing at the router.
 - [ ] **Streaming upload:** drive `foctet_http::axum::open_request_stream` with a
   chunked body; confirm per-chunk decryption and that a truncated body yields
   `StreamIncomplete` (HTTP 400). (Covered in-process by
@@ -326,9 +406,25 @@ message-id/timestamp bound into the AEAD; the response answers the request id.
 
 In-process tests + `test-vectors/rekey-v0.json` cover the key schedule. Over a
 live connection:
-- [ ] Lower `RekeyThresholds` in `quinn_split` (e.g. `max_frames: 4`) and rebuild;
-  run §3.1 sending enough messages to cross several rekeys; confirm the
-  alternating ratchet rotates both sides' keys with no dropped data.
+- [x] Cross several rekeys over a live session. `quinn_split` takes
+  `--rekey-frames <N>` (overrides `RekeyThresholds::max_frames`) and
+  `--messages <M>` (request/reply round-trips per stream), and installs a
+  `SessionObserver` that prints each rekey so the rotation is *observable*, not
+  merely inferred from delivery:
+  ```bash
+  cargo build -p foctet-transport --example quinn_split --features "transport-quinn runtime-tokio"
+  target/debug/examples/quinn_split --role loopback --messages 6 --rekey-frames 2
+  ```
+  Expected: every message round-trips (exit 0) and the log shows the *alternating*
+  ratchet — each side initiates in turn and the peer applies the matching id:
+  ```
+  [client stream 0] rekey initiated 0->1
+  [server stream 0] rekey applied   0->1
+  [server stream 0] rekey initiated 1->2
+  [client stream 0] rekey applied   1->2
+  ...
+  ```
+  The same flags work two-process (`--role server` / `--role client`, §3.1).
 - [ ] Confirm an old-key frame delivered reordered across a rekey still decrypts
   (retained previous keys).
 - [ ] One-directional traffic surfaces the documented alternation stall — rekey
@@ -394,14 +490,18 @@ step here that finds something gets a fix + a doc/CHANGELOG note + a harness che
 - [x] QUIC and WebSocket adapters pass a real two-process run incl. the
       identity-mismatch negative test (§3.1, §3.2). — *verified on one host;
       cross-host pending.*
-- [ ] muxtls and WebTransport: two-process / browser runs (§3.4, §3.5).
-- [ ] Cross-host UDP + anti-amplification against a spoofed source (§3.6).
+- [~] WebTransport: browser-initiator ↔ native-responder handshake + datagram
+      echo verified in a real browser (§3.5, `webtrans_datagram_split`); muxtls
+      two-process run (§3.4) still pending.
+- [~] Raw-UDP two-process datagram driver + anti-amplification verified locally
+      (§3.6, `udp_datagram_split`); cross-host against a spoofed source pending.
 - [x] axum protected-context roundtrip + replay-rejection (409) over real HTTP (§4).
 - [ ] axum + Redis multi-instance replay defense (§4.2).
 - [ ] Workers under `wrangler dev` **and** deployed, incl. DO TTL expiry (§5).
 - [x] WASM SDK verified in a real browser (§6.2) **and** under headless Chrome
       in CI (§6.3); npm publish pending.
-- [ ] DH ratchet over a live long-lived session (§7) + independent crypto review.
+- [~] DH ratchet over a live long-lived session verified with observable rekeys
+      (§7, `quinn_split --rekey-frames`); independent crypto review still pending.
 - [x] Fuzzing seeded + wired into CI (§8); one-off deep run (≥30 min/target)
       still worth doing before v1.
 - [ ] Cross-implementation interop + independent vector verification (§9).
