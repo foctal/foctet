@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use ::quinn as quinn_transport;
 use clap::{Parser, ValueEnum};
+use foctet_core::observe::{SessionEvent, SessionObserver};
 use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
 use foctet_transport::adapter::SplitIo;
 use foctet_transport::{TokioTransportBuilder, TransportConfig};
@@ -53,6 +54,16 @@ struct Args {
     /// that identity-mismatch is rejected (the handshake must fail).
     #[arg(long, default_value_t = false)]
     wrong_identity: bool,
+    /// Number of application messages to exchange per stream (request/reply
+    /// round-trips). Raise it together with `--rekey-frames` to cross several
+    /// DH-ratchet rekeys over a single live session. Default `1`.
+    #[arg(long, default_value_t = 1)]
+    messages: usize,
+    /// Override `RekeyThresholds::max_frames` (frames sent before a rekey is
+    /// triggered). Lower it (e.g. `--rekey-frames 4`) to force frequent rekeys
+    /// for testing; unset keeps the library default. See §7 of `tests.md`.
+    #[arg(long)]
+    rekey_frames: Option<u64>,
 }
 
 fn auth_config_pair(idx: usize) -> (SessionAuthConfig, SessionAuthConfig) {
@@ -170,9 +181,49 @@ fn take_tagged_auth(
     Ok((idx, auth))
 }
 
+fn rekey_thresholds(rekey_frames: Option<u64>) -> RekeyThresholds {
+    let mut thresholds = RekeyThresholds::default();
+    if let Some(max_frames) = rekey_frames {
+        thresholds.max_frames = max_frames;
+    }
+    thresholds
+}
+
+/// Prints DH-ratchet rekey events so a live run can confirm that both sides'
+/// keys actually rotate (see §7 of `tests.md`) — successful message delivery
+/// alone would not distinguish a working ratchet from one that never fires.
+struct RekeyLogger {
+    side: &'static str,
+    idx: usize,
+}
+
+impl SessionObserver for RekeyLogger {
+    fn on_session_event(&self, event: SessionEvent) {
+        match event {
+            SessionEvent::RekeyInitiated {
+                old_key_id,
+                new_key_id,
+            } => println!(
+                "[{} stream {}] rekey initiated {old_key_id}->{new_key_id}",
+                self.side, self.idx
+            ),
+            SessionEvent::RekeyApplied {
+                old_key_id,
+                new_key_id,
+            } => println!(
+                "[{} stream {}] rekey applied   {old_key_id}->{new_key_id}",
+                self.side, self.idx
+            ),
+            _ => {}
+        }
+    }
+}
+
 async fn serve_connection(
     connection: quinn_transport::Connection,
     server_auth_configs: Vec<SessionAuthConfig>,
+    messages: usize,
+    thresholds: RekeyThresholds,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = TransportConfig::default().with_app_stream_id(1);
     let builder = TokioTransportBuilder::new().with_config(config);
@@ -195,7 +246,7 @@ async fn serve_connection(
         let channel = builder
             .establish_responder_with_auth(
                 SplitIo::from_split(recv, send),
-                RekeyThresholds::default(),
+                thresholds.clone(),
                 auth,
             )
             .await?;
@@ -206,12 +257,18 @@ async fn serve_connection(
     for (idx, mut channel) in channels {
         tasks.spawn(async move {
             assert!(channel.session().peer_authenticated());
-            let incoming = channel.recv_application().await?;
-            let reply = format!(
-                "quinn stream {idx} reply to: {}",
-                String::from_utf8_lossy(&incoming)
-            );
-            channel.send_application(reply.as_bytes()).await?;
+            channel.session_mut().set_observer(Arc::new(RekeyLogger {
+                side: "server",
+                idx,
+            }));
+            for msg_idx in 0..messages {
+                let incoming = channel.recv_application().await?;
+                let reply = format!(
+                    "quinn stream {idx} message {msg_idx} reply to: {}",
+                    String::from_utf8_lossy(&incoming)
+                );
+                channel.send_application(reply.as_bytes()).await?;
+            }
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -234,6 +291,8 @@ async fn run_client(
     remote: SocketAddr,
     server_name: &str,
     client_auth_configs: Vec<SessionAuthConfig>,
+    messages: usize,
+    thresholds: RekeyThresholds,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let connection = endpoint.connect(remote, server_name)?.await?;
     let config = TransportConfig::default().with_app_stream_id(1);
@@ -253,7 +312,7 @@ async fn run_client(
         let channel = builder
             .establish_initiator_with_auth(
                 SplitIo::from_split(recv, send),
-                RekeyThresholds::default(),
+                thresholds.clone(),
                 auth,
             )
             .await?;
@@ -264,14 +323,20 @@ async fn run_client(
     for (idx, mut channel) in channels {
         tasks.spawn(async move {
             assert!(channel.session().peer_authenticated());
-            let payload = format!("hello from quinn stream {idx}");
-            channel.send_application(payload.as_bytes()).await?;
-            let response = channel.recv_application().await?;
+            channel.session_mut().set_observer(Arc::new(RekeyLogger {
+                side: "client",
+                idx,
+            }));
+            for msg_idx in 0..messages {
+                let payload = format!("hello from quinn stream {idx} message {msg_idx}");
+                channel.send_application(payload.as_bytes()).await?;
+                let response = channel.recv_application().await?;
 
-            println!(
-                "client stream {idx} got: {}",
-                String::from_utf8_lossy(&response)
-            );
+                println!(
+                    "client stream {idx} message {msg_idx} got: {}",
+                    String::from_utf8_lossy(&response)
+                );
+            }
             Ok::<(), Box<dyn Error + Send + Sync>>(())
         });
     }
@@ -320,16 +385,28 @@ async fn run_loopback(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut client_endpoint = quinn_transport::Endpoint::client(bind_addr)?;
     client_endpoint.set_default_client_config(client_config);
 
+    let messages = args.messages;
+    let server_thresholds = rekey_thresholds(args.rekey_frames);
+    let client_thresholds = rekey_thresholds(args.rekey_frames);
+
     let server_task = tokio::spawn(async move {
         let incoming = server_endpoint.accept().await.ok_or("endpoint closed")?;
         let connection = incoming.await?;
-        serve_connection(connection, server_auth_configs()).await
+        serve_connection(
+            connection,
+            server_auth_configs(),
+            messages,
+            server_thresholds,
+        )
+        .await
     });
     if let Err(err) = run_client(
         client_endpoint,
         server_addr,
         "localhost",
         client_auth_configs(false),
+        messages,
+        client_thresholds,
     )
     .await
         && !is_graceful_quinn_close(err.as_ref())
@@ -373,7 +450,11 @@ async fn run_server_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>
         };
         let peer = connection.remote_address();
         println!("accepted connection from {peer}");
-        match serve_connection(connection, server_auth_configs()).await {
+
+        let messages = args.messages;
+        let thresholds = rekey_thresholds(args.rekey_frames);
+
+        match serve_connection(connection, server_auth_configs(), messages, thresholds).await {
             Ok(()) => println!("served {peer}"),
             Err(err) if is_graceful_quinn_close(err.as_ref()) => {}
             Err(err) => eprintln!("error serving {peer}: {err}"),
@@ -402,6 +483,8 @@ async fn run_client_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>
         args.addr,
         &args.server_name,
         client_auth_configs(args.wrong_identity),
+        args.messages,
+        rekey_thresholds(args.rekey_frames),
     )
     .await?;
     println!("quinn client finished");
