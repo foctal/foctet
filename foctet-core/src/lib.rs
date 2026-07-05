@@ -93,6 +93,9 @@ pub mod secure_channel;
 mod sequence;
 /// Session handshake/rekey state and key lifecycle handling.
 pub mod session;
+/// At-rest storage envelopes that bind a record's identity (namespace / id /
+/// version) into the AEAD for zero-knowledge backends.
+pub mod storage;
 
 pub use auth::{
     AuthenticatedPeer, ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth,
@@ -137,6 +140,10 @@ pub use replay::{
 };
 pub use secure_channel::{AsyncSecureChannel, SecureChannel};
 pub use session::{HandshakeRole, RekeyThresholds, Session, SessionState};
+pub use storage::{
+    StorageRecord, open_storage_record, open_storage_record_with_limits, seal_storage_record,
+    seal_storage_record_with_limits,
+};
 
 use thiserror::Error;
 

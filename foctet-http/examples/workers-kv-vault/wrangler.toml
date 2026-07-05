@@ -1,0 +1,13 @@
+name = "foctet-http-workers-kv-vault"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-03-08"
+
+# KV namespace holding opaque `application/foctet` blobs. `wrangler dev`
+# simulates this locally; for `wrangler deploy`, create a namespace with
+# `npx wrangler kv namespace create VAULT_KV` and paste the returned id below.
+[[kv_namespaces]]
+binding = "VAULT_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[build]
+command = "cargo install -q worker-build@^0.7 && worker-build --release"

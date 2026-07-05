@@ -44,3 +44,6 @@ required-features = ["axum"]
 
 [[example]]
 name = "workers_echo_client"
+
+[[example]]
+name = "workers_kv_vault_client"

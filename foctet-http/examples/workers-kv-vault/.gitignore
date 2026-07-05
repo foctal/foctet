@@ -1,0 +1,9 @@
+target
+node_modules
+.wrangler
+
+#macOS
+.DS_Store
+
+# Build directories
+build

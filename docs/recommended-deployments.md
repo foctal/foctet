@@ -49,6 +49,9 @@ Use this when you need encrypted payload bodies over HTTP APIs but do not need f
   - authenticate the outer HTTP channel separately
   - rotate recipient keys with an `HttpOpener` keyring and an overlap window
     (see [Key rotation](key-rotation.md))
+  - for zero-knowledge storage where the server holds no key, seal at rest with
+    `foctet_core::storage` (see
+    [Zero-knowledge storage on Workers](zero-knowledge-workers-storage.md))
 
 ### When to choose it
 
