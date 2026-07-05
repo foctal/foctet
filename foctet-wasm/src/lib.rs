@@ -24,7 +24,9 @@ use rand_core::OsRng;
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+mod http_context;
 mod session;
+pub use http_context::{WasmHttpContextCarrier, WasmHttpRequestContext, WasmHttpResponseContext};
 pub use session::{FoctetSession, WasmAuthConfig, WasmDecodedMessage, WasmIdentityKeyPair};
 
 /// X25519 public/secret key length in bytes.

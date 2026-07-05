@@ -234,10 +234,10 @@ pub struct ProtectedContext {
     query: Option<String>,
     status: Option<u16>,
     carrier: ContextCarrier,
-    /// `(header name, value bytes)` for each name in `binding.bound_headers`
+    /// `(header name, value bytes)` for each configured bound header name
     /// that was present on the message; absent headers are still bound (as a
     /// "not present" marker) so a header's removal also fails authentication.
-    bound_headers: Vec<(&'static str, Option<Vec<u8>>)>,
+    bound_headers: Vec<(String, Option<Vec<u8>>)>,
 }
 
 impl ProtectedContext {
@@ -247,15 +247,42 @@ impl ProtectedContext {
         carrier: ContextCarrier,
         binding: ContextBinding,
     ) -> Self {
-        let authority = if binding.bind_authority {
+        Self::for_request_with_header_binding(
+            parts,
+            carrier,
+            binding.bind_authority,
+            binding.bound_headers,
+        )
+    }
+
+    /// Builds the request context with a dynamically supplied header-binding
+    /// policy.
+    ///
+    /// This is equivalent to [`ProtectedContext::for_request`] but accepts
+    /// runtime-owned header names, which is useful for host-language bindings
+    /// such as the WebAssembly / TypeScript SDK. Header names are bound in the
+    /// order supplied by the caller.
+    pub fn for_request_with_header_binding(
+        parts: &http::request::Parts,
+        carrier: ContextCarrier,
+        bind_authority: bool,
+        bound_header_names: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        let authority = if bind_authority {
             request_authority(parts)
         } else {
             None
         };
-        let bound_headers = binding
-            .bound_headers
-            .iter()
-            .map(|&name| (name, parts.headers.get(name).map(|v| v.as_bytes().to_vec())))
+        let bound_headers = bound_header_names
+            .into_iter()
+            .map(|name| {
+                let name = name.as_ref().to_string();
+                let value = parts
+                    .headers
+                    .get(name.as_str())
+                    .map(|v| v.as_bytes().to_vec());
+                (name, value)
+            })
             .collect();
         Self {
             direction: ContextDirection::Request,
@@ -530,6 +557,32 @@ mod tests {
 
         assert_ne!(a_aad, b_aad, "different header values must diverge");
         assert_ne!(a_aad, none_aad, "missing the bound header must diverge");
+    }
+
+    #[test]
+    fn bound_header_name_bytes_are_not_normalized_in_aad() {
+        let carrier = ContextCarrier::generate(1000, 60);
+        let request = Request::builder()
+            .uri("/x")
+            .header("x-tenant-id", "tenant-a")
+            .body(())
+            .expect("request");
+        let (parts, _) = request.into_parts();
+
+        let lower = ProtectedContext::for_request(
+            &parts,
+            carrier.clone(),
+            ContextBinding::default().with_bound_headers(&["x-tenant-id"]),
+        )
+        .to_aad_bytes();
+        let mixed = ProtectedContext::for_request(
+            &parts,
+            carrier,
+            ContextBinding::default().with_bound_headers(&["X-Tenant-Id"]),
+        )
+        .to_aad_bytes();
+
+        assert_ne!(lower, mixed);
     }
 
     #[test]

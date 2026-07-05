@@ -60,6 +60,66 @@ check("context binding roundtrip and mismatch", () => {
   assert.throws(() => wasm.openBody(envelope, kp.secretKey));
 });
 
+check("HTTP request protected context roundtrip and mismatch", () => {
+  const kp = new wasm.KeyPair();
+  const now = 1_700_000_000n;
+  const carrier = wasm.HttpContextCarrier.generate(now, 300n);
+  carrier.setIdempotencyKey("idem-node");
+
+  const ctx = new wasm.HttpRequestContext(
+    "POST",
+    "https://api.example.test/pay?currency=USD",
+    carrier,
+  );
+  ctx.setHeader("x-tenant-id", "tenant-a");
+  ctx.bindHeader("x-tenant-id");
+
+  const plaintext = enc.encode("charge over protected HTTP context");
+  const envelope = ctx.sealBody(plaintext, kp.publicKey, enc.encode("http-kid"));
+  const opened = ctx.openBody(envelope, kp.secretKey, now, 30n);
+  assert.strictEqual(dec.decode(opened), "charge over protected HTTP context");
+  assert.strictEqual(carrier.messageIdHeaderValue.length, 32);
+  assert.strictEqual(carrier.timestampHeaderValue, now.toString());
+  assert.strictEqual(carrier.expiryHeaderValue, (now + 300n).toString());
+
+  const parsed = wasm.HttpContextCarrier.fromHeaderValues(
+    carrier.messageIdHeaderValue,
+    carrier.timestampHeaderValue,
+    carrier.expiryHeaderValue,
+    carrier.idempotencyKey,
+    undefined,
+  );
+  assert.deepStrictEqual(Array.from(parsed.messageId), Array.from(carrier.messageId));
+  assert.strictEqual(parsed.timestampSecs, carrier.timestampSecs);
+  assert.strictEqual(parsed.expirySecs, carrier.expirySecs);
+
+  const wrongRoute = new wasm.HttpRequestContext(
+    "POST",
+    "https://api.example.test/refund?currency=USD",
+    carrier,
+  );
+  wrongRoute.setHeader("x-tenant-id", "tenant-a");
+  wrongRoute.bindHeader("x-tenant-id");
+  assert.throws(() => wrongRoute.openBody(envelope, kp.secretKey, now, 30n));
+});
+
+check("HTTP response protected context answers a request id", () => {
+  const kp = new wasm.KeyPair();
+  const now = 1_700_000_500n;
+  const requestCarrier = wasm.HttpContextCarrier.generate(now, 300n);
+  const responseCarrier = wasm.HttpContextCarrier.generate(now, 300n);
+  responseCarrier.setRequestMessageId(requestCarrier.messageId);
+
+  const ctx = new wasm.HttpResponseContext(201, responseCarrier);
+  const envelope = ctx.sealBody(enc.encode("created"), kp.publicKey, enc.encode("http-kid"));
+  const opened = ctx.openBody(envelope, kp.secretKey, now, 30n);
+  assert.strictEqual(dec.decode(opened), "created");
+  assert.strictEqual(responseCarrier.requestMessageIdHeaderValue, requestCarrier.messageIdHeaderValue);
+
+  const wrongStatus = new wasm.HttpResponseContext(200, responseCarrier);
+  assert.throws(() => wrongStatus.openBody(envelope, kp.secretKey, now, 30n));
+});
+
 check("fromSecretKey recovers the public key", () => {
   const kp = new wasm.KeyPair();
   const rebuilt = wasm.KeyPair.fromSecretKey(kp.secretKey);
