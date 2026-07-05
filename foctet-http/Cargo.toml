@@ -22,7 +22,8 @@ redis = { version = "0.27", optional = true, default-features = false, features 
 rand_core.workspace = true
 x25519-dalek.workspace = true
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 worker = { version = "0.7.5", optional = true }

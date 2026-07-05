@@ -55,7 +55,7 @@ pub mod axum;
 #[cfg(all(feature = "workers", target_arch = "wasm32"))]
 pub mod workers;
 
-use foctet_core::{BodyEnvelopeLimits, open_body_with_context, seal_body_with_context};
+use foctet_core::{open_body_with_context, seal_body_with_context};
 use http::{
     Request, Response,
     header::{self},
@@ -69,6 +69,10 @@ pub use context::{
     DEFAULT_MAX_CLOCK_SKEW_SECS, MESSAGE_ID_LEN, ProtectedContext,
 };
 pub use error::HttpError;
+// Re-exported because it appears in public signatures (`HttpSealOptions`,
+// `open_request_stream`, `HttpStreamSealer::for_request`, …), so callers do not
+// need a direct `foctet-core` dependency to name it.
+pub use foctet_core::BodyEnvelopeLimits;
 #[cfg(feature = "redis")]
 pub use replay_store::RedisReplayStore;
 pub use replay_store::{

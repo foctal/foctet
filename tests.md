@@ -324,10 +324,14 @@ message-id/timestamp bound into the AEAD; the response answers the request id.
   are bound into the AEAD / enforced. The server exposes a second route
   (`/foctet-elsewhere`) wired to the same handler purely so the path-mismatch
   reaches the opener rather than 404-ing at the router.
-- [ ] **Streaming upload:** drive `foctet_http::axum::open_request_stream` with a
-  chunked body; confirm per-chunk decryption and that a truncated body yields
-  `StreamIncomplete` (HTTP 400). (Covered in-process by
-  `foctet-http` tests; a real chunked-upload client is still to add.)
+- [x] **Streaming upload:** `axum_body_echo_client --stream` uploads a chunked
+  body to `/foctet-stream` (one HTTP chunk per sealed frame);
+  `open_request_stream` decrypts per chunk (server logs `decrypted chunk N`) and
+  answers `200 received N bytes in K chunks`. `--stream-truncated` drops the
+  authenticated final frame; the server rejects the truncated upload with
+  `StreamIncomplete` → **HTTP 400** (client asserts, exits non-zero otherwise).
+  Proves per-chunk decryption and truncation resistance over the wire.
+  (In-process coverage: `open_request_stream_decodes_a_streaming_upload` etc.)
 
 ### 4.2 Durable replay store (Redis) — multi-instance
 
@@ -501,7 +505,7 @@ step here that finds something gets a fix + a doc/CHANGELOG note + a harness che
       (§3.6, `udp_datagram_split`); cross-host against a spoofed source pending.
 - [x] axum protected-context roundtrip + replay-rejection (409) over real HTTP (§4).
 - [ ] axum + Redis multi-instance replay defense (§4.2).
-- [ ] Workers under `wrangler dev` **and** deployed, incl. DO TTL expiry (§5).
+- [x] Workers under `wrangler dev` **and** deployed, incl. DO TTL expiry (§5).
 - [x] WASM SDK verified in a real browser (§6.2) **and** under headless Chrome
       in CI (§6.3); npm publish pending.
 - [~] DH ratchet over a live long-lived session verified with observable rekeys
