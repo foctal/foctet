@@ -7,7 +7,7 @@ This guide summarizes the recommended production composition patterns for Foctet
 | Use case | Recommended Foctet layer | What Foctet protects | What must be protected elsewhere |
 | --- | --- | --- | --- |
 | Interactive end-to-end transport between peers | `foctet-transport` with authenticated native handshake | Stream payloads, frame integrity, replay window, rekey lifecycle | Peer discovery, transport availability, routing metadata |
-| HTTP request/response body encryption | `foctet-http` or `foctet_core::body` | HTTP body bytes only | Method, URL, query, status code, outer headers, server authentication |
+| HTTP request/response body encryption | `foctet-http` or `foctet_core::body` | HTTP body bytes; with protected-context APIs, selected request metadata is also authenticated and replay-protected | Method, URL, query, status code, outer headers, server authentication |
 | File transfer, offline export, or storage handoff | `foctet-archive` | File contents, encrypted metadata, recipient-scoped DEK wrapping | File naming outside the archive, storage ACLs, distribution channel authenticity |
 
 ## Pattern 1: Authenticated Transport E2EE
@@ -45,6 +45,9 @@ Use this when you need encrypted payload bodies over HTTP APIs but do not need f
 - Recommended outer channel: HTTPS or another authenticated session that already authenticates the peer.
 - Recommended setup:
   - seal request or response bodies with `application/foctet`
+  - for production HTTP requests, prefer `foctet-http`'s protected-context
+    path (`seal_request_with_context` / `open_request_with_context`) with a
+    shared replay store
   - keep `x-foctet-scope: body-only`
   - authenticate the outer HTTP channel separately
   - rotate recipient keys with an `HttpOpener` keyring and an overlap window
@@ -61,12 +64,17 @@ Use this when you need encrypted payload bodies over HTTP APIs but do not need f
 
 ### Important boundary
 
-Foctet HTTP does not hide or authenticate:
+Foctet HTTP does not hide:
 
 - request method
 - URL path or query
 - response status code
 - outer HTTP headers unless your application copies them into the encrypted body
+
+With the protected-context APIs, Foctet **does authenticate** selected request
+metadata (method, authority, path, query, message ID, timestamp, expiry) and
+enforces single-use replay protection, but that metadata remains visible to the
+outer HTTP stack.
 
 If you need full-message confidentiality, use transport E2EE instead of relying on HTTP body envelopes alone.
 

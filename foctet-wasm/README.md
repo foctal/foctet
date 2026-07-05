@@ -6,9 +6,9 @@ Deno, Bun, and Cloudflare Workers can seal and open the **same wire format** as
 the Rust implementation.
 
 > **Status: experimental (Draft v0).** Provides the one-shot body envelope **and**
-> a full framed session (authenticated handshake + ordered, replay-protected
-> messages). See [`SECURITY.md`](../SECURITY.md) for the security posture and
-> limitations.
+> a full framed session (authenticated handshake, ordered messages,
+> MTU-bounded datagrams, and in-session DH-ratchet rekey). See
+> [`SECURITY.md`](../SECURITY.md) for the security posture and limitations.
 
 ## API
 
@@ -82,8 +82,12 @@ class FoctetSession {
 
   initialHandshakeMessage(): Uint8Array | undefined;   // initiator: send this first
   handleHandshakeMessage(message: Uint8Array): Uint8Array | undefined; // returns a reply to send, if any
+  handleControlMessage(message: Uint8Array): Uint8Array | undefined; // handshake or rekey control
   isEstablished(): boolean;
   peerAuthenticated(): boolean;
+  canRekey(): boolean;
+  forceRekey(): Uint8Array;
+  readonly activeKeyId: number | undefined;
 
   // Message-mode sessions:
   sealMessage(streamId: number, flags: number, plaintext: Uint8Array): Uint8Array;
@@ -96,7 +100,10 @@ class FoctetSession {
 
 A session commits to one framing mode; the methods for the other mode throw. For
 WebTransport datagrams, run the (reliable) handshake messages over a stream, then
-send each `sealDatagram` result as a datagram.
+send each `sealDatagram` result as a datagram. Rekey control messages must also
+travel over that reliable channel; call `forceRekey()` only when
+`canRekey() === true`, and feed the peer's rekey bytes to
+`handleControlMessage()`.
 
 Example over a browser `WebSocket` (binary frames), as the initiator:
 
@@ -123,10 +130,12 @@ ws.onmessage = (ev) => {
 };
 ```
 
-The same pattern works over `WebTransport`: send each `sealMessage` result as a
-datagram or on a stream, and feed each received blob to `openMessage`. In-session
-rekey is not yet carried over this message API — establish a fresh session rather
-than reusing one indefinitely.
+The same pattern works over `WebTransport` streams. For WebTransport datagrams,
+construct the session with `newDatagramInitiator` / `newDatagramResponder`, run
+the handshake over a reliable stream, send each `sealDatagram` result as one
+datagram, and feed each received datagram to `openDatagram`. In-session rekey is
+available in both modes; rekey control messages still have to travel over the
+reliable channel.
 
 ## Build
 

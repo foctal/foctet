@@ -130,23 +130,27 @@ tested, and independently reviewed:
    **Rekey-over-datagram** is supported: the DH-ratchet rekey rides a reliable
    control channel and `SecureDatagramChannel::rekey_from_session` adopts the
    rotated keys, with retained previous keys so reordered old-key datagrams
-   still decrypt. Still pending: a browser-WebTransport datagram *adapter*
-   (the WASM `FoctetSession` datagram mode covers the crypto layer) and an
-   MTU-change/fragmentation policy (oversize payloads fail closed).
+   still decrypt. A browser-WebTransport datagram adapter now ships as
+   `foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`
+   (`transport-webtrans-browser`, wasm32) and is exercised in headless Chrome
+   against in-page WHATWG streams. Still pending: a live end-to-end browser
+   test against a real HTTP/3 WebTransport server, plus more deployment
+   guidance around path-MTU changes and conservative datagram sizing.
 4. **WASM/TypeScript SDK (partial).** The `foctet-wasm` crate ships a
    `wasm-bindgen` API for the body envelope (seal/open, context-bound variants,
-   `KeyPair`) **and** a framed `FoctetSession` (authenticated handshake plus
-   ordered, replay-protected `sealMessage`/`openMessage` and a datagram mode),
+   `KeyPair`) **and** a framed `FoctetSession` (authenticated handshake,
+   ordered `sealMessage`/`openMessage`, datagram `sealDatagram`/`openDatagram`,
+   and in-session DH-ratchet rekey via `forceRekey` / `handleControlMessage`),
    with generated `.d.ts`, Node/browser/bundler builds, a Node interop test that
    opens Rust-produced envelopes, an in-browser runtime harness
    (`foctet-wasm/examples/browser/index.html`), and a **headless-Chrome test
    suite in CI** (`foctet-wasm/tests/browser.rs`). **WASM clock limitation:**
    `wasm32-unknown-unknown` has no monotonic clock, so the *age-based* rekey
    threshold is disabled there; the frame-count and byte-count thresholds still
-   apply, and a long-lived WASM session should drive rekey explicitly (in-session
-   rekey is not yet carried over the WASM message API). Still pending: a published
-   npm package and host-backed (non-extractable) key handling (documented as
-   unavailable on current platforms).
+   apply, and a long-lived WASM session should still drive rekey explicitly when
+   needed. Still pending: a published npm package and host-backed
+   (non-extractable) key handling (documented as unavailable on current
+   platforms).
 5. **Streaming HTTP bodies (near-complete).** A chunked streaming mode exists
    (`foctet_core::body_stream`, plus `foctet_http`'s `HttpStreamSealer` /
    `HttpStreamOpener`): per-chunk AEAD with unique nonces, an authenticated

@@ -3,11 +3,13 @@
 //! `foctet-http` adapts HTTP requests and responses onto the body-complete
 //! envelope format.
 //!
-//! Foctet HTTP integration encrypts and authenticates the body bytes only. The
-//! outer HTTP method, URI, status code, and headers remain visible to the
-//! surrounding transport and should be protected by an authenticated outer
-//! channel such as HTTPS, authenticated WebTransport, or an authenticated
-//! Foctet transport session.
+//! Foctet HTTP integration always encrypts the body bytes. With the
+//! context-bound APIs it also authenticates selected request metadata
+//! (method/path/query/message-id/timestamp/expiry) and enforces single-use
+//! replay protection. The outer HTTP method, URI, status code, and headers
+//! still remain visible to the surrounding transport and should be protected by
+//! an authenticated outer channel such as HTTPS, authenticated WebTransport,
+//! or an authenticated Foctet transport session.
 //!
 //! # Two protection levels
 //!

@@ -29,7 +29,10 @@ Notes:
 
 - Demo keys are hardcoded and are not production-safe.
 - The examples use the recommended high-level `HttpSealer` / `HttpOpener` path.
-- `application/foctet` v0 encrypts and authenticates the body bytes only, not request metadata.
-- HTTP method, URL, status code, and most headers remain visible to the outer HTTP stack.
+- `application/foctet` v0 encrypts the body bytes; with the protected-context
+  path used here, the request method/path/query/message-id/timestamp/expiry are
+  also authenticated and replay-protected.
+- HTTP method, URL, status code, and most headers still remain visible to the
+  outer HTTP stack.
 - For production use, pair body envelopes with an authenticated outer transport such as HTTPS, WebTransport, or an authenticated Foctet transport channel.
 - The examples show one-shot body-complete encryption/decryption flow, not streaming transport sessions.

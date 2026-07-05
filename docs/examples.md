@@ -96,7 +96,11 @@ Run the Rust client in another terminal:
 cargo run -p foctet-http --example workers_echo_client
 ```
 
-These examples protect HTTP body bytes only. Keep the outer channel authenticated and keep the advisory `x-foctet-scope: body-only` header unless you have a compatibility reason not to.
+These examples encrypt the HTTP body bytes and, on the protected-context path,
+also authenticate the request metadata bound into the AEAD
+(method/path/query/message-id/timestamp/expiry). Keep the outer channel
+authenticated and keep the advisory `x-foctet-scope: body-only` header unless
+you have a compatibility reason not to.
 
 ## Archive and File Examples
 
