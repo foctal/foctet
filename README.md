@@ -8,12 +8,10 @@
 
 Transport-agnostic end-to-end encryption layer for secure data transfer.
 
-> **Status: experimental (Draft v0) — not production-ready.** Foctet implements
-> authenticated encrypted framing (byte-stream, datagram, and message shapes), a
-> one-shot HTTP body envelope with versioned protected-context replay defense, a
-> WASM/TypeScript body-envelope SDK, and encrypted archives. The wire format is
-> still unstable. See [`SECURITY.md`](SECURITY.md) for the security posture and
-> known limitations before deploying.
+> **Status: experimental (Draft v0) — not production-ready.** Foctet provides
+> authenticated encrypted framing, HTTP body envelopes, encrypted archives, and
+> a WASM/TypeScript SDK. The wire format is still unstable. See
+> [`SECURITY.md`](SECURITY.md) before deploying.
 
 ## Crates
 
@@ -49,76 +47,33 @@ Security documentation:
 
 Implemented and tested today:
 
-- Transport-agnostic encrypted framing for **byte streams** and split send/recv
-  transports (TCP, QUIC/WebTransport bidirectional streams, multiplexed WebSocket).
-- A **datagram API** (`foctet_core::datagram`, one frame per datagram) with QUIC
-  (`foctet_transport::quinn::QuinnDatagramChannel`), raw-UDP
-  (`foctet_transport::udp::UdpDatagramTransport`), and browser-WebTransport
-  (`foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`, wasm32)
-  adapters.
-- A **message API** (`foctet_core::message`, one frame per reliable/ordered
-  message) with a generic `MessageTransport` shape (`foctet_transport::message`).
-- A **WASM/TypeScript SDK** (`foctet-wasm`) for the body envelope **and** the
-  framed session (authenticated handshake, message + datagram modes, in-session
-  DH-ratchet rekey), with generated `.d.ts` and Node/browser/bundler builds —
-  verified against Rust-produced envelopes and in real headless Chrome in CI.
-- **HTTP protected-context replay defense**: a versioned, domain-separated
-  context schema (`foctet-http`'s `ProtectedContext`, `x-foctet-*` carrier
-  headers) that binds method/path/query/message-id/timestamp/expiry into the
-  AEAD, with an atomic `ReplayStore` (in-memory + Redis `SET NX PX` backends) and
-  `axum` / Cloudflare Workers adapters.
-- Encrypted archive formats for files and split-file delivery.
-- Transport helpers for `quinn`, `webtrans`, `websock`, and `muxtls` (stream-only).
+- **Byte-stream channels** over generic split I/O plus transport helpers for
+  QUIC, WebTransport, WebSocket mux, and muxTLS.
+- **Datagram channels** for QUIC datagrams, raw UDP, and browser WebTransport.
+- **Message channels** for reliable, ordered message transports such as raw
+  WebSocket.
+- **HTTP body envelopes** with protected-context request binding and replay
+  defense.
+- **Encrypted archives** for single-file and split-file delivery.
+- **WASM/TypeScript bindings** for body envelopes and framed sessions.
 
-Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
+Current gaps:
 
-- A published npm package for the WASM SDK (the SDK, its framed session API,
-  the Node interop test, and the headless-Chrome CI tests all exist; only the
-  npm release is pending).
-- Streaming **response**-body helpers for a specific framework — streaming
-  request bodies are turn-key (`foctet_http::axum::open_request_stream`, and the
-  framework-agnostic `HttpRequestStreamReader` for Workers), but producing a
-  streaming response body is currently left to the application (write the sealer's
-  stream header then each sealed chunk to the response stream).
-- Additional operational guidance around long-lived deployments and package
-  distribution (for example the npm release flow for the WASM SDK).
-- The final v1 wire/API compatibility commitment and a normative, versioned wire
-  spec.
+- npm publishing for the WASM SDK
+- framework-specific streaming response helpers
+- final v1 wire/API compatibility commitment
 
-## Transport Support Matrix
+## Transport Support
 
-Foctet protects three transport **shapes**, each with a raw transport trait and a
-secure channel. All channels share one application contract via the
-`foctet_transport::SecureChannel` trait, and a shared conformance suite
-(`foctet-transport/tests/conformance.rs`) runs the same checks against all three.
+Foctet exposes three transport shapes:
 
-| Adapter | Shape | API (`foctet_transport`) | Feature | Native | Browser (wasm) | Verified by |
-| --- | --- | --- | --- | --- | --- | --- |
-| Any byte stream (TCP, …) | byte stream | `TokioTransportBuilder` / `FuturesTransportBuilder` | `runtime-tokio` / `runtime-futures` | ✅ | via futures-io | conformance suite (duplex) |
-| QUIC bidirectional stream | byte stream | `quinn` | `transport-quinn` | ✅ | — | conformance suite (real connection) + example |
-| WebTransport bidirectional stream | byte stream | `webtrans` | `transport-webtrans` | ✅ | — | conformance suite (real connection) + example |
-| Multiplexed WebSocket | byte stream | `websock::*_secure_channel*` | `transport-websock-mux` | ✅ | — | conformance suite (real connection) + example |
-| muxTLS | byte stream | `muxtls` | `transport-muxtls` | ✅ | — | conformance suite (real connection) + example |
-| Raw WebSocket message | message | `websock::WebsockMessageTransport` | `transport-websock` | ✅ | ✅ (`websock-wasm`) | loopback roundtrip + conformance |
-| Generic message | message | `MessageTransport` + `SecureMessageChannel` | — | ✅ | ✅ | conformance suite |
-| QUIC datagram | datagram | `quinn::QuinnDatagramChannel` | `transport-quinn` | ✅ | — | real-connection roundtrip |
-| Raw UDP datagram | datagram | `udp::UdpDatagramTransport` (opt-in anti-amplification) | `runtime-tokio` | ✅ | — | real-socket roundtrip |
-| Generic datagram | datagram | `DatagramTransport` + `SecureDatagramChannel` | — | ✅ | — | conformance + rekey-over-datagram |
-| Browser WebTransport datagram | datagram | `webtrans_browser::BrowserWebTransportDatagrams` | `transport-webtrans-browser` | — | ✅ | headless-Chrome roundtrip (mock duplex) |
-| Browser session (JS owns the socket) | message / datagram | `foctet-wasm` `FoctetSession` | — | — | ✅ | headless-Chrome tests + native-tested inner logic |
+- **byte stream**: `TokioTransportBuilder` / `FuturesTransportBuilder`, plus
+  feature-gated adapters such as `quinn`, `webtrans`, `websock`, and `muxtls`
+- **message**: `MessageTransport` + `SecureMessageChannel`
+- **datagram**: `DatagramTransport` + `SecureDatagramChannel`
 
-Notes:
-
-- The **browser-WebTransport datagram adapter** is duck-typed over the
-  `WebTransport.datagrams` duplex (JS opens the connection and hands the duplex
-  to wasm); its stream plumbing is exercised in headless Chrome against
-  in-page WHATWG streams — an end-to-end test against a live HTTP/3 server is
-  still open.
-- The conformance suite runs the same checks over in-memory message/datagram
-  channels, a byte-stream duplex, **and a real loopback connection for every
-  advertised byte-stream backend** (quinn bi-streams, WebTransport bi-streams,
-  muxTLS, WebSocket-mux), each with a self-signed localhost certificate and
-  the native Foctet handshake.
+The browser-facing surface is `foctet-wasm` (`FoctetSession`) and the
+wasm32-only `BrowserWebTransportDatagrams` adapter.
 
 ## Quick Start
 
@@ -141,39 +96,20 @@ let channel = builder
     .await?;
 ```
 
-If you already derived or exchanged Foctet session state out of band, you can still inject an active `Session` directly.
+If you already derived or exchanged Foctet session state out of band, you can
+still inject an active `Session` directly.
 
-For encrypted files and reproducible test fixtures, `foctet-archive` exposes archive builders for both normal and deterministic generation:
-
-```rust,ignore
-use foctet_archive::{
-    ArchiveBuildSecrets, ArchiveOptions, create_archive_from_bytes_with_secrets,
-};
-
-let secrets = ArchiveBuildSecrets {
-    archive_id: [0x91; 16],
-    file_id: [0x92; 16],
-    dek: [0x93; 32],
-    wrap_ephemeral_secret_keys: vec![[0x94; 32]],
-};
-
-let (archive_bytes, meta) = create_archive_from_bytes_with_secrets(
-    payload,
-    &[recipient_public_key],
-    ArchiveOptions::default(),
-    &secrets,
-)?;
-```
-
-Use the `*_with_secrets` archive APIs only for reproducible vectors and deterministic tests. Production archive creation should use the default random builders.
+For archives, prefer the default randomized builders in `foctet-archive`.
+Reserve the deterministic `*_with_secrets` APIs for reproducible vectors and
+tests.
 
 ## Security Notes
 
-See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and reporting process.
+See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and
+reporting process.
 
-- Both the async (`FoctetFramed`) and synchronous (`SyncIo`) paths **fail closed on
-  sequence/key-id exhaustion** — a frame is never emitted with a reused nonce — and
-  reject invalid all-zero X25519 shared secrets.
+- Both the async (`FoctetFramed`) and synchronous (`SyncIo`) paths **fail
+  closed on sequence/key-id exhaustion**.
 - **Do not persist and restore live session state.** No persistence format exists
   yet; after a restart, establish a fresh session rather than reusing traffic keys
   with reset or uncertain outbound sequence state.
@@ -186,12 +122,9 @@ See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and reporti
 - For HTTP, prefer the **protected-context APIs** (`HttpSealer::seal_request_with_context`
   / `HttpOpener::open_request_with_context`, plus the `axum` / Workers adapters):
   they bind request metadata (method/path/query/message-id/timestamp/expiry) into
-  the AEAD and enforce single use through an atomic `ReplayStore`. Deploy with a
-  durable store (`RedisReplayStore`) for multi-instance or serverless targets. The
-  low-level `seal_body` / `open_body` and stateless `seal_request` / `open_request`
-  paths remain replayable by design and must not be used for production HTTP. The
-  `seal_body_with_context` / `open_body_with_context` primitives are the building
-  block underneath, for callers that supply and validate their own context.
+  the AEAD and enforce single use through a `ReplayStore`. The low-level
+  stateless request helpers remain replayable by design and are not suitable
+  for production HTTP.
 - Deterministic archive secrets intentionally disable build-time randomness. Reusing
   them across real payloads leaks equality and key-reuse signals, so reserve them for
   fixtures and interoperability tests.

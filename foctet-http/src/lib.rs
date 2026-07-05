@@ -1,45 +1,22 @@
 //! High-level HTTP integration for `application/foctet` body envelopes.
 //!
-//! `foctet-http` adapts HTTP requests and responses onto the body-complete
-//! envelope format.
+//! `foctet-http` encrypts HTTP body bytes. For production requests, prefer the
+//! context-bound APIs:
+//! [`HttpSealer::seal_request_with_context`] and
+//! [`HttpOpener::open_request_with_context`]. They bind selected request
+//! metadata into the AEAD and enforce single-use replay protection through a
+//! [`ReplayStore`].
 //!
-//! Foctet HTTP integration always encrypts the body bytes. With the
-//! context-bound APIs it also authenticates selected request metadata
-//! (method/path/query/message-id/timestamp/expiry) and enforces single-use
-//! replay protection. The outer HTTP method, URI, status code, and headers
-//! still remain visible to the surrounding transport and should be protected by
-//! an authenticated outer channel such as HTTPS, authenticated WebTransport,
-//! or an authenticated Foctet transport session.
+//! The outer HTTP method, URI, status code, and headers remain visible to the
+//! surrounding transport, so deployments should still use an authenticated
+//! outer channel such as HTTPS.
 //!
-//! # Two protection levels
+//! Main layers:
 //!
-//! - **Context-bound + anti-replay (recommended for production):**
-//!   [`HttpSealer::seal_request_with_context`] /
-//!   [`HttpOpener::open_request_with_context`] bind the HTTP protected context
-//!   (method, path, query, a unique message ID, timestamp, expiry — see
-//!   [`context`]) into the envelope's AEAD and enforce single use via a
-//!   [`ReplayStore`]. A captured envelope cannot be replayed or moved onto a
-//!   different route.
-//! - **Body-only (low-level, deprecated for full requests):**
-//!   `HttpSealer::seal_request` / `HttpOpener::open_request` protect the bytes
-//!   only, with no replay protection or context binding, so a captured request
-//!   is replayable by design. These full-request helpers are **deprecated** —
-//!   use the context-bound path above for production. The
-//!   [`HttpSealer::seal_body`] / [`HttpOpener::open_body`] primitives remain
-//!   available for callers that supply their own anti-replay and context
-//!   validation.
-//!
-//! # Layers
-//!
-//! - High-level API: [`HttpSealer`] and [`HttpOpener`]
-//! - Protected context + anti-replay: [`context`], [`ReplayStore`],
-//!   [`InMemoryReplayStore`]
-//! - Framework adapters: `axum` and `workers`
-//! - Lower-level helpers: [`raw`]
-//!
-//! Sealed requests and responses also carry an advisory
-//! `x-foctet-scope: body-only` header so downstream systems can distinguish
-//! Foctet body envelopes from full-message protection.
+//! - [`HttpSealer`] and [`HttpOpener`] for the primary API
+//! - [`context`] and [`ReplayStore`] for protected-context request binding
+//! - `axum` and `workers` for framework adapters
+//! - [`raw`] for lower-level helpers
 //!
 
 /// Re-export of the `http` crate used by this adapter.

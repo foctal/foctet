@@ -1,29 +1,18 @@
 //! WebAssembly bindings for Foctet end-to-end encryption.
 //!
-//! This crate exposes a deliberately small, versioned JavaScript/TypeScript API
-//! over the `application/foctet` body envelope so browsers, Node.js, Deno, Bun,
-//! and Cloudflare Workers can seal and open the exact same wire format as the
-//! Rust implementation.
+//! This crate exposes a small JavaScript/TypeScript API for the
+//! `application/foctet` body envelope and the framed `FoctetSession`, so
+//! browsers and JS runtimes can interoperate with the Rust implementation.
 //!
-//! All byte values cross the boundary as `Uint8Array` (Rust `&[u8]` /
-//! `Vec<u8>`). Fallible operations throw a JavaScript `Error` rather than
-//! panicking, so a malformed input never aborts the WASM instance.
+//! Byte values cross the boundary as `Uint8Array`, and fallible operations
+//! throw a JavaScript `Error` rather than aborting the WASM instance.
 //!
-//! # Key handling
+//! [`KeyPair`] exposes raw X25519 key bytes, so callers are responsible for
+//! storing secret keys safely.
 //!
-//! [`KeyPair`] exposes raw X25519 key bytes because WebCrypto has no portable
-//! non-extractable X25519 key type. Callers are responsible for storing the
-//! secret key safely (for example in a Worker secret or an OS keystore) and
-//! should avoid logging or persisting it in plaintext.
-//!
-//! # Scope
-//!
-//! This is body-only protection: it encrypts and authenticates the payload (and,
-//! with the `*_with_context` functions, an application-supplied associated
-//! context). It does not protect outer HTTP metadata, which must be carried over
-//! an authenticated outer channel such as HTTPS. For HTTP replay protection,
-//! build the protected-context bytes on the host (mirroring `foctet-http`'s
-//! `foctet-http-ctx-v1` encoding) and pass them as `context`.
+//! The body-envelope APIs protect payload bytes and optional associated context,
+//! not outer HTTP metadata. Pair them with an authenticated outer channel when
+//! used over HTTP.
 
 use std::fmt;
 

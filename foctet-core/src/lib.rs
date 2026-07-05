@@ -1,49 +1,26 @@
-//! Foctet Core (Draft v0)
-//! - Fixed-width frame header encoding
-//! - Profile 0x01 crypto primitives
-//! - Native handshake key schedule helpers
-//! - Replay window enforcement
-//! - Runtime-agnostic streaming adapters
+//! Foctet Core (Draft v0).
 //!
-//! `foctet-core` is the low-level protocol crate for applications that need to
-//! drive Foctet sessions directly. If you already have a split stream transport
-//! such as QUIC, WebTransport, WebSocket multiplexing, or another byte-stream
-//! abstraction, prefer `foctet-transport` for the recommended handshake and
-//! channel builders.
+//! `foctet-core` is the low-level protocol crate: framing, key derivation,
+//! handshake/rekey state, replay protection, and the `application/foctet` body
+//! envelope live here.
 //!
-//! # Main Modules
+//! If you already have split stream transports such as QUIC, WebTransport, or
+//! WebSocket multiplexing, prefer `foctet-transport` for the recommended
+//! handshake and channel builders.
 //!
-//! - [`body`]: `application/foctet` one-shot encrypted body envelope
-//! - [`frame`]: wire frame structures, parser/encoder, framed transport types
-//! - [`crypto`]: key schedule and frame AEAD helpers
-//! - [`control`]: control message wire payloads
-//! - [`session`]: handshake/rekey state machine
-//! - [`payload`]: encrypted payload TLV schema
-//! - [`io`]: runtime adapters and blocking `SyncIo`
+//! Main entry points:
 //!
-//! # Typical Flow
+//! - [`frame`] for stream framing
+//! - [`message`] and [`datagram`] for discrete-message / datagram shapes
+//! - [`session`] for handshake and rekey
+//! - [`body`] for one-shot HTTP/body envelopes
+//! - [`io`] for blocking and runtime adapters
 //!
-//! 1. Build/derive [`TrafficKeys`] via handshake/session.
-//! 2. Send/receive via [`frame::FoctetFramed`] or [`io::SyncIo`].
-//! 3. Use [`Session`] to process control frames and rotate keys.
-//! 4. Encode application bytes as TLV (`APPLICATION_DATA`) via [`payload`].
+//! The native handshake is authenticated by default. For production use, prefer
+//! [`SessionAuthConfig`] with local identity keys, pinned [`PeerIdentity`]
+//! values, and `require_peer_authentication(true)`.
 //!
-//! # Authentication Guidance
-//!
-//! - The native handshake is authenticated by default: a default
-//!   [`SessionAuthConfig`] fails closed and will reject an unauthenticated peer.
-//! - For production use, prefer [`SessionAuthConfig`] with local identity keys,
-//!   pinned [`PeerIdentity`] values, and
-//!   `SessionAuthConfig::require_peer_authentication(true)`.
-//! - If Foctet runs inside an already-authenticated outer channel, you may run
-//!   the native handshake without identity signatures by explicitly opting in
-//!   with `SessionAuthConfig::unauthenticated_for_testing()` (or
-//!   `allow_unauthenticated(true)`); the outer channel then carries the
-//!   peer-authentication responsibility.
-//! - Sequence numbers and rekey identifiers fail closed on exhaustion; callers
-//!   should treat those errors as terminal and establish a fresh session.
-//!
-//! # Typical Native Handshake
+//! # Handshake Example
 //!
 //! ```rust,ignore
 //! use foctet_core::{
