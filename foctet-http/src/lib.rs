@@ -269,16 +269,38 @@ impl HttpOpener {
         &self.config
     }
 
+    /// Tries each recipient key in the keyring, returning the plaintext from the
+    /// first key that authenticates.
+    ///
+    /// Because every keyring entry is one of the recipient's own secret keys and
+    /// each attempt is on context-bound, authenticated ciphertext, a
+    /// non-matching key simply fails to open (no decryption oracle). If no key
+    /// succeeds, the first attempt's error is returned. The keyring is
+    /// guaranteed non-empty by [`HttpOpenOptions`].
+    fn open_with_keyring<F>(&self, mut attempt: F) -> Result<Vec<u8>, HttpError>
+    where
+        F: FnMut([u8; 32]) -> Result<Vec<u8>, HttpError>,
+    {
+        let mut first_err = None;
+        for key in self.options.expose_recipient_secret_keys() {
+            match attempt(*key) {
+                Ok(plain) => return Ok(plain),
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+        Err(first_err.expect("HttpOpenOptions guarantees a non-empty keyring"))
+    }
+
     /// Opens an `application/foctet` body into plaintext bytes.
     pub fn open_body(&self, envelope: &[u8]) -> Result<Vec<u8>, HttpError> {
-        match self.options.limits() {
-            Some(limits) => raw::open_http_body_with_limits(
-                envelope,
-                *self.options.expose_recipient_secret_key(),
-                limits,
-            ),
-            None => raw::open_http_body(envelope, *self.options.expose_recipient_secret_key()),
-        }
+        self.open_with_keyring(|key| match self.options.limits() {
+            Some(limits) => raw::open_http_body_with_limits(envelope, key, limits),
+            None => raw::open_http_body(envelope, key),
+        })
     }
 
     /// Opens the body using the supplied associated data.
@@ -291,13 +313,9 @@ impl HttpOpener {
                 &default_limits
             }
         };
-        open_body_with_context(
-            envelope,
-            *self.options.expose_recipient_secret_key(),
-            aad,
-            limits,
-        )
-        .map_err(HttpError::OpenFailed)
+        self.open_with_keyring(|key| {
+            open_body_with_context(envelope, key, aad, limits).map_err(HttpError::OpenFailed)
+        })
     }
 
     /// Opens a request sealed with [`HttpSealer::seal_request_with_context`],
@@ -784,5 +802,115 @@ mod tests {
         };
         let options = HttpSealOptions::new([1u8; 32], b"kid").with_limits(limits.clone());
         assert_eq!(options.limits(), Some(&limits));
+    }
+
+    #[test]
+    fn key_rotation_overlap_accepts_current_and_previous_key() {
+        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_pub = PublicKey::from(&old_priv).to_bytes();
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_pub = PublicKey::from(&new_priv).to_bytes();
+
+        // During the overlap window the recipient accepts both the current
+        // (v2) key and the retiring (v1) key.
+        let opener = HttpOpener::new(
+            HttpOpenOptions::new(new_priv.to_bytes()).with_recipient_key(old_priv.to_bytes()),
+        );
+        assert_eq!(opener.options().recipient_key_count(), 2);
+
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        for (recipient_pub, kid, body) in [
+            (old_pub, &b"server-v1"[..], &b"pre-rotation"[..]),
+            (new_pub, &b"server-v2"[..], &b"post-rotation"[..]),
+        ] {
+            let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, kid));
+            let store = InMemoryReplayStore::new();
+            let request = Request::builder()
+                .method("POST")
+                .uri("https://api.example.com/pay")
+                .body(body.to_vec())
+                .expect("request");
+            let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+            let sealed = sealer
+                .seal_request_with_context(request, carrier, binding)
+                .expect("seal");
+            let opened = opener
+                .open_request_with_context(sealed, &store, now, 30, binding)
+                .expect("keyring opens an envelope sealed to either key");
+            assert_eq!(opened.body(), body);
+        }
+    }
+
+    #[test]
+    fn key_rotation_rejects_key_after_it_is_retired() {
+        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_pub = PublicKey::from(&old_priv).to_bytes();
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+
+        // Overlap window is over: the recipient holds only the current key.
+        let opener = HttpOpener::new(HttpOpenOptions::new(new_priv.to_bytes()));
+        let sealer_old = HttpSealer::new(HttpSealOptions::new(old_pub, b"server-v1"));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer_old
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        let err = opener
+            .open_request_with_context(sealed, &store, now, 30, binding)
+            .expect_err("a request sealed to a retired key must be rejected");
+        assert!(matches!(err, HttpError::OpenFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn key_rotation_trial_decryption_does_not_consume_replay_slot() {
+        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_pub = PublicKey::from(&new_priv).to_bytes();
+
+        // The non-matching old key is tried FIRST and fails authentication
+        // before the matching new key succeeds.
+        let opener = HttpOpener::new(
+            HttpOpenOptions::new(old_priv.to_bytes()).with_recipient_key(new_priv.to_bytes()),
+        );
+        let sealer = HttpSealer::new(HttpSealOptions::new(new_pub, b"server-v2"));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        // First delivery: the failing old-key attempt must not populate the
+        // replay store, so authentication (before the store) still succeeds.
+        let opened = opener
+            .open_request_with_async_store(clone_request(&sealed), &store, now, 30, binding)
+            .await
+            .expect("the second key in the ring opens the envelope");
+        assert_eq!(opened.body(), b"charge");
+
+        // The genuine replay is still detected exactly once.
+        let err = opener
+            .open_request_with_async_store(sealed, &store, now, 30, binding)
+            .await
+            .expect_err("replay must be rejected");
+        assert!(matches!(err, HttpError::Replayed));
     }
 }

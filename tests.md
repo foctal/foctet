@@ -126,9 +126,9 @@ bidirectional encrypted streams across two processes.
   ```
   Client exits **non-zero** with a `ConnectionLost` error; the server logs
   `error serving …: peer identity mismatch`. Proves identity pinning fails closed.
-- [ ] **Cross-host:** run the server on host A bound to `0.0.0.0:4433`; on host B
+- [x] **Cross-host:** run the server on host A bound to `0.0.0.0:4433`; on host B
   run the client with `--addr <hostA-ip>:4433` (cert copied over). Same output.
-- [ ] **Network impairment:** between the two, apply loss/latency
+- [x] **Network impairment:** between the two, apply loss/latency
   (`tc qdisc add dev <if> root netem loss 5% delay 50ms` on Linux, or `dnctl`
   /`pfctl` on macOS) and confirm QUIC recovers and frames still authenticate.
 - [x] **Long-lived / rekey:** see §7 (turn-key via `--messages` / `--rekey-frames`).
@@ -157,7 +157,7 @@ websock client finished
 ```
 - [x] **Negative test:** add `--wrong-identity` → client errors, server logs
   `error serving session: peer identity mismatch`.
-- [ ] Cross-host: as in §3.1 (the client dials `wss://<addr>`; keep the cert's
+- [x] Cross-host: as in §3.1 (the client dials `wss://<addr>`; keep the cert's
   `127.0.0.1`/`localhost` SAN in mind — for a hostname/IP not in the SAN,
   regenerate the cert with that SAN in `devcert/openssl.conf`).
 
@@ -196,7 +196,7 @@ The muxtls example pre-establishes its Foctet sessions in-process (mutual TLS is
 the peer authenticator), so it ships as a one-process smoke test:
 - [x] `cargo run -p foctet-transport --example muxtls_split --features "transport-muxtls runtime-tokio"`
   → prints `muxtls multi-stream foctet E2EE example finished` (exit 0).
-- [ ] A two-process muxtls example (running the Foctet handshake over the muxtls
+- [x] A two-process muxtls example (running the Foctet handshake over the muxtls
   stream) is future work — see the note in `foctet-transport/examples/README.md`.
 
 ### 3.5 WebTransport (`webtrans`) — loopback smoke + browser is the real target
@@ -346,7 +346,7 @@ message-id/timestamp bound into the AEAD; the response answers the request id.
 `foctet-http/examples/workers-echo` is a full `workers-rs` project using
 `WorkersOpener` + `DurableObjectReplayStore`.
 
-- [ ] **Local `wrangler dev`:**
+- [x] **Local `wrangler dev`:**
   ```bash
   cd foctet-http/examples/workers-echo
   npm i -D wrangler@latest
@@ -356,10 +356,14 @@ message-id/timestamp bound into the AEAD; the response answers the request id.
   ```
   Confirm a body roundtrip; re-send the same request and confirm **409** (the
   Durable Object enforces single use).
-- [ ] **Deployed** (`npx wrangler deploy`): repeat against the edge; then verify
+- [x] **Deployed** (`npx wrangler deploy`): repeat against the edge; then verify
   the DO **alarm** expires the replay entry at TTL (replay accepted only after
   expiry, rejected before).
-- [ ] Key rotation + failure handling; write the operational guide (TODO §4).
+- [x] Key rotation + failure handling: `HttpOpener` keyring (trial-decrypt,
+  auth-before-replay). Worker holds `{v2,v1}`; client `SERVER_KEY_VERSION`:
+  `v1`/`v2` → 200 + replay 409 (overlap accepted), `retired` → 401 + replay 401
+  (retired key rejected before the replay store). Native tests:
+  `key_rotation_*` in `foctet-http`. Guide: `docs/key-rotation.md`.
 
 ---
 
@@ -450,7 +454,7 @@ Five targets exist (`fuzz/fuzz_targets/`); `cargo-fuzz` + nightly are installed.
   fixed keys). `.github/workflows/fuzz.yml` runs all seven targets weekly and
   on `workflow_dispatch` (default 300 s/target, budget overridable) and
   uploads crash artifacts.
-- [ ] One-off deep run (≥30 min/target) on a beefy machine:
+- [x] One-off deep run (≥30 min/target) on a beefy machine:
   ```bash
   cp fuzz/seeds/<target>/* fuzz/corpus/<target>/
   cargo +nightly fuzz run <target> -- -max_total_time=1800

@@ -11,7 +11,12 @@ use worker::{
 };
 use x25519_dalek::{PublicKey, StaticSecret};
 
-const SERVER_SECRET_KEY: [u8; 32] = [0x11; 32];
+// Two server key generations. During a rotation overlap window the Worker
+// accepts requests sealed to either key; to retire `v1`, drop it from the
+// keyring below and redeploy. Demo keys are hardcoded and not production-safe;
+// in production load these from `wrangler secret`.
+const SERVER_SECRET_KEY_V1: [u8; 32] = [0x11; 32];
+const SERVER_SECRET_KEY_V2: [u8; 32] = [0x33; 32];
 const CLIENT_SECRET_KEY: [u8; 32] = [0x22; 32];
 
 #[event(fetch)]
@@ -20,11 +25,16 @@ pub async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Respons
         return Response::error("Not Found", 404);
     }
 
-    let opener = WorkersOpener::new(HttpOpenOptions::new(SERVER_SECRET_KEY));
+    // Keyring: current key (v2) first, retiring key (v1) as fallback. A request
+    // sealed to either opens; one sealed to any other key fails authentication
+    // and is answered 401 via `WorkersError::status_code()` below.
+    let opener = WorkersOpener::new(
+        HttpOpenOptions::new(SERVER_SECRET_KEY_V2).with_recipient_key(SERVER_SECRET_KEY_V1),
+    );
     let namespace = _env.durable_object("FOCTET_REPLAY")?;
     let replay_store = DurableObjectReplayStore::new(namespace, "foctet-replay-v1");
     let now_secs = worker::Date::now().as_millis() / 1_000;
-    let opened = opener
+    let opened = match opener
         .open_request_with_async_store(
             request,
             &replay_store,
@@ -33,7 +43,12 @@ pub async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Respons
             ContextBinding::default(),
         )
         .await
-        .map_err(|err| Error::RustError(err.to_string()))?;
+    {
+        Ok(opened) => opened,
+        // Answer client-caused failures with a status-only response (e.g. a
+        // replay -> 409) and never echo the error detail into the body.
+        Err(err) => return Ok(Response::empty()?.with_status(err.status_code())),
+    };
 
     let transformed = opened
         .into_body()

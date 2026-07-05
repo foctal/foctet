@@ -180,6 +180,35 @@ pub enum WorkersError {
     Http(#[from] HttpError),
 }
 
+impl WorkersError {
+    /// Maps this error to the HTTP status code a Worker should return.
+    ///
+    /// The mapping mirrors the axum adapter (`AxumError::into_response`) so both
+    /// integrations answer a given failure identically: replays are `409`,
+    /// expired or unopenable contexts are `401`, malformed requests are `400`,
+    /// and only genuine server-side faults are `500`.
+    ///
+    /// Return *only* this status, with no error detail in the response body, so
+    /// an opening or replay failure cannot leak ciphertext, key, or
+    /// internal-state information to the caller.
+    pub fn status_code(&self) -> u16 {
+        match self {
+            WorkersError::Http(
+                HttpError::MissingContentType
+                | HttpError::InvalidContentType
+                | HttpError::MissingContext(_)
+                | HttpError::InvalidContext(_)
+                | HttpError::ContextTimestampInFuture
+                | HttpError::StreamIncomplete,
+            ) => 400,
+            WorkersError::Http(HttpError::ContextExpired | HttpError::OpenFailed(_)) => 401,
+            WorkersError::Http(HttpError::Replayed) => 409,
+            WorkersError::Http(HttpError::SealFailed(_) | HttpError::ReplayStore(_)) => 500,
+            WorkersError::Worker(_) => 500,
+        }
+    }
+}
+
 /// High-level Workers request opener.
 #[derive(Clone, Debug)]
 pub struct WorkersOpener {

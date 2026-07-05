@@ -47,6 +47,8 @@ Use this when you need encrypted payload bodies over HTTP APIs but do not need f
   - seal request or response bodies with `application/foctet`
   - keep `x-foctet-scope: body-only`
   - authenticate the outer HTTP channel separately
+  - rotate recipient keys with an `HttpOpener` keyring and an overlap window
+    (see [Key rotation](key-rotation.md))
 
 ### When to choose it
 
