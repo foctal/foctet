@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Top-level public API for the Foctet workspace.
 //!
 //! This crate re-exports:

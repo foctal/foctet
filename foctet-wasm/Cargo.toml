@@ -9,6 +9,10 @@ repository.workspace = true
 description = "WebAssembly bindings for Foctet end-to-end encryption (body envelopes)"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Foctet Core protocol: framing, handshake, traffic keys, replay protection"
 readme = "../README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["runtime-futures", "runtime-tokio"]
 runtime-tokio = ["dep:tokio"]

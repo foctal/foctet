@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! High-level Foctet integration helpers for stream-oriented transports.
 //!
 //! `foctet-transport` is the recommended entry point when you want Foctet to
