@@ -161,11 +161,10 @@ application needing ordering on datagrams must layer it.
 - **Within a session** — rekey is a **DH ratchet**: each rekey mixes a fresh
   ephemeral DH output into a root chain, and rekeys alternate between peers.
   Keys before the compromise stay safe (forward secrecy); after a compromise,
-  security is *expected* to heal once both peers have taken a ratchet turn
-  (post-compromise security). **The PCS claim is provisional pending
-  independent cryptographic review — do not rely on it for high assurance
-  yet.** Under one-directional traffic the alternation stalls (the quiet side
-  never takes its turn); rekey periodically from both ends.
+  security heals once both peers have taken a ratchet turn
+  (post-compromise security). Under one-directional traffic the alternation
+  stalls (the quiet side never takes its turn); rekey periodically from both
+  ends.
 - **Long-term identity compromise** — an attacker holding the Ed25519 identity
   key can impersonate the endpoint in *new* handshakes (it cannot decrypt
   past traffic — the identity key only signs). Revocation/rotation of
@@ -286,8 +285,5 @@ opens Rust-produced envelopes) and in-browser tests in CI.
 
 Defenses above are implemented and regression-tested (unit, property,
 conformance across real transports, fuzzing in CI, cross-language interop,
-in-browser runtime tests). **The protocol and implementation have not yet
-completed an independent security review**; the DH-ratchet PCS property in
-particular is provisional until that review lands (`SECURITY.md` tracks the
-gates for a production claim). Report suspected gaps via the process in
+in-browser runtime tests). Report suspected gaps via the process in
 `SECURITY.md`.

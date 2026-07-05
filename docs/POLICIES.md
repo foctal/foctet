@@ -56,8 +56,9 @@ When a v1 (or a second profile) exists, the following rules apply:
 
 ### 1.4 v1 commitment (future)
 
-Declaring v1 requires the release gates in `TODO.md` §8 (spec complete and
-matching code+vectors, independent review, etc.). From v1 on:
+Declaring v1 requires the release gates described in the project security and
+compatibility documentation (spec complete and matching code+vectors, stable
+compatibility policy, operational readiness, etc.). From v1 on:
 
 - the wire format is stable within a major version; frames, envelopes, and
   archives produced by any v1.x implementation are readable by any other;

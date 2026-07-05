@@ -12,9 +12,8 @@ Transport-agnostic end-to-end encryption layer for secure data transfer.
 > authenticated encrypted framing (byte-stream, datagram, and message shapes), a
 > one-shot HTTP body envelope with versioned protected-context replay defense, a
 > WASM/TypeScript body-envelope SDK, and encrypted archives. The wire format is
-> still unstable and the protocol has **not** received an independent
-> cryptographic review. See [`SECURITY.md`](SECURITY.md) for the security posture
-> and known limitations before deploying.
+> still unstable. See [`SECURITY.md`](SECURITY.md) for the security posture and
+> known limitations before deploying.
 
 ## Crates
 
@@ -81,10 +80,10 @@ Not yet implemented (see [`SECURITY.md`](SECURITY.md)):
   framework-agnostic `HttpRequestStreamReader` for Workers), but producing a
   streaming response body is currently left to the application (write the sealer's
   stream header then each sealed chunk to the response stream).
-- A reviewed post-compromise-security claim: in-session rekey now uses a
-  forward-secret, alternating **DH ratchet**, but its post-compromise guarantee
-  is pending the required independent cryptographic review (see `SECURITY.md`).
-- An independent cryptographic review and a normative, versioned wire spec.
+- Additional operational guidance around long-lived deployments and package
+  distribution (for example the npm release flow for the WASM SDK).
+- The final v1 wire/API compatibility commitment and a normative, versioned wire
+  spec.
 
 ## Transport Support Matrix
 

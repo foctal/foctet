@@ -22,8 +22,8 @@ This directory contains non-Rust tooling for interoperability verification.
 ## `verify_vectors.mjs` — independent vector verification
 
 A from-spec re-implementation of the Draft v0 primitives on top of the
-[@noble](https://paulmillr.com/noble/) cryptography libraries (audited,
-pure-JS, zero shared code with this workspace). It verifies every canonical
+[@noble](https://paulmillr.com/noble/) cryptography libraries (pure-JS, zero
+shared code with this workspace). It verifies every canonical
 vector in `test-vectors/` end to end:
 
 - **`frame-v0.json`** — HKDF-SHA-256 traffic-key derivation, frame-header

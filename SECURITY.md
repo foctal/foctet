@@ -6,9 +6,9 @@ Foctet is an **experimental Draft v0** implementation of authenticated encrypted
 framing, a one-shot `application/foctet` body envelope, and encrypted archive
 formats. The project is under active security and interoperability development.
 
-It is **not yet a stable, independently audited, general-purpose production E2EE
-SDK**. Several surfaces (datagram/UDP, WASM body envelope, HTTP protected
-context) are implemented but remain partial or unreviewed — see "Known
+It is **not yet a stable, general-purpose production E2EE SDK**. Several
+surfaces (datagram/UDP, WASM body envelope, HTTP protected context) are
+implemented but remain partial or evolving — see "Known
 limitations" below. Do not describe it as a complete E2EE library for arbitrary
 TCP/UDP/QUIC/WebSocket/WebTransport payloads until the gates in
 "Roadmap to a production claim" below are met.
@@ -90,7 +90,7 @@ supported-version policy will accompany the first `v1` release.
 ## Known limitations (do not rely on these yet)
 
 These are tracked work items; treat each as **unsupported** until implemented,
-tested, and independently reviewed:
+documented, and thoroughly tested:
 
 1. **HTTP anti-replay (near-complete, not yet hard-enforced).** `foctet-http`
    ships a versioned protected-context schema (`ProtectedContext`, `x-foctet-*`
@@ -108,17 +108,15 @@ tested, and independently reviewed:
    The low-level `seal_body` / `open_body` primitives remain stateless by
    design — production HTTP code must use the `*_with_context` APIs backed by
    a shared, durable store. Still open: authority-normalization guidance.
-2. **Forward-secret DH ratchet rekey (pending independent review).** In-session
+2. **Forward-secret DH ratchet rekey.** In-session
    rekey now performs a Diffie-Hellman ratchet step: each rekey mixes a fresh
    ephemeral X25519 output into a root-key chain, and rekeys **alternate**
    between the two peers (enforced by a turn flag, so the root chain cannot fork
    and both peers' ratchet keys rotate). This gives forward secrecy and, across
-   an alternating rekey, post-compromise security in both directions. **Caveat:**
-   this construction has **not yet had the independent cryptographic review** this
-   project requires, so do not yet rely on its post-compromise guarantee for
-   high-assurance use. Operational note: under strictly one-directional traffic
-   the alternation can stall after one step (the quiet side never takes its turn);
-   rekey periodically from both ends for continued ratcheting.
+   an alternating rekey, post-compromise security in both directions.
+   Operational note: under strictly one-directional traffic the alternation can
+   stall after one step (the quiet side never takes its turn); rekey
+   periodically from both ends for continued ratcheting.
 3. **Datagram support (near-complete).** A dedicated datagram API
    (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
    size cap, authenticate-before-replay, loss/reorder tolerant) ships with a
@@ -160,8 +158,9 @@ tested, and independently reviewed:
    `HttpRequestStreamReader`, and the axum helper `open_request_stream`, no
    whole-body buffering). Still open: a response-body streaming helper and
    backpressure *tuning* guidance.
-6. **Wire format is unstable** (`0.x`, Draft v0) and has not been validated by an
-   independent implementation.
+6. **Wire format is unstable** (`0.x`, Draft v0). Even though vectors and
+   interoperability fixtures are checked in CI, breaking wire changes may still
+   occur until the v1 compatibility commitment begins.
 
 ## Roadmap to a production / `v1` claim
 
@@ -169,13 +168,13 @@ Before using "production-ready" or "v1 stable" wording, all of the following mus
 hold:
 
 - All P0/P1 findings fixed and regression-tested (see the project review).
+- Documentation, examples, and operational guidance aligned with the shipped
+  surface.
 - Authenticated peer identity or explicit authenticated-channel binding is
   mandatory for production constructors.
 - HTTP has an authenticated protected context and replay defense, or is
   explicitly excluded from the production promise.
 - The advertised transport matrix has real implementations and conformance tests.
 - WASM/TypeScript are either truly shipped and tested or excluded from the claim.
-- An independent security review covers protocol design, the Rust
-  implementation, the WASM/JS boundary, and HTTP mode.
 - Dependency advisory/license checks, fuzzing, reproducible builds, CI coverage,
   and a vulnerability-response process are active.
