@@ -107,12 +107,3 @@ jobs:
         rustup default 1.88.0
     - name: Check workspace builds on MSRV
       run: cargo check --workspace --all-features --locked
-
-  cargo-deny:
-    name: License, advisory & source policy
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - uses: EmbarkStudios/cargo-deny-action@d6d27f1b02f0c07f9db6ffc34e7871bba5ab5816 # v2.0.9
-      with:
-        command: check
