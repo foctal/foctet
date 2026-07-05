@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>foctet-wasm — browser runtime harness</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        max-width: 70ch;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      h1 { font-size: 1.2rem; }
+      #summary { font-weight: bold; margin: 1rem 0; }
+      ul { list-style: none; padding: 0; }
+      li { padding: 0.2rem 0; }
+      .ok::before { content: "✅ "; }
+      .fail::before { content: "❌ "; }
+      .fail { color: #c0392b; }
+      pre { white-space: pre-wrap; opacity: 0.7; font-size: 0.85rem; }
+    </style>
+  </head>
+  <body>
+    <h1>foctet-wasm — browser runtime harness</h1>
+    <p>
+      Exercises the WASM SDK inside a real browser engine: body-envelope
+      roundtrip, Rust→JS wire compatibility (the same fixture used by the Node
+      interop test), and a full in-page <code>FoctetSession</code> handshake +
+      message exchange. Run <code>./examples/browser/serve.sh</code> (or
+      <code>npm run browser</code>) from the <code>foctet-wasm</code> directory,
+      then open this page.
+    </p>
+    <div id="summary">Running…</div>
+    <ul id="results"></ul>
+
+    <script type="module">
+      import init, {
+        version,
+        KeyPair,
+        sealBody,
+        openBody,
+        sealBodyWithContext,
+        openBodyWithContext,
+        IdentityKeyPair,
+        AuthConfig,
+        FoctetSession,
+      } from "../../pkg-web/foctet_wasm.js";
+
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const results = document.getElementById("results");
+      let passed = 0;
+      let failed = 0;
+
+      function record(name, ok, detail) {
+        const li = document.createElement("li");
+        li.className = ok ? "ok" : "fail";
+        li.textContent = name + (detail ? ` — ${detail}` : "");
+        results.appendChild(li);
+        if (ok) passed += 1;
+        else failed += 1;
+      }
+
+      async function check(name, fn) {
+        try {
+          await fn();
+          record(name, true);
+        } catch (err) {
+          record(name, false, String(err && err.message ? err.message : err));
+          // eslint-disable-next-line no-console
+          console.error(name, err);
+        }
+      }
+
+      function assert(cond, msg) {
+        if (!cond) throw new Error(msg || "assertion failed");
+      }
+
+      function fromHex(hex) {
+        const out = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < out.length; i += 1) {
+          out[i] = parseInt(hex.substr(i * 2, 2), 16);
+        }
+        return out;
+      }
+
+      function bytesEqual(a, b) {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+        return true;
+      }
+
+      // Drive the two-message Foctet handshake: client hello -> server hello ->
+      // initiator finalizes (and must not reply).
+      function driveHandshake(initiator, responder) {
+        const clientHello = initiator.initialHandshakeMessage();
+        assert(clientHello, "initiator must emit a client hello");
+        const serverHello = responder.handleHandshakeMessage(clientHello);
+        assert(serverHello, "responder must reply with a server hello");
+        const none = initiator.handleHandshakeMessage(serverHello);
+        assert(!none, "initiator must not reply to the server hello");
+      }
+
+      async function main() {
+        await init();
+        document.title += ` (v${version()})`;
+
+        await check("version() returns a non-empty string", () => {
+          assert(typeof version() === "string" && version().length > 0);
+        });
+
+        await check("body envelope: seal -> open roundtrip", () => {
+          const kp = new KeyPair();
+          const pt = enc.encode("hello from the browser");
+          const env = sealBody(pt, kp.publicKey, enc.encode("browser-kid"));
+          const opened = openBody(env, kp.secretKey);
+          assert(dec.decode(opened) === "hello from the browser");
+        });
+
+        await check("body envelope: context binding (match opens, mismatch fails)", () => {
+          const kp = new KeyPair();
+          const pt = enc.encode("ctx payload");
+          const ctx = enc.encode("POST /v1/items");
+          const env = sealBodyWithContext(pt, kp.publicKey, enc.encode("kid"), ctx);
+          const opened = openBodyWithContext(env, kp.secretKey, ctx);
+          assert(dec.decode(opened) === "ctx payload");
+          let threw = false;
+          try {
+            openBodyWithContext(env, kp.secretKey, enc.encode("GET /other"));
+          } catch {
+            threw = true;
+          }
+          assert(threw, "wrong context must fail to open");
+        });
+
+        await check("Rust -> JS wire compatibility (interop_vector.json)", async () => {
+          const res = await fetch("../../tests/interop_vector.json");
+          assert(res.ok, `fetch failed: ${res.status}`);
+          const v = await res.json();
+          const opened = openBody(fromHex(v.envelope), fromHex(v.secret));
+          assert(dec.decode(opened) === v.plaintext, "Rust-produced envelope mismatch");
+        });
+
+        await check("FoctetSession: authenticated handshake + message roundtrip", () => {
+          const initId = new IdentityKeyPair();
+          const respId = new IdentityKeyPair();
+          const initiator = FoctetSession.newInitiator(
+            AuthConfig.authenticated(initId, respId.publicKey),
+          );
+          const responder = FoctetSession.newResponder(
+            AuthConfig.authenticated(respId, initId.publicKey),
+          );
+          driveHandshake(initiator, responder);
+          assert(initiator.isEstablished(), "initiator not established");
+          assert(responder.isEstablished(), "responder not established");
+          assert(initiator.peerAuthenticated(), "initiator peer not authenticated");
+          assert(responder.peerAuthenticated(), "responder peer not authenticated");
+
+          const sealed = initiator.sealMessage(0, 0, enc.encode("ping"));
+          const decoded = responder.openMessage(sealed);
+          assert(dec.decode(decoded.plaintext) === "ping", "message roundtrip mismatch");
+
+          const back = responder.sealMessage(0, 0, enc.encode("pong"));
+          assert(dec.decode(initiator.openMessage(back).plaintext) === "pong");
+        });
+
+        const summary = document.getElementById("summary");
+        summary.textContent = `${passed} passed, ${failed} failed`;
+        summary.className = failed === 0 ? "ok" : "fail";
+        // Expose a machine-readable result for headless runners.
+        window.__FOCTET_RESULT__ = { passed, failed };
+      }
+
+      main().catch((err) => {
+        const summary = document.getElementById("summary");
+        summary.textContent = `harness crashed: ${err}`;
+        summary.className = "fail";
+        // eslint-disable-next-line no-console
+        console.error(err);
+      });
+    </script>
+  </body>
+</html>

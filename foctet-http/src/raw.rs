@@ -99,6 +99,13 @@ pub fn open_http_body_with_limits(
 }
 
 /// Seals request body and sets `Content-Type: application/foctet`.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use the *_with_context API with a ReplayStore for \
+            production (see crate docs)"
+)]
+#[allow(deprecated)]
 pub fn seal_http_request(
     request: Request<Vec<u8>>,
     recipient_public_key: [u8; 32],
@@ -112,6 +119,13 @@ pub fn seal_http_request(
 }
 
 /// Seals request body with explicit limits and sets `Content-Type: application/foctet`.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use the *_with_context API with a ReplayStore for \
+            production (see crate docs)"
+)]
+#[allow(deprecated)]
 pub fn seal_http_request_with_limits(
     request: Request<Vec<u8>>,
     recipient_public_key: [u8; 32],
@@ -126,6 +140,13 @@ pub fn seal_http_request_with_limits(
 }
 
 /// Validates foctet content type and opens request body.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use the *_with_context API with a ReplayStore for \
+            production (see crate docs)"
+)]
+#[allow(deprecated)]
 pub fn open_http_request(
     request: Request<Vec<u8>>,
     recipient_secret_key: [u8; 32],
@@ -135,6 +156,13 @@ pub fn open_http_request(
 }
 
 /// Validates foctet content type and opens request body with explicit limits.
+#[deprecated(
+    since = "0.3.0",
+    note = "stateless full-request protection has no replay defense or HTTP-context binding \
+            and is replayable by design; use the *_with_context API with a ReplayStore for \
+            production (see crate docs)"
+)]
+#[allow(deprecated)]
 pub fn open_http_request_with_limits(
     request: Request<Vec<u8>>,
     recipient_secret_key: [u8; 32],
@@ -249,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn wrong_content_type_rejected_on_request_open() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
 
@@ -263,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn request_and_response_helpers_roundtrip() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();

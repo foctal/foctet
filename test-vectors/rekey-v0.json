@@ -1,0 +1,13 @@
+{
+  "session_salt_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+  "shared_secret_hex": "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+  "ratchet_root_hex": "d891aa7cdabdd5be71c1a33d98e8763b3a0c899cf1617120a669f7d15faea096",
+  "rekey_eph_private_hex": "3333333333333333333333333333333333333333333333333333333333333333",
+  "rekey_eph_public_hex": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+  "peer_ratchet_public_hex": "f68b05ba03f7185e1ba88878682f8dd0b15158f6050889c9481d79c2d7d2fa07",
+  "rekey_dh_hex": "dc0b3acc4698709848a9f6f403ad52ca35fff02d2f15b662348748d1d43de74a",
+  "new_key_id": 1,
+  "new_ratchet_root_hex": "aa191edf7274874e37207a9dd57c3ebfebb2f5bfc081022cc277b8034e661c0f",
+  "rekey_key_c2s_hex": "fdccd5f64c9916bf563ea4c0ddb7b95d4b98e09bfd87551ae9913e19294d2a91",
+  "rekey_key_s2c_hex": "afccdadf9d88d60119fa9b8a2b7152d225bdc71039ea7c11f03081a8317f1f62"
+}

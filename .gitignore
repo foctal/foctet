@@ -26,3 +26,9 @@ Cargo.lock
 
 # macOS
 *.DS_Store
+
+# WASM / npm build artifacts
+foctet-wasm/pkg/
+foctet-wasm/pkg-node/
+foctet-wasm/pkg-web/
+node_modules/

@@ -2,9 +2,13 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use std::ops::Deref;
+use std::sync::Arc;
+
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -23,7 +27,21 @@ pub enum Direction {
 }
 
 /// Bidirectional traffic keys bound to a single `key_id`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// # Secret material
+///
+/// The `c2s` / `s2c` fields are live XChaCha20-Poly1305 keys. They are
+/// **not** printed by the [`Debug`] implementation (which redacts them), are
+/// compared in constant time (see the [`PartialEq`] impl), and are zeroized on
+/// drop. Reading the raw bytes directly via the public fields is an explicit,
+/// auditable exposure — prefer [`TrafficKeys::key_for`], and only copy the
+/// bytes out when you immediately wrap the copy (e.g. in
+/// [`zeroize::Zeroizing`]).
+///
+/// `TrafficKeys` is deliberately **not** `Clone`: the secret key bytes exist in
+/// exactly one place and are zeroized when that place is dropped. Share keys
+/// through a [`KeyHandle`] (a reference-counted handle) instead of copying the
+/// secret bytes into multiple owners.
 pub struct TrafficKeys {
     /// Active key identifier carried in frame headers.
     pub key_id: u8,
@@ -43,10 +61,73 @@ impl TrafficKeys {
     }
 }
 
+impl core::fmt::Debug for TrafficKeys {
+    /// Redacts the directional key bytes so they cannot leak into logs.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TrafficKeys")
+            .field("key_id", &self.key_id)
+            .field("c2s", &"<redacted>")
+            .field("s2c", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PartialEq for TrafficKeys {
+    /// Compares the directional keys in constant time.
+    ///
+    /// The `key_id` is a public frame-header byte and is compared normally; the
+    /// secret key bytes are compared with [`subtle::ConstantTimeEq`] so that
+    /// equality checks do not leak key material through timing.
+    fn eq(&self, other: &Self) -> bool {
+        let c2s_eq = self.c2s.ct_eq(&other.c2s);
+        let s2c_eq = self.s2c.ct_eq(&other.s2c);
+        self.key_id == other.key_id && (c2s_eq & s2c_eq).into()
+    }
+}
+
+impl Eq for TrafficKeys {}
+
 impl Drop for TrafficKeys {
     fn drop(&mut self) {
         self.c2s.zeroize();
         self.s2c.zeroize();
+    }
+}
+
+/// A shared, reference-counted handle to a set of [`TrafficKeys`].
+///
+/// Because [`TrafficKeys`] is not `Clone`, the session key ring, the previous-key
+/// retention list, and the various I/O endpoints share one key set through a
+/// `KeyHandle` rather than each owning a copy of the secret bytes. Cloning a
+/// `KeyHandle` only bumps the reference count; the underlying key bytes are
+/// zeroized once the last handle is dropped.
+///
+/// A `KeyHandle` dereferences to the inner [`TrafficKeys`], so field access
+/// (`handle.key_id`) and methods (`handle.key_for(dir)`) work directly, and it
+/// coerces to `&TrafficKeys` at call sites such as [`encrypt_frame`]. Equality
+/// and `Debug` delegate to [`TrafficKeys`] (constant-time comparison, redacted
+/// secret bytes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyHandle(Arc<TrafficKeys>);
+
+impl KeyHandle {
+    /// Wraps a freshly derived key set in a shared handle.
+    pub fn new(keys: TrafficKeys) -> Self {
+        Self(Arc::new(keys))
+    }
+}
+
+impl From<TrafficKeys> for KeyHandle {
+    fn from(keys: TrafficKeys) -> Self {
+        Self::new(keys)
+    }
+}
+
+impl Deref for KeyHandle {
+    type Target = TrafficKeys;
+
+    fn deref(&self) -> &TrafficKeys {
+        &self.0
     }
 }
 
@@ -75,34 +156,59 @@ pub fn derive_traffic_keys(
     Ok(TrafficKeys { key_id, c2s, s2c })
 }
 
-/// Derives rekeyed traffic keys from shared/session/rekey salt inputs.
-pub fn derive_rekey_traffic_keys(
-    shared_secret: &[u8; 32],
+/// Derives the initial DH-ratchet root key from the handshake shared secret.
+///
+/// The root key seeds the rekey ratchet (see [`dh_ratchet_step`]); it is mixed
+/// with a fresh Diffie-Hellman output at every rekey so that traffic keys gain
+/// forward secrecy and post-compromise security across rekeys, rather than all
+/// being derivable from the one handshake secret.
+pub fn derive_ratchet_root(
     session_salt: &[u8; 32],
-    rekey_salt: &[u8; 32],
-    key_id: u8,
-) -> Result<TrafficKeys, CoreError> {
-    let mut salt = Zeroizing::new([0u8; 64]);
-    salt[..32].copy_from_slice(session_salt);
-    salt[32..].copy_from_slice(rekey_salt);
-    let hk = Hkdf::<Sha256>::new(Some(&salt[..]), shared_secret);
+    shared_secret: &[u8; 32],
+) -> Result<[u8; 32], CoreError> {
+    let hk = Hkdf::<Sha256>::new(Some(session_salt), shared_secret);
+    let mut root = [0u8; 32];
+    hk.expand(b"foctet ratchet init", &mut root)
+        .map_err(|_| CoreError::Hkdf)?;
+    Ok(root)
+}
 
+/// Performs one DH-ratchet step: mixes a fresh Diffie-Hellman output `dh` into
+/// the ratchet `root`, returning the advanced root and the next traffic keys.
+///
+/// `(new_root, c2s, s2c)` are independent HKDF-SHA-256 expansions of
+/// `HKDF(salt = root, ikm = dh)`. Because `dh` comes from a freshly generated
+/// ephemeral key at each rekey, an attacker who learns the current keys cannot
+/// derive the keys after the next rekey (post-compromise security), and an
+/// attacker who later compromises the long-term state cannot derive past keys
+/// (forward secrecy) once the ephemeral private keys are discarded.
+pub fn dh_ratchet_step(
+    root: &[u8; 32],
+    dh: &[u8; 32],
+    key_id: u8,
+) -> Result<([u8; 32], TrafficKeys), CoreError> {
+    let hk = Hkdf::<Sha256>::new(Some(root), dh);
+
+    let mut new_root = [0u8; 32];
     let mut c2s = [0u8; 32];
     let mut s2c = [0u8; 32];
 
-    let mut info_c2s = [0u8; 17];
-    info_c2s[..16].copy_from_slice(b"foctet rekey c2s");
-    info_c2s[16] = key_id;
-    let mut info_s2c = [0u8; 17];
-    info_s2c[..16].copy_from_slice(b"foctet rekey s2c");
-    info_s2c[16] = key_id;
+    hk.expand(b"foctet ratchet root", &mut new_root)
+        .map_err(|_| CoreError::Hkdf)?;
+
+    let mut info_c2s = [0u8; 19];
+    info_c2s[..18].copy_from_slice(b"foctet ratchet c2s");
+    info_c2s[18] = key_id;
+    let mut info_s2c = [0u8; 19];
+    info_s2c[..18].copy_from_slice(b"foctet ratchet s2c");
+    info_s2c[18] = key_id;
 
     hk.expand(&info_c2s, &mut c2s)
         .map_err(|_| CoreError::Hkdf)?;
     hk.expand(&info_s2c, &mut s2c)
         .map_err(|_| CoreError::Hkdf)?;
 
-    Ok(TrafficKeys { key_id, c2s, s2c })
+    Ok((new_root, TrafficKeys { key_id, c2s, s2c }))
 }
 
 /// Generates a random session salt for key derivation.
@@ -113,11 +219,21 @@ pub fn random_session_salt() -> [u8; 32] {
 }
 
 /// Ephemeral X25519 key pair used during native handshake.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EphemeralKeyPair {
     private: Zeroizing<[u8; 32]>,
     /// Public key bytes.
     pub public: [u8; 32],
+}
+
+impl core::fmt::Debug for EphemeralKeyPair {
+    /// Redacts the private scalar so it cannot leak into logs.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EphemeralKeyPair")
+            .field("private", &"<redacted>")
+            .field("public", &self.public)
+            .finish()
+    }
 }
 
 impl EphemeralKeyPair {
@@ -143,6 +259,19 @@ impl EphemeralKeyPair {
     }
 }
 
+/// XChaCha20-Poly1305 authentication tag length, in bytes.
+const AEAD_TAG_LEN: usize = 16;
+
+/// Computes the ciphertext length (plaintext + AEAD tag) for a given plaintext
+/// length, failing closed instead of silently truncating if it would not fit
+/// in the frame header's `u32 ct_len` field.
+fn checked_ciphertext_len(plaintext_len: usize) -> Result<u32, CoreError> {
+    if plaintext_len > (u32::MAX as usize) - AEAD_TAG_LEN {
+        return Err(CoreError::FrameTooLarge);
+    }
+    Ok((plaintext_len + AEAD_TAG_LEN) as u32)
+}
+
 /// Encrypts plaintext into a Foctet frame using AEAD profile `0x01`.
 pub fn encrypt_frame(
     keys: &TrafficKeys,
@@ -152,6 +281,12 @@ pub fn encrypt_frame(
     seq: u64,
     plaintext: &[u8],
 ) -> Result<Frame, CoreError> {
+    // Reject plaintext that would make the ciphertext length (plaintext + AEAD
+    // tag) overflow the header's `u32 ct_len` field. Without this check the
+    // cast below would silently truncate, producing a frame whose declared
+    // length doesn't match its actual ciphertext.
+    let expected_ct_len = checked_ciphertext_len(plaintext.len())?;
+
     let key = Zeroizing::new(keys.key_for(direction));
     let cipher =
         XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| CoreError::InvalidKeyLength)?;
@@ -169,7 +304,7 @@ pub fn encrypt_frame(
     let nonce = XNonce::from_slice(&nonce_raw);
 
     let mut aad_header = header.clone();
-    aad_header.ct_len = (plaintext.len() + 16) as u32;
+    aad_header.ct_len = expected_ct_len;
     let aad = aad_header.encode();
 
     let ciphertext = cipher
@@ -272,5 +407,82 @@ mod tests {
             &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
         );
         assert_eq!(&nonce[13..], &[0u8; 11]);
+    }
+
+    #[test]
+    fn checked_ciphertext_len_fits_just_below_overflow() {
+        let max_plaintext = (u32::MAX as usize) - AEAD_TAG_LEN;
+        assert_eq!(
+            checked_ciphertext_len(max_plaintext).expect("fits"),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn checked_ciphertext_len_fails_closed_on_overflow() {
+        let max_plaintext = (u32::MAX as usize) - AEAD_TAG_LEN;
+        let err = checked_ciphertext_len(max_plaintext + 1).expect_err("must not truncate");
+        assert!(matches!(err, CoreError::FrameTooLarge));
+    }
+
+    #[test]
+    fn traffic_keys_debug_redacts_key_bytes() {
+        let keys = TrafficKeys {
+            key_id: 9,
+            c2s: [0xAB; 32],
+            s2c: [0xCD; 32],
+        };
+        let rendered = format!("{keys:?}");
+        assert!(rendered.contains("key_id: 9"));
+        assert!(rendered.contains("<redacted>"));
+        // No raw key byte should appear in the debug output.
+        assert!(!rendered.contains("ab"));
+        assert!(!rendered.contains("171")); // 0xAB as decimal
+        assert!(!rendered.contains("205")); // 0xCD as decimal
+    }
+
+    #[test]
+    fn traffic_keys_equality_is_value_based() {
+        let a = TrafficKeys {
+            key_id: 1,
+            c2s: [0x01; 32],
+            s2c: [0x02; 32],
+        };
+        let b = TrafficKeys {
+            key_id: 1,
+            c2s: [0x01; 32],
+            s2c: [0x02; 32],
+        };
+        let c = TrafficKeys {
+            key_id: 1,
+            c2s: [0x01; 32],
+            s2c: [0x03; 32],
+        };
+        let d = TrafficKeys {
+            key_id: 2,
+            c2s: [0x01; 32],
+            s2c: [0x02; 32],
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn ephemeral_key_pair_debug_redacts_private_scalar() {
+        // Use a fixed private scalar so we can assert its rendered array form is
+        // absent from the Debug output.
+        let private = Zeroizing::new([0x5A_u8; 32]);
+        let public = PublicKey::from(&StaticSecret::from(*private)).to_bytes();
+        let pair = EphemeralKeyPair { private, public };
+
+        let rendered = format!("{pair:?}");
+        assert!(rendered.contains("<redacted>"));
+        // The private scalar's array representation must never appear.
+        let leaked = format!("{:?}", [0x5A_u8; 32]);
+        assert!(
+            !rendered.contains(&leaked),
+            "private scalar leaked into Debug output: {rendered}"
+        );
     }
 }

@@ -1,0 +1,299 @@
+# foctet-wasm
+
+WebAssembly / TypeScript bindings for [Foctet](../README.md) end-to-end
+encryption. Exposes the `application/foctet` body envelope so browsers, Node.js,
+Deno, Bun, and Cloudflare Workers can seal and open the **same wire format** as
+the Rust implementation.
+
+> **Status: experimental (Draft v0).** Provides the one-shot body envelope **and**
+> a full framed session (authenticated handshake, ordered messages,
+> MTU-bounded datagrams, and in-session DH-ratchet rekey). See
+> [`SECURITY.md`](../SECURITY.md) for the security posture and limitations.
+
+## API
+
+Generated TypeScript declarations (`foctet_wasm.d.ts`) accompany every build.
+
+```ts
+function version(): string;
+
+class KeyPair {
+  constructor();                                   // generate a fresh X25519 key pair
+  static fromSecretKey(secretKey: Uint8Array): KeyPair;
+  readonly publicKey: Uint8Array;                  // 32 bytes
+  readonly secretKey: Uint8Array;                  // 32 bytes — handle with care
+}
+
+function sealBody(plaintext: Uint8Array, recipientPublicKey: Uint8Array, keyId: Uint8Array): Uint8Array;
+function openBody(envelope: Uint8Array, recipientSecretKey: Uint8Array): Uint8Array;
+
+// Bind an application context (e.g. HTTP method/path/message-id) into the AEAD.
+function sealBodyWithContext(plaintext: Uint8Array, recipientPublicKey: Uint8Array, keyId: Uint8Array, context: Uint8Array): Uint8Array;
+function openBodyWithContext(envelope: Uint8Array, recipientSecretKey: Uint8Array, context: Uint8Array): Uint8Array;
+```
+
+Fallible functions throw a JavaScript `Error` on malformed input; they never
+abort the WASM instance.
+
+### HTTP protected context
+
+For HTTP request/response protection, let JavaScript adapt the runtime's
+`Request` / `Response` objects into normalized parts, then use these classes to
+produce the same canonical associated-data bytes as `foctet-http`.
+
+```ts
+function httpContentType(): string;                 // "application/foctet"
+function httpContentTypeHeader(): string;           // "content-type"
+function httpScopeHeader(): string;                 // "x-foctet-scope"
+function httpBodyOnlyScope(): string;               // "body-only"
+function httpMessageIdHeader(): string;             // "x-foctet-msg-id"
+function httpTimestampHeader(): string;             // "x-foctet-timestamp"
+function httpExpiryHeader(): string;                // "x-foctet-expiry"
+function httpIdempotencyHeader(): string;           // "x-foctet-idempotency-key"
+function httpRequestMessageIdHeader(): string;      // "x-foctet-req-msg-id"
+function defaultHttpContextTtlSecs(): bigint;       // 300
+function defaultHttpMaxClockSkewSecs(): bigint;     // 30
+
+class HttpContextCarrier {
+  constructor(messageId: Uint8Array, timestampSecs: bigint, expirySecs: bigint);
+  static generate(nowSecs: bigint, ttlSecs: bigint): HttpContextCarrier;
+  static fromHeaderValues(
+    messageIdHex: string,
+    timestampSecs: string,
+    expirySecs: string,
+    idempotencyKey?: string,
+    requestMessageIdHex?: string,
+  ): HttpContextCarrier;
+  setIdempotencyKey(key?: string): void;
+  setRequestMessageId(messageId?: Uint8Array): void;
+  readonly messageId: Uint8Array;
+  readonly timestampSecs: bigint;
+  readonly expirySecs: bigint;
+  readonly idempotencyKey?: string;
+  readonly requestMessageId?: Uint8Array;
+  readonly messageIdHeaderValue: string;
+  readonly timestampHeaderValue: string;
+  readonly expiryHeaderValue: string;
+  readonly requestMessageIdHeaderValue?: string;
+}
+
+class HttpRequestContext {
+  constructor(method: string, uri: string, carrier: HttpContextCarrier);
+  setHeader(name: string, value: string): void;      // add headers used for Host or bound-header AAD
+  setBindAuthority(value: boolean): void;            // off by default
+  bindHeader(name: string): void;                    // opt-in selected-header binding
+  aadBytes(): Uint8Array;
+  validateFreshness(nowSecs: bigint, maxSkewSecs: bigint): void;
+  sealBody(plaintext: Uint8Array, recipientPublicKey: Uint8Array, keyId: Uint8Array): Uint8Array;
+  openBody(envelope: Uint8Array, recipientSecretKey: Uint8Array, nowSecs: bigint, maxSkewSecs: bigint): Uint8Array;
+}
+
+class HttpResponseContext {
+  constructor(status: number, carrier: HttpContextCarrier);
+  aadBytes(): Uint8Array;
+  validateFreshness(nowSecs: bigint, maxSkewSecs: bigint): void;
+  sealBody(plaintext: Uint8Array, recipientPublicKey: Uint8Array, keyId: Uint8Array): Uint8Array;
+  openBody(envelope: Uint8Array, recipientSecretKey: Uint8Array, nowSecs: bigint, maxSkewSecs: bigint): Uint8Array;
+}
+```
+
+These classes do not implement replay storage. A TypeScript Worker SDK should
+open/authenticate with this API first, then perform an atomic replay
+check-and-insert in a runtime store such as a Cloudflare Durable Object.
+
+### Framed session (handshake + messages)
+
+For a full secure channel — not just one-shot envelopes — drive a `FoctetSession`.
+WebAssembly performs the authenticated handshake and per-message seal/open; **your
+JS owns the transport** (a browser `WebSocket`, a `WebTransport` stream or
+datagram channel, etc.) and moves the `Uint8Array` blobs in order.
+
+```ts
+class IdentityKeyPair {
+  constructor();                                   // generate an Ed25519 identity
+  static fromSecretKey(secretKey: Uint8Array): IdentityKeyPair;
+  readonly publicKey: Uint8Array;                  // 32 bytes — share to let the peer pin you
+  readonly secretKey: Uint8Array;                  // 32 bytes — handle with care
+}
+
+class AuthConfig {
+  // Pin the peer's identity and prove your own (recommended).
+  static authenticated(localIdentity: IdentityKeyPair, peerPublicKey: Uint8Array): AuthConfig;
+  // No Foctet identity: bind to an authenticated outer channel (e.g. a TLS
+  // exporter). Both peers must pass the same value; a relay across a different
+  // channel fails closed.
+  static boundToChannel(channelBinding: Uint8Array): AuthConfig;
+  // Tests, or use only inside an already-authenticated outer channel (e.g. mTLS).
+  static unauthenticatedForTesting(): AuthConfig;
+  // Additionally bind any config to an outer-channel value (returns a new config).
+  withChannelBinding(channelBinding: Uint8Array): AuthConfig;
+}
+
+class DecodedMessage {
+  readonly streamId: number;
+  readonly flags: number;
+  readonly keyId: number;
+  readonly seq: bigint;
+  readonly plaintext: Uint8Array;
+}
+
+class FoctetSession {
+  // Message mode: reliable/ordered (raw WebSocket, WebTransport stream).
+  static newInitiator(auth: AuthConfig): FoctetSession;
+  static newResponder(auth: AuthConfig): FoctetSession;
+  // Datagram mode: MTU-bounded, loss-tolerant (WebTransport datagrams).
+  // maxDatagramSize = 0 uses the default (1200).
+  static newDatagramInitiator(auth: AuthConfig, maxDatagramSize: number): FoctetSession;
+  static newDatagramResponder(auth: AuthConfig, maxDatagramSize: number): FoctetSession;
+
+  initialHandshakeMessage(): Uint8Array | undefined;   // initiator: send this first
+  handleHandshakeMessage(message: Uint8Array): Uint8Array | undefined; // returns a reply to send, if any
+  handleControlMessage(message: Uint8Array): Uint8Array | undefined; // handshake or rekey control
+  isEstablished(): boolean;
+  peerAuthenticated(): boolean;
+  canRekey(): boolean;
+  forceRekey(): Uint8Array;
+  readonly activeKeyId: number | undefined;
+
+  // Message-mode sessions:
+  sealMessage(streamId: number, flags: number, plaintext: Uint8Array): Uint8Array;
+  openMessage(message: Uint8Array): DecodedMessage;
+  // Datagram-mode sessions:
+  sealDatagram(streamId: number, flags: number, plaintext: Uint8Array): Uint8Array;
+  openDatagram(datagram: Uint8Array): DecodedMessage;
+}
+```
+
+A session commits to one framing mode; the methods for the other mode throw. For
+WebTransport datagrams, run the (reliable) handshake messages over a stream, then
+send each `sealDatagram` result as a datagram. Rekey control messages must also
+travel over that reliable channel; call `forceRekey()` only when
+`canRekey() === true`, and feed the peer's rekey bytes to
+`handleControlMessage()`.
+
+Example over a browser `WebSocket` (binary frames), as the initiator:
+
+```ts
+const ws = new WebSocket(url);
+ws.binaryType = "arraybuffer";
+
+const auth = AuthConfig.authenticated(myIdentity, serverPublicKey);
+const session = FoctetSession.newInitiator(auth);
+
+ws.onopen = () => ws.send(session.initialHandshakeMessage()!);   // send ClientHello
+ws.onmessage = (ev) => {
+  const bytes = new Uint8Array(ev.data as ArrayBuffer);
+  if (!session.isEstablished()) {
+    const reply = session.handleHandshakeMessage(bytes);          // finish handshake
+    if (reply) ws.send(reply);
+    if (session.isEstablished()) {
+      ws.send(session.sealMessage(0, 0, new TextEncoder().encode("hello")));
+    }
+  } else {
+    const msg = session.openMessage(bytes);                       // application data
+    console.log(new TextDecoder().decode(msg.plaintext));
+  }
+};
+```
+
+The same pattern works over `WebTransport` streams. For WebTransport datagrams,
+construct the session with `newDatagramInitiator` / `newDatagramResponder`, run
+the handshake over a reliable stream, send each `sealDatagram` result as one
+datagram, and feed each received datagram to `openDatagram`. In-session rekey is
+available in both modes; rekey control messages still have to travel over the
+reliable channel.
+
+## Build
+
+Requires [`wasm-pack`](https://drager.github.io/wasm-pack/).
+
+```sh
+# Node.js / Cloudflare Workers
+npm run build:node      # -> pkg-node/
+
+# Browser (ES modules, no bundler)
+npm run build:web       # -> pkg-web/
+
+# Bundler (webpack/Vite/Rollup)
+npm run build:bundler   # -> pkg/
+```
+
+## Test
+
+```sh
+npm test                # builds for Node and runs the interop test
+```
+
+The interop test (`tests/node_interop.cjs`) verifies a JS seal→open roundtrip,
+context binding, and — crucially — that Node opens **Rust-produced** envelopes
+from `tests/interop_vector.json`, proving cross-language wire compatibility.
+Regenerate the fixture with:
+
+```sh
+cargo run -p foctet-wasm --example gen_interop_fixture > foctet-wasm/tests/interop_vector.json
+```
+
+### Headless browser tests
+
+`tests/browser.rs` runs `wasm-bindgen-test` tests in a real headless Chrome
+(body envelope, context binding, authenticated `FoctetSession` handshake +
+messages + replay rejection, datagram mode). CI runs them on every push/PR;
+locally:
+
+```sh
+wasm-pack test --headless --chrome foctet-wasm   # from the workspace root
+```
+
+If wasm-pack's auto-downloaded chromedriver is a major version ahead of your
+installed Chrome (symptom: `Error: http status: 404`), download the matching
+driver from [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+and set `CHROMEDRIVER=/path/to/chromedriver`.
+
+### Browser harness
+
+To exercise the SDK in a **real browser engine** (body envelope, context
+binding, Rust→JS interop, and a full `FoctetSession` handshake + message
+roundtrip), run the harness page:
+
+```sh
+./examples/browser/serve.sh        # Unix/macOS (serve.ps1 on Windows)
+# or: npm run browser
+# then open http://localhost:8011/examples/browser/index.html
+```
+
+This builds `pkg-web/` and serves it with a dependency-free Node static server
+(`examples/browser/serve.mjs`) — no Python or editor-specific config required.
+The page reports `passed`/`failed` on screen and as `window.__FOCTET_RESULT__`
+for a headless runner. See [`../tests.md`](../tests.md) for the full
+real-environment test plan.
+
+A second page, `examples/browser/websocket.html`, drives the SDK as the
+handshake initiator over a real browser `WebSocket` against the native
+`websock_message_server` example (raw-message shape). Start that server first;
+see `tests.md` (§3.3).
+
+A third page, `examples/browser/webtransport.html`, drives the SDK (datagram
+mode) over a real browser `WebTransport` against the native
+`webtrans_datagram_split` example — handshake over a stream, data over
+datagrams, with the dev cert pinned via `serverCertificateHashes`. See
+`tests.md` (§3.5).
+
+## Scope and security
+
+The **body envelope** functions provide body-only protection: they encrypt and
+authenticate the payload (and an optional associated `context`), not the outer
+HTTP metadata — carry that over an authenticated outer channel such as HTTPS. For
+HTTP replay protection, use `HttpRequestContext` / `HttpResponseContext` so the
+associated data is generated by the same canonical implementation as
+`foctet-http`, and pair request opening with an atomic host-side replay store.
+
+The **framed session** (`FoctetSession`) authenticates and protects the message
+stream end to end once the handshake completes; prefer `AuthConfig.authenticated`
+with a pinned peer identity so the handshake fails closed against an unexpected
+peer. The JS transport it runs over should still be carried by an authenticated
+outer channel (`wss://`, `https://`) unless you pin identities.
+
+`KeyPair` and `IdentityKeyPair` expose raw key bytes because WebCrypto has no
+portable non-extractable X25519/Ed25519 type; store secret keys in a platform
+keystore or Worker secret and never log them. Host-backed (non-extractable) key
+handling is not yet available across the WASM boundary.

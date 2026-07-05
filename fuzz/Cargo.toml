@@ -25,3 +25,38 @@ path = "fuzz_targets/archive_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "control_message"
+path = "fuzz_targets/control_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "body_envelope"
+path = "fuzz_targets/body_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stream_body"
+path = "fuzz_targets/stream_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datagram_message"
+path = "fuzz_targets/datagram_message.rs"
+test = false
+doc = false
+bench = false

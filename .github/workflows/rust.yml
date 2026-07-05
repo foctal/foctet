@@ -9,25 +9,137 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-jobs:
-  build-and-test:
-    runs-on: ubuntu-latest
+# Third-party actions are pinned to immutable commit SHAs (with the human-readable
+# tag in a trailing comment) so a re-tagged release cannot silently change CI.
 
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal --component rustfmt
+        rustup default stable
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
     - name: Setup stable toolchain
       run: |
         rustup toolchain install stable --profile minimal --component clippy
         rustup default stable
         rustup target add wasm32-unknown-unknown
-    - name: Lint
-      run: cargo clippy --workspace --all-features -- -D warnings
-    - name: Workspace tests
-      run: cargo test --workspace --verbose
-    - name: Wasm check
-      run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown
+    - name: Lint (all features)
+      run: cargo clippy --workspace --all-features --locked -- -D warnings
+    - name: Wasm check (workers)
+      run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown --locked
+    - name: Wasm check (foctet-wasm)
+      run: cargo check -p foctet-wasm --target wasm32-unknown-unknown --locked
+    - name: Wasm check (browser WebSocket transport)
+      run: cargo check -p foctet-transport --no-default-features --features transport-websock --target wasm32-unknown-unknown --locked
+    - name: Wasm check (browser WebTransport datagram adapter)
+      run: cargo check -p foctet-transport --no-default-features --features transport-webtrans-browser --target wasm32-unknown-unknown --locked
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+    - name: Workspace tests (all features, locked)
+      run: cargo test --workspace --all-features --locked --verbose
     - name: Feature combinations (foctet-core)
       run: |
-        cargo test -p foctet-core --no-default-features
-        cargo test -p foctet-core --no-default-features --features runtime-futures
-        cargo test -p foctet-core --no-default-features --features runtime-tokio
+        cargo test -p foctet-core --no-default-features --locked
+        cargo test -p foctet-core --no-default-features --features runtime-futures --locked
+        cargo test -p foctet-core --no-default-features --features runtime-tokio --locked
+
+  wasm-browser-test:
+    name: WASM browser tests (headless Chrome)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+        rustup target add wasm32-unknown-unknown
+    - name: Install wasm-pack
+      run: cargo install wasm-pack --locked
+    - name: Run in-browser tests (headless Chrome)
+      # Use the runner's preinstalled chromedriver, which matches the
+      # preinstalled Chrome; wasm-pack's auto-downloaded driver can mismatch.
+      run: |
+        export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
+        wasm-pack test --headless --chrome foctet-wasm
+
+  miri:
+    name: Miri (foctet-core protocol logic)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup nightly toolchain with Miri
+      run: |
+        rustup toolchain install nightly --profile minimal --component miri
+        rustup default nightly
+    - name: Run Miri on the parser / state-machine / crypto-framing modules
+      # The full suite (handshakes, Ed25519) is impractically slow under Miri;
+      # this filtered set covers the modules where memory-safety subtleties
+      # live (replay bitmap shifting, TLV/control/frame parsing, sequence
+      # allocation, AEAD framing) and finishes in a couple of minutes.
+      run: cargo miri test -p foctet-core --no-default-features --locked -- replay:: payload:: limits:: control:: sequence:: crypto:: frame::
+
+  interop-verify:
+    name: Independent vector verification (Node)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    # Verifies the canonical test vectors with an implementation that shares
+    # no code with the Rust workspace (@noble crypto + a from-spec decoder),
+    # catching systematic bugs the Rust-derived artifacts would reproduce.
+    - name: Verify vectors independently
+      working-directory: interop
+      run: |
+        npm ci
+        npm test
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup MSRV toolchain
+      run: |
+        rustup toolchain install 1.88.0 --profile minimal
+        rustup default 1.88.0
+    - name: Check workspace builds on MSRV
+      run: cargo check --workspace --all-features --locked
+
+  security-audit:
+    name: Advisory scan
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    # Vulnerability/advisory scan via the official RustSec action (prebuilt
+    # cargo-audit, no compile-from-source).
+    - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: License & source policy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - uses: EmbarkStudios/cargo-deny-action@d6d27f1b02f0c07f9db6ffc34e7871bba5ab5816 # v2.0.9
+      with:
+        command: check

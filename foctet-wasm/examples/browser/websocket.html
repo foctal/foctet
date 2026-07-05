@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>foctet-wasm — browser WebSocket interop</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        max-width: 70ch;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      h1 { font-size: 1.2rem; }
+      #summary { font-weight: bold; margin: 1rem 0; }
+      ul { list-style: none; padding: 0; }
+      li { padding: 0.2rem 0; }
+      .ok::before { content: "✅ "; }
+      .fail::before { content: "❌ "; }
+      .fail { color: #c0392b; }
+      label { display: block; margin: 1rem 0 0.3rem; }
+      input { font: inherit; width: 100%; box-sizing: border-box; padding: 0.3rem; }
+      button { font: inherit; margin-top: 0.6rem; padding: 0.3rem 0.8rem; }
+      pre { white-space: pre-wrap; opacity: 0.7; font-size: 0.85rem; }
+    </style>
+  </head>
+  <body>
+    <h1>foctet-wasm — browser WebSocket interop</h1>
+    <p>
+      Drives the WASM <code>FoctetSession</code> as the handshake
+      <strong>initiator</strong> over a real browser <code>WebSocket</code>
+      against the native <code>websock_message_server</code> responder (tests.md
+      §3.3). Each binary WebSocket message carries one Foctet frame: the
+      handshake control messages, then sealed application messages.
+    </p>
+    <p>
+      Start the native server first (from the repo root):
+      <br />
+      <code
+        >cargo run -p foctet-transport --example websock_message_server
+        --features "runtime-tokio transport-websock" -- --role server --addr
+        127.0.0.1:4460</code
+      >
+    </p>
+
+    <label for="url">Server WebSocket URL</label>
+    <input id="url" value="ws://127.0.0.1:4460/" />
+    <button id="run">Run test</button>
+
+    <div id="summary">Idle — press “Run test”.</div>
+    <ul id="results"></ul>
+
+    <script type="module">
+      import init, {
+        version,
+        IdentityKeyPair,
+        AuthConfig,
+        FoctetSession,
+      } from "../../pkg-web/foctet_wasm.js";
+
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const results = document.getElementById("results");
+      const summary = document.getElementById("summary");
+
+      // Demo identities shared with the native example (do not use in
+      // production). The browser is the initiator (CLIENT_SECRET) and pins the
+      // server's public key derived from SERVER_SECRET.
+      const CLIENT_SECRET = new Uint8Array(32).fill(0x41);
+      const SERVER_SECRET = new Uint8Array(32).fill(0x61);
+      // Messages the browser sends; the server echoes each with a prefix.
+      const MESSAGES = ["hello from the browser 0", "hello from the browser 1"];
+      const ECHO_PREFIX = "websock-message echo: ";
+
+      let passed = 0;
+      let failed = 0;
+
+      function record(name, ok, detail) {
+        const li = document.createElement("li");
+        li.className = ok ? "ok" : "fail";
+        li.textContent = name + (detail ? ` — ${detail}` : "");
+        results.appendChild(li);
+        if (ok) passed += 1;
+        else failed += 1;
+      }
+
+      function assert(cond, msg) {
+        if (!cond) throw new Error(msg || "assertion failed");
+      }
+
+      // Runs the full handshake + echo roundtrip over one WebSocket, resolving
+      // with the decoded echoes or rejecting on any protocol/transport error.
+      function runRoundtrip(url) {
+        const clientIdentity = IdentityKeyPair.fromSecretKey(CLIENT_SECRET);
+        const serverPublic = IdentityKeyPair.fromSecretKey(SERVER_SECRET).publicKey;
+        const session = FoctetSession.newInitiator(
+          AuthConfig.authenticated(clientIdentity, serverPublic),
+        );
+
+        const ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+
+        return new Promise((resolve, reject) => {
+          const echoes = [];
+          let sent = 0;
+          let settled = false;
+          const finish = (fn, arg) => {
+            if (settled) return;
+            settled = true;
+            fn(arg);
+          };
+
+          ws.onerror = () =>
+            finish(reject, new Error("WebSocket error — is the native server running?"));
+          ws.onclose = () => {
+            if (echoes.length < MESSAGES.length) {
+              finish(reject, new Error("connection closed before all echoes arrived"));
+            }
+          };
+          ws.onopen = () => {
+            try {
+              // First message on the wire: the initiator's client hello.
+              ws.send(session.initialHandshakeMessage());
+            } catch (err) {
+              finish(reject, err);
+            }
+          };
+          ws.onmessage = (event) => {
+            try {
+              const bytes = new Uint8Array(event.data);
+              if (!session.isEstablished()) {
+                const reply = session.handleHandshakeMessage(bytes);
+                if (reply) ws.send(reply);
+                if (session.isEstablished()) {
+                  assert(session.peerAuthenticated(), "server identity not authenticated");
+                  // Handshake done: send the first sealed application message.
+                  ws.send(session.sealMessage(0, 0, enc.encode(MESSAGES[sent])));
+                  sent += 1;
+                }
+                return;
+              }
+              const opened = session.openMessage(bytes);
+              echoes.push(dec.decode(opened.plaintext));
+              if (sent < MESSAGES.length) {
+                ws.send(session.sealMessage(0, 0, enc.encode(MESSAGES[sent])));
+                sent += 1;
+              } else {
+                ws.close();
+                finish(resolve, echoes);
+              }
+            } catch (err) {
+              finish(reject, err);
+            }
+          };
+        });
+      }
+
+      async function runTest() {
+        results.innerHTML = "";
+        passed = 0;
+        failed = 0;
+        summary.textContent = "Running…";
+        summary.className = "";
+        const url = document.getElementById("url").value.trim();
+
+        try {
+          const echoes = await runRoundtrip(url);
+          record("WebSocket connect + authenticated handshake", true);
+          MESSAGES.forEach((message, index) => {
+            const expected = ECHO_PREFIX + message;
+            record(
+              `message ${index}: echoed correctly`,
+              echoes[index] === expected,
+              echoes[index] === expected ? undefined : `got: ${echoes[index]}`,
+            );
+          });
+        } catch (err) {
+          record("WebSocket roundtrip", false, String(err && err.message ? err.message : err));
+        }
+
+        summary.textContent = `${passed} passed, ${failed} failed`;
+        summary.className = failed === 0 ? "ok" : "fail";
+        window.__FOCTET_RESULT__ = { passed, failed };
+      }
+
+      await init();
+      document.title += ` (v${version()})`;
+      document.getElementById("run").addEventListener("click", runTest);
+      // Auto-run once; the server must already be listening.
+      runTest();
+    </script>
+  </body>
+</html>

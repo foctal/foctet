@@ -6,12 +6,16 @@ use std::{
     thread,
 };
 
-use foctet::core::{Direction, derive_traffic_keys, io::SyncIo};
+use foctet::core::{Direction, KeyHandle, derive_traffic_keys, io::SyncIo};
 
-fn derive_demo_keys() -> Result<foctet::core::TrafficKeys, foctet::core::CoreError> {
+fn derive_demo_keys() -> Result<KeyHandle, foctet::core::CoreError> {
     let shared_secret = [0x11u8; 32];
     let session_salt = [0x22u8; 32];
-    derive_traffic_keys(&shared_secret, &session_salt, 1)
+    Ok(KeyHandle::new(derive_traffic_keys(
+        &shared_secret,
+        &session_salt,
+        1,
+    )?))
 }
 
 fn hex_prefix(bytes: &[u8], n: usize) -> String {
@@ -80,7 +84,7 @@ fn run_relay(
 
 fn run_server(
     server_listener: TcpListener,
-    keys: foctet::core::TrafficKeys,
+    keys: KeyHandle,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (stream, peer) = server_listener.accept()?;
     stream.set_nodelay(true)?;
@@ -96,10 +100,7 @@ fn run_server(
     Ok(())
 }
 
-fn run_client(
-    relay_addr: SocketAddr,
-    keys: foctet::core::TrafficKeys,
-) -> Result<(), Box<dyn Error>> {
+fn run_client(relay_addr: SocketAddr, keys: KeyHandle) -> Result<(), Box<dyn Error>> {
     let stream = TcpStream::connect(relay_addr)?;
     stream.set_nodelay(true)?;
 

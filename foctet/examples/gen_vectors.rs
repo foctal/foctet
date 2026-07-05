@@ -142,12 +142,12 @@ fn main() {
     hs_json.push_str(&json_line("server_public_hex", &hex(&server_pub), true));
     hs_json.push_str(&json_line(
         "client_identity_private_hex",
-        &hex(&client_identity.secret_key_bytes()),
+        &hex(&client_identity.expose_secret_key_bytes()[..]),
         true,
     ));
     hs_json.push_str(&json_line(
         "server_identity_private_hex",
-        &hex(&server_identity.secret_key_bytes()),
+        &hex(&server_identity.expose_secret_key_bytes()[..]),
         true,
     ));
     hs_json.push_str(&json_line(
@@ -235,6 +235,60 @@ fn main() {
     archive_json.push_str("  ]\n");
     archive_json.push_str("}\n");
     fs::write(out_dir.join("archive-v0.json"), archive_json).expect("write archive vector");
+
+    // DH-ratchet rekey vector: one deterministic ratchet step.
+    //
+    // Locks in `derive_ratchet_root` and `dh_ratchet_step` (their HKDF labels and
+    // wiring) so the in-session rekey key schedule cannot silently change.
+    let rk_session_salt = [0xA5u8; 32];
+    let rk_shared_secret = [0x7Bu8; 32];
+    // The rekeying side's fresh ephemeral and the peer's current ratchet public.
+    let rk_eph_private = [0x33u8; 32];
+    let rk_eph_secret = StaticSecret::from(rk_eph_private);
+    let rk_eph_public = PublicKey::from(&rk_eph_secret).to_bytes();
+    let peer_ratchet_private = [0x52u8; 32];
+    let peer_ratchet_public = PublicKey::from(&StaticSecret::from(peer_ratchet_private)).to_bytes();
+
+    let rk_root =
+        core::derive_ratchet_root(&rk_session_salt, &rk_shared_secret).expect("ratchet root");
+    let rk_dh = rk_eph_secret
+        .diffie_hellman(&PublicKey::from(peer_ratchet_public))
+        .to_bytes();
+    let new_key_id: u8 = 1;
+    let (rk_new_root, rk_keys) =
+        core::dh_ratchet_step(&rk_root, &rk_dh, new_key_id).expect("dh ratchet step");
+
+    let mut rk_json = String::new();
+    rk_json.push_str("{\n");
+    rk_json.push_str(&json_line("session_salt_hex", &hex(&rk_session_salt), true));
+    rk_json.push_str(&json_line(
+        "shared_secret_hex",
+        &hex(&rk_shared_secret),
+        true,
+    ));
+    rk_json.push_str(&json_line("ratchet_root_hex", &hex(&rk_root), true));
+    rk_json.push_str(&json_line(
+        "rekey_eph_private_hex",
+        &hex(&rk_eph_private),
+        true,
+    ));
+    rk_json.push_str(&json_line(
+        "rekey_eph_public_hex",
+        &hex(&rk_eph_public),
+        true,
+    ));
+    rk_json.push_str(&json_line(
+        "peer_ratchet_public_hex",
+        &hex(&peer_ratchet_public),
+        true,
+    ));
+    rk_json.push_str(&json_line("rekey_dh_hex", &hex(&rk_dh), true));
+    rk_json.push_str(&format!("  \"new_key_id\": {new_key_id},\n"));
+    rk_json.push_str(&json_line("new_ratchet_root_hex", &hex(&rk_new_root), true));
+    rk_json.push_str(&json_line("rekey_key_c2s_hex", &hex(&rk_keys.c2s), true));
+    rk_json.push_str(&json_line("rekey_key_s2c_hex", &hex(&rk_keys.s2c), false));
+    rk_json.push_str("}\n");
+    fs::write(out_dir.join("rekey-v0.json"), rk_json).expect("write rekey vector");
 
     println!("wrote vectors to {}", out_dir.display());
 }

@@ -19,8 +19,8 @@ pub const BODY_PROFILE_V0: u8 = 0x01;
 pub const X25519_PUBLIC_KEY_LEN: usize = 32;
 /// XChaCha20-Poly1305 nonce length in bytes.
 pub const XCHACHA_NONCE_LEN: usize = 24;
-const CONTENT_KEY_LEN: usize = 32;
-const TAG_LEN: usize = 16;
+pub(crate) const CONTENT_KEY_LEN: usize = 32;
+pub(crate) const TAG_LEN: usize = 16;
 const WRAP_INFO_LABEL: &[u8] = b"foctet body wrap v0";
 
 /// Parser and encoder hardening limits for body envelopes.
@@ -86,6 +86,14 @@ pub enum BodyEnvelopeError {
     /// HKDF expansion failed.
     #[error("hkdf expand failed")]
     Hkdf,
+    /// A stream chunk arrived after the final chunk, or sealing/opening
+    /// continued after the stream was finalized.
+    #[error("stream already finalized")]
+    StreamFinished,
+    /// A stream chunk arrived with an unexpected index (out of order, gap, or
+    /// duplicate).
+    #[error("stream chunk out of order")]
+    ChunkOutOfOrder,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +130,32 @@ pub fn seal_body_with_limits(
     plaintext: &[u8],
     recipient_public_key: [u8; 32],
     recipient_key_id: &[u8],
+    limits: &BodyEnvelopeLimits,
+) -> Result<Vec<u8>, BodyEnvelopeError> {
+    seal_body_with_context(
+        plaintext,
+        recipient_public_key,
+        recipient_key_id,
+        &[],
+        limits,
+    )
+}
+
+/// Seals plaintext bytes and additionally binds an application-supplied
+/// `context` into the payload AEAD as associated data.
+///
+/// The `context` bytes are **not** transmitted in the envelope; the opener must
+/// supply byte-identical context or decryption fails. This is the building
+/// block for binding an envelope to its surrounding protocol context — for
+/// HTTP, a canonical encoding of purpose/direction, method, authority, path,
+/// query, timestamp/expiry, and a unique message ID — so a captured envelope
+/// cannot be replayed onto a different request or operation. An empty `context`
+/// produces byte-identical output to [`seal_body_with_limits`].
+pub fn seal_body_with_context(
+    plaintext: &[u8],
+    recipient_public_key: [u8; 32],
+    recipient_key_id: &[u8],
+    context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
     if recipient_key_id.is_empty() {
@@ -173,6 +207,7 @@ pub fn seal_body_with_limits(
         return Err(BodyEnvelopeError::LimitExceeded("header_len"));
     }
 
+    let aad = aead_aad(&header, context);
     let cipher = XChaCha20Poly1305::new_from_slice(&content_key[..])
         .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
     let payload_ciphertext = cipher
@@ -180,7 +215,7 @@ pub fn seal_body_with_limits(
             XNonce::from_slice(&payload_nonce),
             Payload {
                 msg: plaintext,
-                aad: &header,
+                aad: &aad,
             },
         )
         .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
@@ -214,7 +249,19 @@ pub fn open_body_with_limits(
     recipient_secret_key: [u8; 32],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    open_body_with_context(envelope, recipient_secret_key, &[], limits)
+}
+
+/// Opens a body envelope, requiring the same `context` that was supplied to
+/// [`seal_body_with_context`]. Decryption fails if the context does not match.
+pub fn open_body_with_context(
+    envelope: &[u8],
+    recipient_secret_key: [u8; 32],
+    context: &[u8],
+    limits: &BodyEnvelopeLimits,
+) -> Result<Vec<u8>, BodyEnvelopeError> {
     let parsed = parse_envelope(envelope, limits)?;
+    let aad = aead_aad(parsed.header_bytes, context);
 
     for recipient in &parsed.recipients {
         let content_key = match unwrap_content_key(
@@ -236,7 +283,7 @@ pub fn open_body_with_limits(
                 XNonce::from_slice(&parsed.payload_nonce),
                 Payload {
                     msg: parsed.payload_ciphertext,
-                    aad: parsed.header_bytes,
+                    aad: &aad,
                 },
             )
             .map_err(|_| BodyEnvelopeError::DecryptFailed)?;
@@ -268,7 +315,26 @@ pub fn open_body_for_key_id_with_limits(
     recipient_key_id: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    open_body_for_key_id_with_context(
+        envelope,
+        recipient_secret_key,
+        recipient_key_id,
+        &[],
+        limits,
+    )
+}
+
+/// Opens an envelope for a specific recipient key identifier, requiring the same
+/// `context` supplied to [`seal_body_with_context`].
+pub fn open_body_for_key_id_with_context(
+    envelope: &[u8],
+    recipient_secret_key: [u8; 32],
+    recipient_key_id: &[u8],
+    context: &[u8],
+    limits: &BodyEnvelopeLimits,
+) -> Result<Vec<u8>, BodyEnvelopeError> {
     let parsed = parse_envelope(envelope, limits)?;
+    let aad = aead_aad(parsed.header_bytes, context);
 
     let entry = parsed
         .recipients
@@ -291,10 +357,24 @@ pub fn open_body_for_key_id_with_limits(
             XNonce::from_slice(&parsed.payload_nonce),
             Payload {
                 msg: parsed.payload_ciphertext,
-                aad: parsed.header_bytes,
+                aad: &aad,
             },
         )
         .map_err(|_| BodyEnvelopeError::DecryptFailed)
+}
+
+/// Builds the payload AEAD associated data from the envelope header and an
+/// optional application-supplied context. An empty context yields exactly the
+/// header bytes, preserving wire/vector compatibility with context-free
+/// envelopes.
+fn aead_aad(header: &[u8], context: &[u8]) -> Vec<u8> {
+    if context.is_empty() {
+        return header.to_vec();
+    }
+    let mut aad = Vec::with_capacity(header.len() + context.len());
+    aad.extend_from_slice(header);
+    aad.extend_from_slice(context);
+    aad
 }
 
 fn parse_envelope<'a>(
@@ -456,7 +536,7 @@ fn parse_envelope<'a>(
     })
 }
 
-fn wrap_content_key(
+pub(crate) fn wrap_content_key(
     content_key: &[u8; CONTENT_KEY_LEN],
     recipient_public_key: [u8; 32],
     eph_priv: StaticSecret,
@@ -481,7 +561,7 @@ fn wrap_content_key(
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)
 }
 
-fn unwrap_content_key(
+pub(crate) fn unwrap_content_key(
     wrapped_key: &[u8],
     key_id: &[u8],
     recipient_secret_key: [u8; 32],
@@ -661,6 +741,51 @@ mod tests {
         let envelope = seal_body(plain, recipient_pub, b"kid-1").expect("seal");
         let out = open_body(&envelope, recipient_priv.to_bytes()).expect("open");
 
+        assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn context_binding_roundtrip_and_mismatch() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let limits = BodyEnvelopeLimits::default();
+
+        let plain = b"POST /pay body";
+        let ctx_a = b"foctet-http-v0|req|POST|api.example|/pay|ts=1|id=abc";
+        let ctx_b = b"foctet-http-v0|req|POST|api.example|/refund|ts=1|id=abc";
+
+        let envelope =
+            seal_body_with_context(plain, recipient_pub, b"kid", ctx_a, &limits).expect("seal");
+
+        // Correct context opens.
+        let out = open_body_with_context(&envelope, recipient_priv.to_bytes(), ctx_a, &limits)
+            .expect("open with matching context");
+        assert_eq!(out, plain);
+
+        // A different context (e.g. replay onto another route) must fail.
+        let err = open_body_with_context(&envelope, recipient_priv.to_bytes(), ctx_b, &limits)
+            .expect_err("mismatched context must fail");
+        assert_eq!(err, BodyEnvelopeError::DecryptFailed);
+
+        // Opening without context (legacy path) must also fail for a
+        // context-bound envelope.
+        let err = open_body(&envelope, recipient_priv.to_bytes())
+            .expect_err("context-bound envelope must not open context-free");
+        assert_eq!(err, BodyEnvelopeError::DecryptFailed);
+    }
+
+    #[test]
+    fn empty_context_matches_legacy_bytes() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let limits = BodyEnvelopeLimits::default();
+        let plain = b"hello";
+
+        // An envelope sealed with empty context must open via the legacy
+        // context-free path (AAD is byte-identical).
+        let envelope =
+            seal_body_with_context(plain, recipient_pub, b"kid", &[], &limits).expect("seal");
+        let out = open_body(&envelope, recipient_priv.to_bytes()).expect("legacy open");
         assert_eq!(out, plain);
     }
 

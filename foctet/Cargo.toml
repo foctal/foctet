@@ -2,6 +2,7 @@
 name = "foctet"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -21,7 +22,7 @@ transport-quinn = ["transport", "foctet-transport/transport-quinn"]
 [dependencies]
 foctet-core = { workspace = true }
 foctet-archive = { workspace = true }
-foctet-transport = { path = "../foctet-transport", version = "0.2.0", optional = true, default-features = false }
+foctet-transport = { path = "../foctet-transport", version = "0.3.0", optional = true, default-features = false }
 ed25519-dalek.workspace = true
 sha2.workspace = true
 x25519-dalek.workspace = true

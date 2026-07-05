@@ -1,47 +1,64 @@
 //! High-level HTTP integration for `application/foctet` body envelopes.
 //!
-//! `foctet-http` adapts HTTP requests and responses onto the body-complete
-//! envelope format.
+//! `foctet-http` encrypts HTTP body bytes. For production requests, prefer the
+//! context-bound APIs:
+//! [`HttpSealer::seal_request_with_context`] and
+//! [`HttpOpener::open_request_with_context`]. They bind selected request
+//! metadata into the AEAD and enforce single-use replay protection through a
+//! [`ReplayStore`].
 //!
-//! Foctet HTTP integration encrypts and authenticates the body bytes only. The
-//! outer HTTP method, URI, status code, and headers remain visible to the
-//! surrounding transport and should be protected by an authenticated outer
-//! channel such as HTTPS, authenticated WebTransport, or an authenticated
-//! Foctet transport session.
+//! The outer HTTP method, URI, status code, and headers remain visible to the
+//! surrounding transport, so deployments should still use an authenticated
+//! outer channel such as HTTPS.
 //!
-//! # Layers
+//! Main layers:
 //!
-//! - Recommended high-level API:
-//!   [`HttpSealer`] and [`HttpOpener`]
-//! - Framework adapters:
-//!   `axum` and `workers`
-//! - Lower-level helpers:
-//!   [`raw`]
-//!
-//! Sealed requests and responses also carry an advisory
-//! `x-foctet-scope: body-only` header so downstream systems can distinguish
-//! Foctet body envelopes from full-message protection.
+//! - [`HttpSealer`] and [`HttpOpener`] for the primary API
+//! - [`context`] and [`ReplayStore`] for protected-context request binding
+//! - `axum` and `workers` for framework adapters
+//! - [`raw`] for lower-level helpers
 //!
 
 /// Re-export of the `http` crate used by this adapter.
 pub use http;
 
 mod config;
+pub mod context;
 mod error;
 pub mod raw;
+mod replay_store;
+pub mod stream;
 
 #[cfg(feature = "axum")]
 pub mod axum;
 #[cfg(all(feature = "workers", target_arch = "wasm32"))]
 pub mod workers;
 
+use foctet_core::{open_body_with_context, seal_body_with_context};
 use http::{
     Request, Response,
     header::{self},
 };
 
 pub use config::{HttpConfig, HttpOpenOptions, HttpSealOptions};
+#[cfg(not(target_arch = "wasm32"))]
+pub use context::unix_now_secs;
+pub use context::{
+    ContextBinding, ContextCarrier, ContextDirection, DEFAULT_CONTEXT_TTL_SECS,
+    DEFAULT_MAX_CLOCK_SKEW_SECS, MESSAGE_ID_LEN, ProtectedContext,
+};
 pub use error::HttpError;
+// Re-exported because it appears in public signatures (`HttpSealOptions`,
+// `open_request_stream`, `HttpStreamSealer::for_request`, …), so callers do not
+// need a direct `foctet-core` dependency to name it.
+pub use foctet_core::BodyEnvelopeLimits;
+#[cfg(feature = "redis")]
+pub use replay_store::RedisReplayStore;
+pub use replay_store::{
+    AsyncReplayStore, DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore,
+    ReplayStoreError,
+};
+pub use stream::{HttpRequestStreamReader, HttpStreamOpener, HttpStreamSealer};
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";
@@ -105,11 +122,83 @@ impl HttpSealer {
         }
     }
 
+    /// Seals the body and binds the supplied associated data into its AEAD.
+    fn seal_body_with_aad(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, HttpError> {
+        let default_limits;
+        let limits = match self.options.limits() {
+            Some(limits) => limits,
+            None => {
+                default_limits = BodyEnvelopeLimits::default();
+                &default_limits
+            }
+        };
+        seal_body_with_context(
+            plaintext,
+            self.options.recipient_public_key(),
+            self.options.recipient_key_id(),
+            aad,
+            limits,
+        )
+        .map_err(HttpError::SealFailed)
+    }
+
+    /// Seals a request and binds the full HTTP protected context (method, path,
+    /// query, message ID, timestamp, expiry, …) into the envelope.
+    ///
+    /// This is the recommended path for production HTTP: it makes a captured
+    /// envelope non-replayable onto a different route and, paired with
+    /// [`HttpOpener::open_request_with_context`] and a [`ReplayStore`], enforces
+    /// single use. The carrier values travel in `x-foctet-*` headers.
+    pub fn seal_request_with_context(
+        &self,
+        request: Request<Vec<u8>>,
+        carrier: ContextCarrier,
+        binding: ContextBinding,
+    ) -> Result<Request<Vec<u8>>, HttpError> {
+        let (mut parts, body) = request.into_parts();
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        let aad = context.to_aad_bytes();
+        let sealed = self.seal_body_with_aad(&body, &aad)?;
+        raw::set_foctet_content_type(&mut parts.headers);
+        if self.config.set_scope_header_on_seal() {
+            raw::set_foctet_scope_header(&mut parts.headers);
+        }
+        carrier.apply_to_headers(&mut parts.headers)?;
+        Ok(Request::from_parts(parts, sealed))
+    }
+
+    /// Seals a response and binds the HTTP protected context (status, message
+    /// ID, timestamp, expiry, and the answered request message ID).
+    pub fn seal_response_with_context(
+        &self,
+        response: Response<Vec<u8>>,
+        carrier: ContextCarrier,
+    ) -> Result<Response<Vec<u8>>, HttpError> {
+        let (mut parts, body) = response.into_parts();
+        let context = ProtectedContext::for_response(&parts, carrier.clone());
+        let aad = context.to_aad_bytes();
+        let sealed = self.seal_body_with_aad(&body, &aad)?;
+        raw::set_foctet_content_type(&mut parts.headers);
+        if self.config.set_scope_header_on_seal() {
+            raw::set_foctet_scope_header(&mut parts.headers);
+        }
+        carrier.apply_to_headers(&mut parts.headers)?;
+        Ok(Response::from_parts(parts, sealed))
+    }
+
     /// Seals a plaintext request and sets `Content-Type: application/foctet`.
     ///
-    /// By default this also adds the advisory `x-foctet-scope: body-only`
-    /// header so downstream consumers do not mistake body protection for
-    /// full HTTP message protection.
+    /// This protects the body only and provides **no** replay protection or
+    /// HTTP-context binding; prefer [`HttpSealer::seal_request_with_context`]
+    /// for production. By default this also adds the advisory
+    /// `x-foctet-scope: body-only` header so downstream consumers do not mistake
+    /// body protection for full HTTP message protection.
+    #[deprecated(
+        since = "0.3.0",
+        note = "stateless full-request protection has no replay defense or HTTP-context \
+                binding and is replayable by design; use seal_request_with_context with a \
+                ReplayStore for production (see module docs)"
+    )]
     pub fn seal_request(&self, request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
         let sealed = self.seal_body(&body)?;
@@ -163,19 +252,200 @@ impl HttpOpener {
         &self.config
     }
 
+    /// Tries each recipient key in the keyring, returning the plaintext from the
+    /// first key that authenticates.
+    ///
+    /// Because every keyring entry is one of the recipient's own secret keys and
+    /// each attempt is on context-bound, authenticated ciphertext, a
+    /// non-matching key simply fails to open (no decryption oracle). If no key
+    /// succeeds, the first attempt's error is returned. The keyring is
+    /// guaranteed non-empty by [`HttpOpenOptions`].
+    fn open_with_keyring<F>(&self, mut attempt: F) -> Result<Vec<u8>, HttpError>
+    where
+        F: FnMut([u8; 32]) -> Result<Vec<u8>, HttpError>,
+    {
+        let mut first_err = None;
+        for key in self.options.expose_recipient_secret_keys() {
+            match attempt(*key) {
+                Ok(plain) => return Ok(plain),
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+        Err(first_err.expect("HttpOpenOptions guarantees a non-empty keyring"))
+    }
+
     /// Opens an `application/foctet` body into plaintext bytes.
     pub fn open_body(&self, envelope: &[u8]) -> Result<Vec<u8>, HttpError> {
-        match self.options.limits() {
-            Some(limits) => raw::open_http_body_with_limits(
-                envelope,
-                self.options.recipient_secret_key(),
-                limits,
-            ),
-            None => raw::open_http_body(envelope, self.options.recipient_secret_key()),
+        self.open_with_keyring(|key| match self.options.limits() {
+            Some(limits) => raw::open_http_body_with_limits(envelope, key, limits),
+            None => raw::open_http_body(envelope, key),
+        })
+    }
+
+    /// Opens the body using the supplied associated data.
+    fn open_body_with_aad(&self, envelope: &[u8], aad: &[u8]) -> Result<Vec<u8>, HttpError> {
+        let default_limits;
+        let limits = match self.options.limits() {
+            Some(limits) => limits,
+            None => {
+                default_limits = BodyEnvelopeLimits::default();
+                &default_limits
+            }
+        };
+        self.open_with_keyring(|key| {
+            open_body_with_context(envelope, key, aad, limits).map_err(HttpError::OpenFailed)
+        })
+    }
+
+    /// Opens a request sealed with [`HttpSealer::seal_request_with_context`],
+    /// validating the bound HTTP context, freshness, and single use.
+    ///
+    /// The order is deliberate and matters for security:
+    /// 1. parse the carrier headers and reconstruct the bound context,
+    /// 2. validate timestamp/expiry against `now_secs` (± `max_skew_secs`),
+    /// 3. **authenticate** the body via the context-bound AEAD,
+    /// 4. only then consult the [`ReplayStore`] for single-use enforcement.
+    ///
+    /// Recording replay state only after authentication prevents an
+    /// unauthenticated request from populating the store.
+    pub fn open_request_with_context<S>(
+        &self,
+        request: Request<Vec<u8>>,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<Request<Vec<u8>>, HttpError>
+    where
+        S: ReplayStore + ?Sized,
+    {
+        let (parts, plain, carrier) =
+            self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
+
+        match ReplayStore::check_and_insert(
+            store,
+            &carrier.message_id,
+            carrier.expiry_secs,
+            now_secs,
+        )
+        .map_err(HttpError::ReplayStore)?
+        {
+            ReplayCheck::Accepted => {}
+            ReplayCheck::Replay => return Err(HttpError::Replayed),
         }
+
+        Ok(self.open_request_finalize(parts, plain))
+    }
+
+    /// Opens a context-bound request using a durable [`AsyncReplayStore`].
+    ///
+    /// Identical to [`HttpOpener::open_request_with_context`] but awaits the
+    /// store, so it works with networked/durable backends (Redis, Cloudflare KV,
+    /// a Durable Object, or a shared SQL table) needed once more than one
+    /// instance serves traffic. Authentication still happens before the store is
+    /// consulted.
+    pub async fn open_request_with_async_store<S>(
+        &self,
+        request: Request<Vec<u8>>,
+        store: &S,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<Request<Vec<u8>>, HttpError>
+    where
+        S: AsyncReplayStore + ?Sized,
+    {
+        let (parts, plain, carrier) =
+            self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
+
+        match AsyncReplayStore::check_and_insert(
+            store,
+            &carrier.message_id,
+            carrier.expiry_secs,
+            now_secs,
+        )
+        .await
+        .map_err(HttpError::ReplayStore)?
+        {
+            ReplayCheck::Accepted => {}
+            ReplayCheck::Replay => return Err(HttpError::Replayed),
+        }
+
+        Ok(self.open_request_finalize(parts, plain))
+    }
+
+    /// Shared request-open logic up to (but excluding) the replay-store check:
+    /// validates content type, parses the carrier, reconstructs and freshness-
+    /// checks the context, and authenticates the body.
+    fn open_request_prepare(
+        &self,
+        request: Request<Vec<u8>>,
+        now_secs: u64,
+        max_skew_secs: u64,
+        binding: ContextBinding,
+    ) -> Result<(http::request::Parts, Vec<u8>, ContextCarrier), HttpError> {
+        let (parts, body) = request.into_parts();
+        raw::ensure_foctet_content_type(&parts.headers)?;
+        let carrier = ContextCarrier::from_headers(&parts.headers)?;
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        context.validate_freshness(now_secs, max_skew_secs)?;
+        let aad = context.to_aad_bytes();
+        let plain = self.open_body_with_aad(&body, &aad)?;
+        Ok((parts, plain, carrier))
+    }
+
+    fn open_request_finalize(
+        &self,
+        mut parts: http::request::Parts,
+        plain: Vec<u8>,
+    ) -> Request<Vec<u8>> {
+        if self.config.strip_content_type_on_open() {
+            parts.headers.remove(header::CONTENT_TYPE);
+        }
+        Request::from_parts(parts, plain)
+    }
+
+    /// Opens a response sealed with [`HttpSealer::seal_response_with_context`],
+    /// validating the bound context and freshness.
+    ///
+    /// A client typically expects a single response, so no replay store is
+    /// required here; callers may additionally check that the carrier's
+    /// `request_message_id` matches the request they sent.
+    pub fn open_response_with_context(
+        &self,
+        response: Response<Vec<u8>>,
+        now_secs: u64,
+        max_skew_secs: u64,
+    ) -> Result<Response<Vec<u8>>, HttpError> {
+        let (mut parts, body) = response.into_parts();
+        raw::ensure_foctet_content_type(&parts.headers)?;
+        let carrier = ContextCarrier::from_headers(&parts.headers)?;
+        let context = ProtectedContext::for_response(&parts, carrier);
+        context.validate_freshness(now_secs, max_skew_secs)?;
+
+        let aad = context.to_aad_bytes();
+        let plain = self.open_body_with_aad(&body, &aad)?;
+
+        if self.config.strip_content_type_on_open() {
+            parts.headers.remove(header::CONTENT_TYPE);
+        }
+        Ok(Response::from_parts(parts, plain))
     }
 
     /// Opens an encrypted request body into plaintext bytes.
+    ///
+    /// This provides **no** replay protection or HTTP-context binding; prefer
+    /// [`HttpOpener::open_request_with_context`] for production.
+    #[deprecated(
+        since = "0.3.0",
+        note = "stateless full-request protection has no replay defense or HTTP-context \
+                binding and is replayable by design; use open_request_with_context with a \
+                ReplayStore for production (see module docs)"
+    )]
     pub fn open_request(&self, request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
@@ -211,6 +481,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn sealer_and_opener_roundtrip_request_and_response() {
         let recipient_priv = StaticSecret::random_from_rng(OsRng);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
@@ -299,6 +570,214 @@ mod tests {
     }
 
     #[test]
+    fn context_bound_request_roundtrip_and_replay_rejected() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay?amount=10")
+            .body(b"charge".to_vec())
+            .expect("request");
+
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        // First delivery authenticates and is accepted.
+        let opened = opener
+            .open_request_with_context(clone_request(&sealed), &store, now, 30, binding)
+            .expect("first open");
+        assert_eq!(opened.method(), "POST");
+        assert_eq!(opened.body(), b"charge");
+
+        // Replaying the identical captured request is rejected.
+        let err = opener
+            .open_request_with_context(clone_request(&sealed), &store, now, 30, binding)
+            .expect_err("replay must be rejected");
+        assert!(matches!(err, HttpError::Replayed));
+    }
+
+    #[test]
+    fn context_bound_request_with_bound_header_rejects_header_tamper() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default().with_bound_headers(&["x-tenant-id"]);
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .header("x-tenant-id", "tenant-a")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        // Genuine request opens fine.
+        let opened = opener
+            .open_request_with_context(clone_request(&sealed), &store, now, 30, binding)
+            .expect("open with matching bound header");
+        assert_eq!(opened.headers()["x-tenant-id"], "tenant-a");
+
+        // An on-path party swapping the tenant header (but leaving the
+        // ciphertext, route, and carrier headers untouched) must fail
+        // authentication rather than silently reattributing the request.
+        let (mut parts, body) = sealed.into_parts();
+        parts
+            .headers
+            .insert("x-tenant-id", "tenant-b".parse().expect("header value"));
+        let tampered = Request::from_parts(parts, body);
+
+        let err = opener
+            .open_request_with_context(tampered, &store, now, 30, binding)
+            .expect_err("tampered bound header must fail authentication");
+        assert!(matches!(err, HttpError::OpenFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn context_bound_request_async_store_roundtrip_and_replay() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        // InMemoryReplayStore is usable through the async path via the blanket impl.
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        let opened = opener
+            .open_request_with_async_store(clone_request(&sealed), &store, now, 30, binding)
+            .await
+            .expect("first open");
+        assert_eq!(opened.body(), b"charge");
+
+        let err = opener
+            .open_request_with_async_store(clone_request(&sealed), &store, now, 30, binding)
+            .await
+            .expect_err("replay must be rejected");
+        assert!(matches!(err, HttpError::Replayed));
+    }
+
+    #[test]
+    fn context_bound_request_rejects_route_substitution() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        // Attacker moves the captured ciphertext + headers onto a different path.
+        let (mut parts, body) = sealed.into_parts();
+        parts.uri = "https://api.example.com/refund".parse().expect("uri");
+        let moved = Request::from_parts(parts, body);
+
+        let err = opener
+            .open_request_with_context(moved, &store, now, 30, binding)
+            .expect_err("route substitution must fail authentication");
+        assert!(matches!(err, HttpError::OpenFailed(_)));
+    }
+
+    #[test]
+    fn context_bound_request_rejects_expired() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("https://api.example.com/data")
+            .body(Vec::new())
+            .expect("request");
+        let carrier = ContextCarrier::generate(1_000, 60);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        let err = opener
+            .open_request_with_context(sealed, &store, 5_000, 30, binding)
+            .expect_err("expired context must be rejected");
+        assert!(matches!(err, HttpError::ContextExpired));
+    }
+
+    #[test]
+    fn context_bound_response_roundtrip() {
+        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let now = 2_000u64;
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(b"result".to_vec())
+            .expect("response");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS).answering([3u8; 16]);
+        let sealed = sealer
+            .seal_response_with_context(response, carrier)
+            .expect("seal");
+
+        let opened = opener
+            .open_response_with_context(sealed, now, 30)
+            .expect("open");
+        assert_eq!(opened.status(), StatusCode::OK);
+        assert_eq!(opened.body(), b"result");
+    }
+
+    fn clone_request(request: &Request<Vec<u8>>) -> Request<Vec<u8>> {
+        let mut builder = Request::builder()
+            .method(request.method().clone())
+            .uri(request.uri().clone())
+            .version(request.version());
+        for (name, value) in request.headers() {
+            builder = builder.header(name, value);
+        }
+        builder.body(request.body().clone()).expect("clone request")
+    }
+
+    #[test]
     fn options_support_explicit_limits() {
         let limits = BodyEnvelopeLimits {
             max_payload_len: 1024,
@@ -306,5 +785,115 @@ mod tests {
         };
         let options = HttpSealOptions::new([1u8; 32], b"kid").with_limits(limits.clone());
         assert_eq!(options.limits(), Some(&limits));
+    }
+
+    #[test]
+    fn key_rotation_overlap_accepts_current_and_previous_key() {
+        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_pub = PublicKey::from(&old_priv).to_bytes();
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_pub = PublicKey::from(&new_priv).to_bytes();
+
+        // During the overlap window the recipient accepts both the current
+        // (v2) key and the retiring (v1) key.
+        let opener = HttpOpener::new(
+            HttpOpenOptions::new(new_priv.to_bytes()).with_recipient_key(old_priv.to_bytes()),
+        );
+        assert_eq!(opener.options().recipient_key_count(), 2);
+
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        for (recipient_pub, kid, body) in [
+            (old_pub, &b"server-v1"[..], &b"pre-rotation"[..]),
+            (new_pub, &b"server-v2"[..], &b"post-rotation"[..]),
+        ] {
+            let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, kid));
+            let store = InMemoryReplayStore::new();
+            let request = Request::builder()
+                .method("POST")
+                .uri("https://api.example.com/pay")
+                .body(body.to_vec())
+                .expect("request");
+            let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+            let sealed = sealer
+                .seal_request_with_context(request, carrier, binding)
+                .expect("seal");
+            let opened = opener
+                .open_request_with_context(sealed, &store, now, 30, binding)
+                .expect("keyring opens an envelope sealed to either key");
+            assert_eq!(opened.body(), body);
+        }
+    }
+
+    #[test]
+    fn key_rotation_rejects_key_after_it_is_retired() {
+        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_pub = PublicKey::from(&old_priv).to_bytes();
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+
+        // Overlap window is over: the recipient holds only the current key.
+        let opener = HttpOpener::new(HttpOpenOptions::new(new_priv.to_bytes()));
+        let sealer_old = HttpSealer::new(HttpSealOptions::new(old_pub, b"server-v1"));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer_old
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        let err = opener
+            .open_request_with_context(sealed, &store, now, 30, binding)
+            .expect_err("a request sealed to a retired key must be rejected");
+        assert!(matches!(err, HttpError::OpenFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn key_rotation_trial_decryption_does_not_consume_replay_slot() {
+        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_pub = PublicKey::from(&new_priv).to_bytes();
+
+        // The non-matching old key is tried FIRST and fails authentication
+        // before the matching new key succeeds.
+        let opener = HttpOpener::new(
+            HttpOpenOptions::new(old_priv.to_bytes()).with_recipient_key(new_priv.to_bytes()),
+        );
+        let sealer = HttpSealer::new(HttpSealOptions::new(new_pub, b"server-v2"));
+        let store = InMemoryReplayStore::new();
+        let binding = ContextBinding::default();
+        let now = 1_000_000u64;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("https://api.example.com/pay")
+            .body(b"charge".to_vec())
+            .expect("request");
+        let carrier = ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS);
+        let sealed = sealer
+            .seal_request_with_context(request, carrier, binding)
+            .expect("seal");
+
+        // First delivery: the failing old-key attempt must not populate the
+        // replay store, so authentication (before the store) still succeeds.
+        let opened = opener
+            .open_request_with_async_store(clone_request(&sealed), &store, now, 30, binding)
+            .await
+            .expect("the second key in the ring opens the envelope");
+        assert_eq!(opened.body(), b"charge");
+
+        // The genuine replay is still detected exactly once.
+        let err = opener
+            .open_request_with_async_store(sealed, &store, now, 30, binding)
+            .await
+            .expect_err("replay must be rejected");
+        assert!(matches!(err, HttpError::Replayed));
     }
 }

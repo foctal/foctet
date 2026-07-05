@@ -5,6 +5,11 @@ use crate::CoreError;
 /// Recommended replay-window size for Draft v0.
 pub const DEFAULT_REPLAY_WINDOW: u64 = 4096;
 
+/// Default cap on the number of distinct `(key_id, stream_id)` replay windows a
+/// single receiver will track before rejecting new ones. Bounds attacker- or
+/// peer-driven memory growth in the replay map.
+pub const DEFAULT_MAX_REPLAY_WINDOWS: usize = 1024;
+
 /// Sliding replay window for sequence-number validation.
 #[derive(Clone, Debug)]
 pub struct ReplayWindow {
@@ -109,29 +114,74 @@ impl ReplayWindow {
 pub struct ReplayProtector {
     windows: HashMap<(u8, u32), ReplayWindow>,
     window_size: u64,
+    max_windows: usize,
+    rejections: u64,
 }
 
 impl ReplayProtector {
-    /// Creates replay protection map with a default per-stream window size.
+    /// Creates replay protection map with a default per-stream window size and
+    /// the default cap on the number of tracked windows.
     pub fn new(window_size: u64) -> Self {
         Self {
             windows: HashMap::new(),
             window_size,
+            max_windows: DEFAULT_MAX_REPLAY_WINDOWS,
+            rejections: 0,
         }
     }
 
+    /// Overrides the maximum number of distinct `(key_id, stream_id)` windows
+    /// tracked simultaneously. A value of `0` is treated as `1`.
+    pub fn with_max_windows(mut self, max_windows: usize) -> Self {
+        self.max_windows = max_windows.max(1);
+        self
+    }
+
+    /// Returns the number of distinct windows currently tracked.
+    pub fn tracked_windows(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// Returns how many frames this protector has rejected (duplicates,
+    /// frames outside the window, and window-capacity rejections) since
+    /// creation.
+    ///
+    /// This is an observability counter, not a security signal by itself:
+    /// lossy/reordering transports legitimately produce occasional
+    /// rejections, but a sustained rise indicates replay or flooding
+    /// activity. It carries no key material.
+    pub fn rejections(&self) -> u64 {
+        self.rejections
+    }
+
     /// Validates and records sequence number for `(key_id, stream_id)`.
+    ///
+    /// Returns [`CoreError::ReplayCapacityExceeded`] when a previously unseen
+    /// `(key_id, stream_id)` pair would exceed the configured window cap, so a
+    /// peer cannot force unbounded replay-map growth.
     pub fn check_and_record(
         &mut self,
         key_id: u8,
         stream_id: u32,
         seq: u64,
     ) -> Result<(), CoreError> {
-        let w = self
-            .windows
-            .entry((key_id, stream_id))
-            .or_insert_with(|| ReplayWindow::new(self.window_size));
-        w.check_and_record(seq)
+        let result = match self.windows.get_mut(&(key_id, stream_id)) {
+            Some(w) => w.check_and_record(seq),
+            None => {
+                if self.windows.len() >= self.max_windows {
+                    Err(CoreError::ReplayCapacityExceeded)
+                } else {
+                    let mut w = ReplayWindow::new(self.window_size);
+                    let result = w.check_and_record(seq);
+                    self.windows.insert((key_id, stream_id), w);
+                    result
+                }
+            }
+        };
+        if result.is_err() {
+            self.rejections = self.rejections.saturating_add(1);
+        }
+        result
     }
 }
 
@@ -213,6 +263,25 @@ mod tests {
             .check_and_record(22)
             .expect_err("outside window must be rejected");
         assert!(matches!(too_old, CoreError::ReplayWindowExceeded));
+    }
+
+    #[test]
+    fn replay_protector_caps_distinct_windows() {
+        let mut protector = ReplayProtector::new(64).with_max_windows(2);
+        // Two distinct (key_id, stream_id) windows are accepted.
+        protector.check_and_record(0, 0, 1).expect("first window");
+        protector.check_and_record(0, 1, 1).expect("second window");
+        assert_eq!(protector.tracked_windows(), 2);
+        // A third distinct window exceeds the cap and is rejected.
+        let err = protector
+            .check_and_record(0, 2, 1)
+            .expect_err("third distinct window must be rejected");
+        assert!(matches!(err, CoreError::ReplayCapacityExceeded));
+        // Existing windows keep working and do not count against the cap again.
+        protector
+            .check_and_record(0, 0, 2)
+            .expect("existing window still accepts new sequences");
+        assert_eq!(protector.tracked_windows(), 2);
     }
 
     #[test]

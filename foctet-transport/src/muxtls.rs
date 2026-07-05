@@ -48,7 +48,7 @@ pub async fn open_secure_channel_with_handshake(
     open_secure_channel_with_handshake_and_auth_config(
         connection,
         thresholds,
-        SessionAuthConfig::default(),
+        SessionAuthConfig::unauthenticated_for_testing(),
         TransportConfig::default(),
     )
     .await
@@ -66,7 +66,7 @@ pub async fn open_secure_channel_with_handshake_and_config(
     open_secure_channel_with_handshake_and_auth_config(
         connection,
         thresholds,
-        SessionAuthConfig::default(),
+        SessionAuthConfig::unauthenticated_for_testing(),
         config,
     )
     .await
@@ -134,7 +134,7 @@ pub async fn accept_secure_channel_with_handshake(
     accept_secure_channel_with_handshake_and_auth_config(
         connection,
         thresholds,
-        SessionAuthConfig::default(),
+        SessionAuthConfig::unauthenticated_for_testing(),
         TransportConfig::default(),
     )
     .await
@@ -152,7 +152,7 @@ pub async fn accept_secure_channel_with_handshake_and_config(
     accept_secure_channel_with_handshake_and_auth_config(
         connection,
         thresholds,
-        SessionAuthConfig::default(),
+        SessionAuthConfig::unauthenticated_for_testing(),
         config,
     )
     .await

@@ -1,6 +1,6 @@
 use std::{env, error::Error};
 
-use foctet::core::{Direction, FoctetStream, derive_traffic_keys};
+use foctet::core::{Direction, FoctetStream, KeyHandle, derive_traffic_keys};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -9,10 +9,14 @@ use tokio::{
     },
 };
 
-fn derive_demo_keys() -> Result<foctet::core::TrafficKeys, foctet::core::CoreError> {
+fn derive_demo_keys() -> Result<KeyHandle, foctet::core::CoreError> {
     let shared_secret = [0x11u8; 32];
     let session_salt = [0x22u8; 32];
-    derive_traffic_keys(&shared_secret, &session_salt, 1)
+    Ok(KeyHandle::new(derive_traffic_keys(
+        &shared_secret,
+        &session_salt,
+        1,
+    )?))
 }
 
 fn hex_prefix(bytes: &[u8], n: usize) -> String {
@@ -86,7 +90,7 @@ async fn run_relay(
 
 async fn run_server(
     server_listener: TcpListener,
-    keys: foctet::core::TrafficKeys,
+    keys: KeyHandle,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (stream, peer) = server_listener.accept().await?;
     stream.set_nodelay(true)?;
@@ -112,7 +116,7 @@ async fn run_server(
 
 async fn run_client(
     relay_addr: std::net::SocketAddr,
-    keys: foctet::core::TrafficKeys,
+    keys: KeyHandle,
 ) -> Result<(), Box<dyn Error>> {
     let stream = TcpStream::connect(relay_addr).await?;
     stream.set_nodelay(true)?;

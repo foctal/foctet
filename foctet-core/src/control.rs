@@ -6,6 +6,15 @@ use crate::{
 const CONTROL_PREFIX: [u8; 4] = *b"FCTL";
 const CONTROL_VERSION: u8 = 0;
 
+/// Upper bound on any encoded Draft v0 control message, in bytes.
+///
+/// Every control message is fixed-size per kind; the largest is a
+/// `ClientHello` carrying Ed25519 identity authentication
+/// (6-byte prefix/version/kind + 96-byte hello body + 97-byte auth trailer).
+/// [`ControlMessage::decode`] rejects anything longer before inspecting it,
+/// so control-plane input is hard-bounded regardless of transport limits.
+pub const MAX_CONTROL_MESSAGE_LEN: usize = 6 + 96 + 97;
+
 /// Control message type discriminator for Draft v0 control payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -43,14 +52,14 @@ pub enum ControlMessage {
         /// Optional identity authentication for the handshake transcript.
         auth: Option<HandshakeAuth>,
     },
-    /// Rekey event message.
+    /// Rekey event message carrying one DH-ratchet step.
     Rekey {
         /// Previous key identifier.
         old_key_id: u8,
         /// New key identifier.
         new_key_id: u8,
-        /// Salt value used for rekey derivation.
-        rekey_salt: [u8; 32],
+        /// Sender's fresh ephemeral X25519 public key for this ratchet step.
+        ratchet_public: [u8; 32],
         /// Transcript binding hash.
         transcript_binding: [u8; 32],
     },
@@ -103,12 +112,12 @@ impl ControlMessage {
             Self::Rekey {
                 old_key_id,
                 new_key_id,
-                rekey_salt,
+                ratchet_public,
                 transcript_binding,
             } => {
                 out.push(*old_key_id);
                 out.push(*new_key_id);
-                out.extend_from_slice(rekey_salt);
+                out.extend_from_slice(ratchet_public);
                 out.extend_from_slice(transcript_binding);
             }
             Self::Error { code } => {
@@ -121,7 +130,7 @@ impl ControlMessage {
 
     /// Decodes control payload from wire bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, CoreError> {
-        if bytes.len() < 6 {
+        if bytes.len() < 6 || bytes.len() > MAX_CONTROL_MESSAGE_LEN {
             return Err(CoreError::InvalidControlMessage);
         }
         if bytes[0..4] != CONTROL_PREFIX {
@@ -174,14 +183,14 @@ impl ControlMessage {
                 }
                 let old_key_id = body[0];
                 let new_key_id = body[1];
-                let mut rekey_salt = [0u8; 32];
-                rekey_salt.copy_from_slice(&body[2..34]);
+                let mut ratchet_public = [0u8; 32];
+                ratchet_public.copy_from_slice(&body[2..34]);
                 let mut transcript_binding = [0u8; 32];
                 transcript_binding.copy_from_slice(&body[34..66]);
                 Ok(Self::Rekey {
                     old_key_id,
                     new_key_id,
-                    rekey_salt,
+                    ratchet_public,
                     transcript_binding,
                 })
             }
@@ -237,11 +246,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_control_message_fits_the_documented_bound() {
+        let auth = Some(HandshakeAuth {
+            identity_public_key: [1u8; 32],
+            signature: [2u8; 64],
+        });
+        let messages = [
+            ControlMessage::ClientHello {
+                eph_public: [3u8; 32],
+                session_salt: [4u8; 32],
+                transcript_binding: [5u8; 32],
+                auth: auth.clone(),
+            },
+            ControlMessage::ServerHello {
+                eph_public: [6u8; 32],
+                transcript_binding: [7u8; 32],
+                auth,
+            },
+            ControlMessage::Rekey {
+                old_key_id: 0,
+                new_key_id: 1,
+                ratchet_public: [8u8; 32],
+                transcript_binding: [9u8; 32],
+            },
+            ControlMessage::Error { code: 42 },
+        ];
+        for msg in messages {
+            assert!(msg.encode().len() <= MAX_CONTROL_MESSAGE_LEN);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_input_longer_than_the_bound() {
+        let mut oversized = ControlMessage::Error { code: 1 }.encode();
+        oversized.resize(MAX_CONTROL_MESSAGE_LEN + 1, 0);
+        assert!(matches!(
+            ControlMessage::decode(&oversized),
+            Err(CoreError::InvalidControlMessage)
+        ));
+    }
+
+    #[test]
     fn control_roundtrip() {
         let msg = ControlMessage::Rekey {
             old_key_id: 1,
             new_key_id: 2,
-            rekey_salt: [7u8; 32],
+            ratchet_public: [7u8; 32],
             transcript_binding: [9u8; 32],
         };
         let encoded = msg.encode();

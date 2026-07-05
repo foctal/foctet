@@ -287,3 +287,49 @@ fn archive_vectors_match() {
     archive::decrypt_split_archive_to_bytes(&tampered_manifest, &part_refs, recipient_priv)
         .expect_err("tampered manifest must fail");
 }
+
+#[test]
+fn rekey_ratchet_vector_matches() {
+    // Locks in the DH-ratchet key schedule: `derive_ratchet_root` then
+    // `dh_ratchet_step`. A change to either HKDF label or the wiring breaks this.
+    let v = load_json("rekey-v0.json");
+
+    let session_salt = hex32(v["session_salt_hex"].as_str().expect("session_salt_hex"));
+    let shared_secret = hex32(v["shared_secret_hex"].as_str().expect("shared_secret_hex"));
+    let expected_root = hex32(v["ratchet_root_hex"].as_str().expect("ratchet_root_hex"));
+    let eph_private = hex32(
+        v["rekey_eph_private_hex"]
+            .as_str()
+            .expect("rekey_eph_private_hex"),
+    );
+    let peer_public = hex32(
+        v["peer_ratchet_public_hex"]
+            .as_str()
+            .expect("peer_ratchet_public_hex"),
+    );
+    let expected_dh = hex32(v["rekey_dh_hex"].as_str().expect("rekey_dh_hex"));
+    let new_key_id = v["new_key_id"].as_u64().expect("new_key_id") as u8;
+    let expected_new_root = hex32(
+        v["new_ratchet_root_hex"]
+            .as_str()
+            .expect("new_ratchet_root_hex"),
+    );
+    let expected_c2s = hex32(v["rekey_key_c2s_hex"].as_str().expect("rekey_key_c2s_hex"));
+    let expected_s2c = hex32(v["rekey_key_s2c_hex"].as_str().expect("rekey_key_s2c_hex"));
+
+    // 1. Initial ratchet root from the handshake shared secret.
+    let root = core::derive_ratchet_root(&session_salt, &shared_secret).expect("ratchet root");
+    assert_eq!(root, expected_root, "ratchet root mismatch");
+
+    // 2. The ratchet Diffie-Hellman output.
+    let dh = StaticSecret::from(eph_private)
+        .diffie_hellman(&PublicKey::from(peer_public))
+        .to_bytes();
+    assert_eq!(dh, expected_dh, "ratchet DH mismatch");
+
+    // 3. One ratchet step → new root and traffic keys.
+    let (new_root, keys) = core::dh_ratchet_step(&root, &dh, new_key_id).expect("dh ratchet step");
+    assert_eq!(new_root, expected_new_root, "ratcheted root mismatch");
+    assert_eq!(keys.c2s, expected_c2s, "rekey c2s mismatch");
+    assert_eq!(keys.s2c, expected_s2c, "rekey s2c mismatch");
+}

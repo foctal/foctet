@@ -86,3 +86,26 @@ fn archive_vector_schema_is_valid() {
         assert!(is_hex(s), "each parts_hex item must be hex");
     }
 }
+
+#[test]
+fn rekey_vector_schema_is_valid() {
+    let v = load_json("rekey-v0.json");
+    for key in [
+        "session_salt_hex",
+        "shared_secret_hex",
+        "ratchet_root_hex",
+        "rekey_eph_private_hex",
+        "rekey_eph_public_hex",
+        "peer_ratchet_public_hex",
+        "rekey_dh_hex",
+        "new_ratchet_root_hex",
+        "rekey_key_c2s_hex",
+        "rekey_key_s2c_hex",
+    ] {
+        assert_hex_len(&v, key, 32);
+    }
+    assert!(
+        v["new_key_id"].as_u64().is_some(),
+        "new_key_id must be an integer"
+    );
+}
