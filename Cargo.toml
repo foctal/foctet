@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["shellrow <shellrow@foctal.com>"]
@@ -32,7 +32,7 @@ subtle = "2.6"
 thiserror = "2.0"
 x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = "1.8"
-foctet-core = { path = "foctet-core", version = "0.2.0" }
-foctet-http = { path = "foctet-http", version = "0.2.0" }
-foctet-archive = { path = "foctet-archive", version = "0.2.0" }
-foctet-transport = { path = "foctet-transport", version = "0.2.0" }
+foctet-core = { path = "foctet-core", version = "0.3.0" }
+foctet-http = { path = "foctet-http", version = "0.3.0" }
+foctet-archive = { path = "foctet-archive", version = "0.3.0" }
+foctet-transport = { path = "foctet-transport", version = "0.3.0" }

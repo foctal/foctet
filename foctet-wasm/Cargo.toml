@@ -13,8 +13,8 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-foctet-core = { path = "../foctet-core", version = "0.2.0", default-features = false }
-foctet-http = { path = "../foctet-http", version = "0.2.0", default-features = false }
+foctet-core = { path = "../foctet-core", version = "0.3.0", default-features = false }
+foctet-http = { path = "../foctet-http", version = "0.3.0", default-features = false }
 wasm-bindgen = "0.2"
 x25519-dalek = { workspace = true }
 rand_core = { workspace = true }
@@ -29,7 +29,7 @@ getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-test = "0.3"
 # Exercises the browser WebTransport datagram adapter against in-page mock
 # streams inside real headless Chrome (see tests/browser.rs).
-foctet-transport = { path = "../foctet-transport", version = "0.2.0", default-features = false, features = ["transport-webtrans-browser"] }
+foctet-transport = { path = "../foctet-transport", version = "0.3.0", default-features = false, features = ["transport-webtrans-browser"] }
 js-sys = "0.3"
 wasm-bindgen-futures = "0.4"
 
