@@ -1,68 +1,21 @@
 //! Framed Foctet session over WebAssembly.
 //!
-//! This module exposes the native Foctet handshake and per-message seal/open to
-//! JavaScript so a browser (or any JS runtime) can run a full authenticated,
-//! ordered, replay-protected Foctet session — not just the one-shot body
-//! envelope.
+//! This module exposes the native Foctet handshake and framed session API to
+//! JavaScript, so a browser or JS runtime can run an authenticated,
+//! replay-protected Foctet session instead of only the one-shot body envelope.
 //!
-//! # I/O ownership
+//! WebAssembly owns the cryptography and session state; JavaScript owns the
+//! transport. Handshake/control messages and sealed payloads cross the boundary
+//! as `Uint8Array`.
 //!
-//! WebAssembly does the cryptography and the handshake state machine; **the JS
-//! side owns the transport** (a browser `WebSocket`, `WebTransport` stream, or
-//! anything that moves whole messages). Handshake control messages and sealed
-//! data frames both cross the boundary as `Uint8Array`; JS is responsible for
-//! sending and receiving them in order over its transport. This keeps the WASM
-//! surface transport-agnostic and lets it run on platforms whose socket APIs
-//! Rust cannot portably bind.
+//! A session is created in one framing mode and stays there:
 //!
-//! # Lifecycle
+//! - `newInitiator` / `newResponder` for reliable ordered messages
+//! - `newDatagramInitiator` / `newDatagramResponder` for MTU-bounded datagrams
 //!
-//! ```text
-//! initiator: newInitiator(auth) → initialHandshakeMessage() ──send──▶
-//!            ◀──recv── handleHandshakeMessage(serverHello) → (none)
-//! responder: newResponder(auth)
-//!            ◀──recv── handleHandshakeMessage(clientHello) → serverHello ──send──▶
-//! both:      isEstablished() == true → sealMessage()/openMessage()
-//! ```
-//!
-//! Each `sealMessage` produces exactly one frame to send as one transport
-//! message; each `openMessage` consumes exactly one. Replay state is committed
-//! only after a frame authenticates.
-//!
-//! # Framing modes
-//!
-//! A session commits to one framing mode at construction:
-//!
-//! - **Message** (`newInitiator` / `newResponder`): reliable, ordered,
-//!   message-bounded — raw WebSocket or a WebTransport stream. Use
-//!   `sealMessage` / `openMessage`.
-//! - **Datagram** (`newDatagramInitiator` / `newDatagramResponder`):
-//!   MTU-bounded, loss/reorder-tolerant — WebTransport datagrams. Use
-//!   `sealDatagram` / `openDatagram`. The handshake itself is reliable, so run
-//!   the handshake messages over a reliable channel (e.g. a WebTransport stream)
-//!   before switching to datagrams.
-//!
-//! A single session never mixes the two, so message and datagram traffic can
-//! never share a `(key_id, stream_id)` sequence space (which would reuse a
-//! nonce).
-//!
-//! # In-session rekey
-//!
-//! The authenticated DH-ratchet rekey is carried over this API too. Rekey
-//! control messages must travel over a **reliable, ordered** channel (the same
-//! one used for the handshake — a lost or reordered ratchet message would
-//! desynchronize the root chain), even when data flows as datagrams:
-//!
-//! - The side whose turn it is (see `canRekey`; the initiator holds the first
-//!   turn, and turns alternate) calls `forceRekey()` and sends the returned
-//!   bytes over the reliable channel.
-//! - The peer feeds them to `handleControlMessage()` (alias of
-//!   `handleHandshakeMessage`), which rotates its keys and hands the turn back.
-//!
-//! Frames sealed under the previous key are still opened after a rekey (the
-//! endpoint retains previous key generations and each frame names its
-//! `key_id`), so in-flight messages and reordered datagrams survive the
-//! rotation.
+//! Datagram sessions still require a reliable channel for the handshake and
+//! rekey control messages. In-session rekey is available through `canRekey`,
+//! `forceRekey`, and `handleControlMessage`.
 
 use foctet_core::{
     ChannelBinding, ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram,

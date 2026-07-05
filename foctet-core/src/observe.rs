@@ -1,41 +1,15 @@
 //! Observability hooks for session lifecycle events.
 //!
-//! Production deployments need to see handshake outcomes, key rotations, and
-//! rejected control traffic without scraping logs or exposing key material.
-//! [`SessionObserver`] is a pluggable callback the [`crate::Session`] invokes
-//! at those points; [`SessionEvent`] deliberately carries **only public
-//! metadata** (roles, key *identifiers*, counts) — never key bytes, plaintext,
-//! or identity secrets — so an observer can be wired straight into metrics or
-//! tracing with no redaction layer.
+//! [`SessionObserver`] lets applications receive handshake, rekey, and control
+//! rejection events without exposing key material or plaintext. [`SessionEvent`]
+//! carries only public metadata, so observers can feed metrics or tracing
+//! directly.
 //!
-//! ```rust,ignore
-//! use std::sync::Arc;
-//! use foctet_core::{Session, RekeyThresholds, observe::{SessionEvent, SessionObserver}};
+//! Replay-protection rejections are exposed separately as counters on the
+//! receiving endpoints.
 //!
-//! struct Metrics;
-//! impl SessionObserver for Metrics {
-//!     fn on_session_event(&self, event: SessionEvent) {
-//!         match event {
-//!             SessionEvent::HandshakeCompleted { .. } => { /* counter += 1 */ }
-//!             SessionEvent::RekeyApplied { new_key_id, .. } => { /* gauge = new_key_id */ }
-//!             _ => {}
-//!         }
-//!     }
-//! }
-//!
-//! let (session, hello) = Session::new_initiator(RekeyThresholds::default());
-//! let session = session.with_observer(Arc::new(Metrics));
-//! ```
-//!
-//! Replay-protection rejections are surfaced separately as counters on the
-//! receiving endpoints (e.g. `FoctetFramed::replay_rejections`,
-//! `SyncIo::replay_rejections`, `MessageEndpoint::replay_rejections`,
-//! `DatagramEndpoint::replay_rejections`): datagram transports legitimately
-//! duplicate packets, so per-event callbacks there would be noisy, but a
-//! rising counter is a monitoring signal for replay/DoS activity.
-//!
-//! Observer callbacks run synchronously on the protocol path: keep them cheap
-//! (increment a counter, push to a channel) and never block.
+//! Observer callbacks run synchronously on the protocol path, so they should be
+//! cheap and non-blocking.
 
 use std::{fmt, sync::Arc};
 

@@ -1,35 +1,18 @@
 //! Versioned HTTP protected-context schema.
 //!
-//! A Foctet body envelope on its own is a stateless, replayable one-shot
-//! ciphertext: opening it only proves the bytes were sealed for the recipient,
-//! not *which request* they belonged to. This module binds the surrounding HTTP
-//! context into the envelope's AEAD associated data (via
-//! [`foctet_core::seal_body_with_context`] / [`foctet_core::open_body_with_context`])
-//! so a captured envelope cannot be replayed onto a different request or
-//! operation, and pairs it with a [`crate::ReplayStore`] for single-use
-//! enforcement.
+//! A body envelope by itself is replayable. This module binds selected HTTP
+//! request/response metadata into AEAD associated data so a captured envelope
+//! cannot be replayed onto a different route or operation, and pairs that with
+//! a [`crate::ReplayStore`] for single-use enforcement.
 //!
-//! # What is bound
+//! The authenticated context includes protocol/direction, route metadata
+//! (method/path/query and optionally authority), freshness fields, and sender
+//! carrier values such as message ID and expiry. Carrier values travel in
+//! `x-foctet-*` headers; route fields are recomputed from the received HTTP
+//! message.
 //!
-//! The associated data authenticates a canonical, domain-separated,
-//! length-delimited encoding of:
-//!
-//! - protocol label + version + direction (request vs response),
-//! - method, path, query (and optionally authority),
-//! - response status (responses only),
-//! - a sender-chosen unique message ID, timestamp, and expiry,
-//! - an optional idempotency key,
-//! - for responses, the request message ID it answers.
-//!
-//! Method/path/query/status are derived from the HTTP message itself, so they
-//! are not transmitted as extra fields; the sender-chosen carrier values
-//! (message ID, timestamp, expiry, idempotency key) travel in `x-foctet-*`
-//! headers. The opener recomputes the same associated data from the received
-//! message plus the carrier headers; any mismatch fails authentication.
-//!
-//! Time is always supplied by the caller (`now_secs`) so this module is usable
-//! on `wasm32` targets such as Cloudflare Workers where `SystemTime` is
-//! unavailable.
+//! Time is supplied by the caller (`now_secs`), so this module works on native
+//! targets and on environments such as Cloudflare Workers.
 
 use http::HeaderMap;
 use http::header::{HeaderName, HeaderValue};
