@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Thin HTTP adapter for application/foctet body envelopes"
 readme = "../README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 foctet-core = { workspace = true }
 http = "1.4"

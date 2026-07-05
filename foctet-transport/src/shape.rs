@@ -4,8 +4,9 @@
 //! trait:
 //!
 //! - **Byte stream** — a reliable, ordered byte stream
-//!   ([`ByteStreamTransport`], i.e. `AsyncRead + AsyncWrite`), driven by
-//!   [`crate::TokioTransportBuilder`] / [`crate::FuturesTransportBuilder`].
+//!   (`ByteStreamTransport`, i.e. `AsyncRead + AsyncWrite`), driven by the
+//!   `runtime-tokio` / `runtime-futures` transport builders
+//!   (`TokioTransportBuilder` / `FuturesTransportBuilder`).
 //! - **Message** — reliable, ordered, message-bounded units
 //!   ([`crate::MessageTransport`]), via [`crate::SecureMessageChannel`].
 //! - **Datagram** — MTU-bounded, loss/reorder-tolerant units

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! WebAssembly bindings for Foctet end-to-end encryption.
 //!
 //! This crate exposes a small JavaScript/TypeScript API for the

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Foctet Core (Draft v0).
 //!
 //! `foctet-core` is the low-level protocol crate: framing, key derivation,

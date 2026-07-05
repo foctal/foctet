@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! High-level HTTP integration for `application/foctet` body envelopes.
 //!
 //! `foctet-http` encrypts HTTP body bytes. For production requests, prefer the

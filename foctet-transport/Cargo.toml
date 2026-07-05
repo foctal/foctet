@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Layered transport integration helpers for Foctet secure channels"
 readme = "../README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = []
 runtime-tokio = ["dep:tokio", "foctet-core/runtime-tokio", "dep:futures-sink"]

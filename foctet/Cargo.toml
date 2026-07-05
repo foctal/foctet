@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Transport-agnostic end-to-end encryption layer for secure data transfer."
 readme = "../README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = []
 transport = ["dep:foctet-transport"]

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Foctet Secure Archive (Draft v0)
 //! - Single-file archive creation and decryption
 //! - Multi-file split archive (`manifest.far` + `data.partNNN.far`)
