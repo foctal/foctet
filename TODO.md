@@ -27,11 +27,11 @@ public input, including apparently authenticated payloads.
 
 ### Implementation tracking (updated 2026-07-12)
 
-- [ ] **P0-1** — Synchronous `SyncIo` now reserves its sequence before writing
-  and permanently closes after write/flush failure, with partial-write and
-  flush-failure regression coverage. The equivalent state machine and failure
-  contract still need to be completed for framing, control/handshake/rekey,
-  and all adapters.
+- [ ] **P0-1** — Synchronous `SyncIo` and async `FoctetFramed` now reserve
+  their sequence before output and permanently close after partial-write,
+  write, or flush failure, with regression coverage. The equivalent failure
+  contract still needs to be completed for control/handshake/rekey and all
+  message/datagram transport adapters.
 - [x] **P0-2** — A shared zeroizing X25519 helper rejects all-zero shared
   secrets for handshake, body envelopes (including streaming bodies), and
   archive wrapping/unwrapping. Regression coverage includes all-zero and a

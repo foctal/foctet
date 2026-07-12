@@ -69,10 +69,11 @@ supported-version policy will accompany the first `v1` release.
   keys while opening are reported as generic unwrap/authentication failures.
 - **Fail-closed sequence and key-id exhaustion** on both the async (`FoctetFramed`)
   and synchronous (`SyncIo`) paths — a frame is never emitted with a reused
-  `(key_id, stream_id, seq)` nonce. `SyncIo` reserves a sequence before the
-  first write and becomes terminal after a write or flush error, because local
-  code cannot know whether the peer received the frame. Applications that need
-  delivery semantics must use authenticated message IDs and idempotency.
+  `(key_id, stream_id, seq)` nonce. `SyncIo` and `FoctetFramed` reserve a
+  sequence before the first write and become terminal after a write or flush
+  error, because local code cannot know whether the peer received the frame.
+  Applications that need delivery semantics must use authenticated message IDs
+  and idempotency.
 - **No session-state restoration.** Foctet does not provide a session-persistence
   format. After a crash or restart, applications must establish a fresh session;
   restoring traffic keys with reset or uncertain outbound sequence state can reuse

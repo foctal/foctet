@@ -215,6 +215,7 @@ pub struct FoctetFramed<T> {
     tx: BytesMut,
     replay: ReplayProtector,
     eof: bool,
+    terminal: bool,
 }
 
 impl<T> FoctetFramed<T> {
@@ -240,6 +241,7 @@ impl<T> FoctetFramed<T> {
             replay: limits.replay_protector(),
             limits,
             eof: false,
+            terminal: false,
         }
     }
 
@@ -315,6 +317,13 @@ impl<T> FoctetFramed<T> {
         self.replay.rejections()
     }
 
+    /// Returns whether an ambiguous outbound I/O failure permanently closed
+    /// this transport. A terminal transport must be discarded with its session;
+    /// it cannot safely retry queued ciphertext or encrypt new plaintext.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
     /// Installs new active keys and retains previous keys.
     pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.keys.retain(|k| k.key_id != keys.key_id);
@@ -380,6 +389,9 @@ impl<T> FoctetFramed<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
         if plaintext.len() > self.limits.max_plaintext_len {
             return Err(CoreError::FrameTooLarge);
         }
@@ -595,8 +607,15 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
 
     fn poll_drain_tx(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), CoreError>> {
         while !self.tx.is_empty() {
-            let n = ready!(Pin::new(&mut self.io).poll_write(cx, &self.tx))?;
+            let n = match ready!(Pin::new(&mut self.io).poll_write(cx, &self.tx)) {
+                Ok(n) => n,
+                Err(error) => {
+                    self.terminal = true;
+                    return Poll::Ready(Err(CoreError::Io(error)));
+                }
+            };
             if n == 0 {
+                self.terminal = true;
                 return Poll::Ready(Err(CoreError::UnexpectedEof));
             }
             self.tx.advance(n);
@@ -635,6 +654,9 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
+        if this.terminal {
+            return Poll::Ready(Err(CoreError::TransportTerminal));
+        }
         if this.tx.is_empty() {
             return Poll::Ready(Ok(()));
         }
@@ -649,15 +671,41 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
+        if this.terminal {
+            return Poll::Ready(Err(CoreError::TransportTerminal));
+        }
         ready!(this.poll_drain_tx(cx))?;
-        Pin::new(&mut this.io).poll_flush(cx).map_err(CoreError::Io)
+        match Pin::new(&mut this.io).poll_flush(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(error)) => {
+                this.terminal = true;
+                Poll::Ready(Err(CoreError::Io(error)))
+            }
+        }
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
+        if this.terminal {
+            return Poll::Ready(Err(CoreError::TransportTerminal));
+        }
         ready!(this.poll_drain_tx(cx))?;
-        ready!(Pin::new(&mut this.io).poll_flush(cx)).map_err(CoreError::Io)?;
-        Pin::new(&mut this.io).poll_close(cx).map_err(CoreError::Io)
+        match ready!(Pin::new(&mut this.io).poll_flush(cx)) {
+            Ok(()) => {}
+            Err(error) => {
+                this.terminal = true;
+                return Poll::Ready(Err(CoreError::Io(error)));
+            }
+        }
+        match Pin::new(&mut this.io).poll_close(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(error)) => {
+                this.terminal = true;
+                Poll::Ready(Err(CoreError::Io(error)))
+            }
+        }
     }
 }
 
@@ -792,6 +840,51 @@ mod tests {
         outbound: Vec<u8>,
     }
 
+    #[derive(Debug)]
+    struct FailingWriteIo {
+        outbound: Vec<u8>,
+        fail_after: usize,
+        fail_flush: bool,
+    }
+
+    impl PollRead for FailingWriteIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+    }
+
+    impl PollWrite for FailingWriteIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let remaining = self.fail_after.saturating_sub(self.outbound.len());
+            if remaining == 0 {
+                return Poll::Ready(Err(std::io::Error::other("injected write failure")));
+            }
+            let written = remaining.min(buf.len());
+            self.outbound.extend_from_slice(&buf[..written]);
+            Poll::Ready(Ok(written))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.fail_flush {
+                Poll::Ready(Err(std::io::Error::other("injected flush failure")))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     impl MemoryIo {
         fn push_inbound(&mut self, bytes: &[u8]) {
             self.inbound.extend(bytes.iter().copied());
@@ -869,6 +962,69 @@ mod tests {
         assert_eq!(item.plaintext, b"hello framed");
         assert_eq!(item.header.stream_id, 9);
         assert_eq!(item.header.flags, flags::IS_CONTROL);
+    }
+
+    #[test]
+    fn partial_write_failure_makes_framed_transport_terminal() {
+        let keys = KeyHandle::new(crate::TrafficKeys {
+            key_id: 1,
+            c2s: [0x11; 32],
+            s2c: [0x22; 32],
+        });
+        let io = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: 7,
+            fail_flush: false,
+        };
+        let mut framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::C2S);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        Pin::new(&mut framed)
+            .start_send_with(0, 0, b"first")
+            .expect("queue first frame");
+        assert!(matches!(
+            Pin::new(&mut framed).poll_flush(&mut cx),
+            Poll::Ready(Err(CoreError::Io(_)))
+        ));
+        assert!(framed.is_terminal());
+        let emitted = framed.get_ref().outbound.clone();
+
+        assert!(matches!(
+            Pin::new(&mut framed).start_send_with(0, 0, b"different retry"),
+            Err(CoreError::TransportTerminal)
+        ));
+        assert_eq!(framed.get_ref().outbound, emitted);
+    }
+
+    #[test]
+    fn flush_failure_after_frame_drain_makes_framed_transport_terminal() {
+        let keys = KeyHandle::new(crate::TrafficKeys {
+            key_id: 1,
+            c2s: [0x11; 32],
+            s2c: [0x22; 32],
+        });
+        let io = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: usize::MAX,
+            fail_flush: true,
+        };
+        let mut framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::C2S);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        Pin::new(&mut framed)
+            .start_send_with(0, 0, b"complete but ambiguous")
+            .expect("queue frame");
+        assert!(matches!(
+            Pin::new(&mut framed).poll_flush(&mut cx),
+            Poll::Ready(Err(CoreError::Io(_)))
+        ));
+        assert!(framed.is_terminal());
+        assert!(matches!(
+            Pin::new(&mut framed).poll_ready(&mut cx),
+            Poll::Ready(Err(CoreError::TransportTerminal))
+        ));
     }
 
     #[test]
