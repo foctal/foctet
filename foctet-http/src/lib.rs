@@ -475,8 +475,9 @@ impl HttpOpener {
 #[cfg(test)]
 mod tests {
     use foctet_core::BodyEnvelopeLimits;
+    use getrandom::SysRng;
     use http::{Request, Response, StatusCode, Version, header};
-    use rand_core::OsRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::*;
@@ -484,7 +485,7 @@ mod tests {
     #[test]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn sealer_and_opener_roundtrip_request_and_response() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -531,7 +532,7 @@ mod tests {
 
     #[test]
     fn opener_respects_explicit_config() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -553,7 +554,7 @@ mod tests {
 
     #[test]
     fn scope_header_can_be_disabled() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::with_config(
@@ -572,7 +573,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_roundtrip_and_replay_rejected() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -608,7 +609,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_with_bound_header_rejects_header_tamper() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -651,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_bound_request_async_store_roundtrip_and_replay() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -686,7 +687,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_rejects_route_substitution() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -718,7 +719,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_rejects_expired() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -744,7 +745,7 @@ mod tests {
 
     #[test]
     fn context_bound_response_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -790,9 +791,9 @@ mod tests {
 
     #[test]
     fn key_rotation_overlap_accepts_current_and_previous_key() {
-        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let old_pub = PublicKey::from(&old_priv).to_bytes();
-        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let new_pub = PublicKey::from(&new_priv).to_bytes();
 
         // During the overlap window the recipient accepts both the current
@@ -829,9 +830,9 @@ mod tests {
 
     #[test]
     fn key_rotation_rejects_key_after_it_is_retired() {
-        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let old_pub = PublicKey::from(&old_priv).to_bytes();
-        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
 
         // Overlap window is over: the recipient holds only the current key.
         let opener = HttpOpener::new(HttpOpenOptions::new(new_priv.to_bytes()));
@@ -858,8 +859,8 @@ mod tests {
 
     #[tokio::test]
     async fn key_rotation_trial_decryption_does_not_consume_replay_slot() {
-        let old_priv = StaticSecret::random_from_rng(OsRng);
-        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let old_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let new_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let new_pub = PublicKey::from(&new_priv).to_bytes();
 
         // The non-matching old key is tried FIRST and fails authentication

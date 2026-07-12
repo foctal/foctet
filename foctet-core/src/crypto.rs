@@ -5,8 +5,9 @@ use chacha20poly1305::{
 use std::ops::Deref;
 use std::sync::Arc;
 
+use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::{TryRng, UnwrapErr};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -214,7 +215,9 @@ pub fn dh_ratchet_step(
 /// Generates a random session salt for key derivation.
 pub fn random_session_salt() -> [u8; 32] {
     let mut out = [0u8; 32];
-    OsRng.fill_bytes(&mut out);
+    SysRng
+        .try_fill_bytes(&mut out)
+        .expect("OS random number generator is unavailable");
     out
 }
 
@@ -239,7 +242,7 @@ impl core::fmt::Debug for EphemeralKeyPair {
 impl EphemeralKeyPair {
     /// Generates a fresh ephemeral X25519 key pair.
     pub fn generate() -> Self {
-        let private = StaticSecret::random_from_rng(OsRng);
+        let private = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&private);
         Self {
             private: Zeroizing::new(private.to_bytes()),
@@ -301,7 +304,7 @@ pub fn encrypt_frame(
     );
 
     let nonce_raw = make_nonce(keys.key_id, stream_id, seq);
-    let nonce = XNonce::from_slice(&nonce_raw);
+    let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
 
     let mut aad_header = header.clone();
     aad_header.ct_len = expected_ct_len;
@@ -359,7 +362,7 @@ pub fn decrypt_frame_with_key(
         frame.header.stream_id,
         frame.header.seq,
     );
-    let nonce = XNonce::from_slice(&nonce_raw);
+    let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
     let aad = frame.header.encode();
     cipher
         .decrypt(

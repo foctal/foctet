@@ -43,7 +43,8 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
-use rand_core::{OsRng, RngCore};
+use getrandom::SysRng;
+use rand_core::{TryRng, UnwrapErr};
 use zeroize::Zeroizing;
 
 use crate::body::{
@@ -224,11 +225,15 @@ impl StreamSealer {
         }
 
         let mut content_key = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
-        OsRng.fill_bytes(&mut content_key[..]);
+        SysRng
+            .try_fill_bytes(&mut content_key[..])
+            .expect("OS random number generator is unavailable");
         let mut nonce_prefix = [0u8; STREAM_NONCE_PREFIX_LEN];
-        OsRng.fill_bytes(&mut nonce_prefix);
+        SysRng
+            .try_fill_bytes(&mut nonce_prefix)
+            .expect("OS random number generator is unavailable");
 
-        let eph_priv = StaticSecret::random_from_rng(OsRng);
+        let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let eph_pub = PublicKey::from(&eph_priv).to_bytes();
         let wrapped_key = wrap_content_key(
             &content_key,
@@ -287,7 +292,7 @@ impl StreamSealer {
         let ciphertext = self
             .cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::try_from(&nonce[..]).expect("fixed-size nonce"),
                 Payload {
                     msg: plaintext,
                     aad: &aad,
@@ -410,7 +415,7 @@ impl StreamOpener {
         let plaintext = self
             .cipher
             .decrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::try_from(&nonce[..]).expect("fixed-size nonce"),
                 Payload {
                     msg: ciphertext,
                     aad: &aad,
@@ -558,11 +563,12 @@ impl StreamFrameDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
+    use getrandom::SysRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn recipient() -> ([u8; 32], [u8; 32]) {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&secret).to_bytes();
         (secret.to_bytes(), public)
     }

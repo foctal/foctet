@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand_core::OsRng;
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -62,7 +63,7 @@ impl Eq for IdentityKeyPair {}
 impl IdentityKeyPair {
     /// Generates a fresh Ed25519 identity key pair.
     pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
         Self::from_secret_key_bytes(signing_key.to_bytes())
     }
 

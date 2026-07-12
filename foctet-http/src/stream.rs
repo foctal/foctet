@@ -257,12 +257,13 @@ impl<'s, S: ReplayStore + ?Sized> HttpRequestStreamReader<'s, S> {
 mod tests {
     use super::*;
     use crate::InMemoryReplayStore;
+    use getrandom::SysRng;
     use http::Request;
-    use rand_core::OsRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn recipient() -> ([u8; 32], [u8; 32]) {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&secret).to_bytes();
         (secret.to_bytes(), public)
     }

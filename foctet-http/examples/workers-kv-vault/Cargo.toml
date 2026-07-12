@@ -2,6 +2,7 @@
 name = "foctet-http-workers-kv-vault"
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.88"
 publish = false
 
 [lib]
@@ -12,6 +13,6 @@ crate-type = ["cdylib"]
 # crypto dependency here. All sealing/opening happens on the client with
 # `foctet_core::storage`.
 [dependencies]
-worker = "0.7.5"
+worker = "0.8.5"
 
 [workspace]

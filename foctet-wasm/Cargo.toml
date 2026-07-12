@@ -22,11 +22,13 @@ foctet-http = { path = "../foctet-http", version = "0.3.0", default-features = f
 wasm-bindgen = "0.2"
 x25519-dalek = { workspace = true }
 rand_core = { workspace = true }
+getrandom.workspace = true
 zeroize = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# `OsRng` flows through `rand_core -> getrandom`; wasm32 needs explicit JS support.
-getrandom = { version = "0.2", features = ["js"] }
+# `SysRng` uses getrandom; wasm32 needs explicit JavaScript support.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # In-browser integration tests: `wasm-pack test --headless --chrome foctet-wasm`.

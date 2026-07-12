@@ -27,6 +27,7 @@ futures-io = { version = "0.3", optional = true }
 futures-sink = "0.3"
 hkdf.workspace = true
 rand_core.workspace = true
+getrandom.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
@@ -38,6 +39,9 @@ zeroize.workspace = true
 proptest = "1.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# `OsRng` in this crate flows through `rand_core -> getrandom`.
+# `SysRng` in this crate flows through `getrandom`.
 # For `wasm32-unknown-unknown`, getrandom requires explicit JS support.
-getrandom = { version = "0.2", features = ["js"] }
+# Dependencies still using getrandom 0.2 require its legacy JavaScript backend.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# `SysRng` uses getrandom 0.4, which requires explicit JavaScript support.
+getrandom = { workspace = true, features = ["wasm_js"] }

@@ -437,15 +437,16 @@ mod tests {
     #[allow(deprecated)] // seal_http_request is deprecated; used to build a test fixture
     use crate::raw::seal_http_request;
     use crate::{BODY_ONLY_SCOPE, CONTENT_TYPE, HttpSealer, SCOPE_HEADER};
+    use getrandom::SysRng;
     use http::{Request, Response, StatusCode, Version, header};
-    use rand_core::OsRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     #[tokio::test]
     async fn open_request_stream_decodes_a_streaming_upload() {
         use crate::{HttpStreamSealer, InMemoryReplayStore};
 
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_secret = recipient_priv.to_bytes();
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits::default();
@@ -502,7 +503,7 @@ mod tests {
     #[tokio::test]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     async fn open_axum_request_body_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain_request = Request::builder()
@@ -533,7 +534,7 @@ mod tests {
 
     #[test]
     fn seal_axum_response_body_sets_content_type() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let response = Response::builder()
@@ -559,7 +560,7 @@ mod tests {
     async fn open_axum_request_with_context_enforces_replay() {
         use crate::{ContextBinding, ContextCarrier, InMemoryReplayStore};
 
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"axum-kid"));
@@ -636,7 +637,7 @@ mod tests {
     async fn protected_request_extractor_authenticates_and_rejects_replay() {
         use ::axum::extract::FromRequest;
 
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let now = 1_000_000u64;
 

@@ -22,15 +22,16 @@ description = "Transport-agnostic end-to-end encryption layer for secure data tr
 [workspace.dependencies]
 blake3 = "1.8"
 bytes = "1.10"
-chacha20poly1305 = "0.10"
-ed25519-dalek = { version = "2.1", default-features = false, features = ["rand_core"] }
-hkdf = "0.12"
-rand_core = "0.6"
+chacha20poly1305 = "0.11"
+ed25519-dalek = { version = "3", default-features = false, features = ["rand_core"] }
+hkdf = "0.13"
+rand_core = "0.10"
+getrandom = { version = "0.4", features = ["sys_rng"] }
 rkyv = { version = "0.8", features = ["bytecheck"] }
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2.6"
 thiserror = "2.0"
-x25519-dalek = { version = "2.0", features = ["static_secrets", "getrandom", "zeroize"] }
+x25519-dalek = { version = "3", features = ["static_secrets", "getrandom", "zeroize"] }
 zeroize = "1.8"
 foctet-core = { path = "foctet-core", version = "0.3.0" }
 foctet-http = { path = "foctet-http", version = "0.3.0" }

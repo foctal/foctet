@@ -2,8 +2,9 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::{TryRng, UnwrapErr};
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -174,12 +175,16 @@ pub fn seal_body_with_context(
     }
 
     let mut content_key = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
-    OsRng.fill_bytes(&mut content_key[..]);
+    SysRng
+        .try_fill_bytes(&mut content_key[..])
+        .expect("OS random number generator is unavailable");
 
     let mut payload_nonce = [0u8; XCHACHA_NONCE_LEN];
-    OsRng.fill_bytes(&mut payload_nonce);
+    SysRng
+        .try_fill_bytes(&mut payload_nonce)
+        .expect("OS random number generator is unavailable");
 
-    let eph_priv = StaticSecret::random_from_rng(OsRng);
+    let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
     let eph_pub = PublicKey::from(&eph_priv).to_bytes();
 
     let wrapped_key = wrap_content_key(
@@ -212,7 +217,7 @@ pub fn seal_body_with_context(
         .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
     let payload_ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&payload_nonce),
+            &XNonce::try_from(&payload_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: plaintext,
                 aad: &aad,
@@ -280,7 +285,7 @@ pub fn open_body_with_context(
 
         let plain = cipher
             .decrypt(
-                XNonce::from_slice(&parsed.payload_nonce),
+                &XNonce::try_from(&parsed.payload_nonce[..]).expect("fixed-size nonce"),
                 Payload {
                     msg: parsed.payload_ciphertext,
                     aad: &aad,
@@ -354,7 +359,7 @@ pub fn open_body_for_key_id_with_context(
 
     cipher
         .decrypt(
-            XNonce::from_slice(&parsed.payload_nonce),
+            &XNonce::try_from(&parsed.payload_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: parsed.payload_ciphertext,
                 aad: &aad,
@@ -552,7 +557,7 @@ pub(crate) fn wrap_content_key(
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
     cipher
         .encrypt(
-            XNonce::from_slice(&wrap_nonce),
+            &XNonce::try_from(&wrap_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: content_key,
                 aad: key_id,
@@ -579,7 +584,7 @@ pub(crate) fn unwrap_content_key(
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
     let unwrapped = cipher
         .decrypt(
-            XNonce::from_slice(&wrap_nonce),
+            &XNonce::try_from(&wrap_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: wrapped_key,
                 aad: key_id,
@@ -734,7 +739,7 @@ mod tests {
 
     #[test]
     fn body_roundtrip_single_recipient() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello application/foctet body";
@@ -746,7 +751,7 @@ mod tests {
 
     #[test]
     fn context_binding_roundtrip_and_mismatch() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits::default();
 
@@ -776,7 +781,7 @@ mod tests {
 
     #[test]
     fn empty_context_matches_legacy_bytes() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits::default();
         let plain = b"hello";
@@ -791,7 +796,7 @@ mod tests {
 
     #[test]
     fn open_rejects_invalid_magic() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -804,7 +809,7 @@ mod tests {
 
     #[test]
     fn open_rejects_unsupported_version() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -817,7 +822,7 @@ mod tests {
 
     #[test]
     fn open_rejects_truncated_input() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -830,7 +835,7 @@ mod tests {
 
     #[test]
     fn open_rejects_oversized_lengths() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -848,9 +853,9 @@ mod tests {
 
     #[test]
     fn open_with_wrong_recipient_fails() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
-        let wrong_priv = StaticSecret::random_from_rng(OsRng);
+        let wrong_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
 
         let plain = b"hello";
         let envelope = seal_body(plain, recipient_pub, b"kid").expect("seal");
@@ -861,7 +866,7 @@ mod tests {
 
     #[test]
     fn malformed_wrapped_key_is_rejected() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";

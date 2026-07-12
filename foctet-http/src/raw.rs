@@ -229,8 +229,9 @@ pub(crate) fn is_foctet_content_type_value(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use getrandom::SysRng;
     use http::{HeaderMap, Request, Response, StatusCode, Version, header};
-    use rand_core::OsRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::*;
@@ -266,7 +267,7 @@ mod tests {
 
     #[test]
     fn seal_open_http_body_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"http body bytes";
@@ -279,7 +280,7 @@ mod tests {
     #[test]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn wrong_content_type_rejected_on_request_open() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
 
         let req = Request::builder()
             .uri("https://example.com/upload")
@@ -294,7 +295,7 @@ mod tests {
     #[test]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn request_and_response_helpers_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let request = Request::builder()
@@ -342,7 +343,7 @@ mod tests {
 
     #[test]
     fn with_limits_passthrough_behaves_as_expected() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits {
             max_payload_len: 1024,

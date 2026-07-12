@@ -21,7 +21,8 @@ use foctet_core::{
     BodyEnvelopeError, BodyEnvelopeLimits, open_body, open_body_with_context, seal_body,
     seal_body_with_context,
 };
-use rand_core::OsRng;
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -127,7 +128,7 @@ impl KeyPair {
     /// Generates a fresh random X25519 key pair.
     #[wasm_bindgen(constructor)]
     pub fn generate() -> KeyPair {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&secret).to_bytes();
         KeyPair { secret, public }
     }

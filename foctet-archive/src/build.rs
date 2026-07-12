@@ -1,5 +1,6 @@
 use blake3::Hasher as Blake3;
-use rand_core::{OsRng, RngCore};
+use getrandom::SysRng;
+use rand_core::TryRng;
 use rkyv::rancor::Error as RkyvError;
 
 use crate::{
@@ -34,11 +35,17 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         None => {
             let mut archive_id = [0u8; 16];
             let mut file_id = [0u8; 16];
-            OsRng.fill_bytes(&mut archive_id);
-            OsRng.fill_bytes(&mut file_id);
+            SysRng
+                .try_fill_bytes(&mut archive_id)
+                .expect("OS random number generator is unavailable");
+            SysRng
+                .try_fill_bytes(&mut file_id)
+                .expect("OS random number generator is unavailable");
 
             let mut dek = [0u8; 32];
-            OsRng.fill_bytes(&mut dek);
+            SysRng
+                .try_fill_bytes(&mut dek)
+                .expect("OS random number generator is unavailable");
             (archive_id, file_id, dek)
         }
     };
