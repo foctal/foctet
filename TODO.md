@@ -39,9 +39,13 @@ public input, including apparently authenticated payloads.
   non-oracle error behavior.
 - [ ] **P0-3** — `Session` now supports an immutable prepare/commit rekey
   transaction; synchronous/async byte-stream automatic rekey and WASM use it,
-  and datagram tests use it for their reliable control channel. Replacement of
-  the native legacy immediate `force_rekey` API and real control-channel
-  delivery integration for every datagram adapter remain.
+  and the native immediate `force_rekey` convenience is now test-only. Datagram
+  tests use it for their reliable control channel; real control-channel delivery
+  integration for every datagram adapter remains.
+- [ ] **P1-2** — Archive builders now cap in-memory plaintext at 512 MiB and
+  use checked `u32` conversions for chunk counts, indices, lengths, and nonce
+  inputs, preventing chunk-nonce repetition through truncation. The remaining
+  cross-surface CPU/allocation limits and adversarial budget tests are open.
 
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 

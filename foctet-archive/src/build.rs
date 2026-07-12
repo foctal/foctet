@@ -27,7 +27,7 @@ pub(crate) fn build_encrypted_materials_with_secrets(
     options: ArchiveOptions,
     secrets: Option<&ArchiveBuildSecrets>,
 ) -> Result<BuiltArchive, ArchiveError> {
-    validate_inputs(recipient_public_keys, &options)?;
+    validate_inputs(plaintext, recipient_public_keys, &options)?;
     validate_build_secrets(recipient_public_keys, secrets)?;
 
     let (archive_id, file_id, dek) = match secrets {
@@ -54,7 +54,7 @@ pub(crate) fn build_encrypted_materials_with_secrets(
     hasher.update(plaintext);
     let overall_hash = *hasher.finalize().as_bytes();
 
-    let total_chunks = plaintext.len().div_ceil(options.chunk_size) as u32;
+    let total_chunks = checked_total_chunks(plaintext.len(), options.chunk_size)?;
 
     let wrapped = recipient_public_keys
         .iter()
@@ -95,16 +95,19 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         chunk_hasher.update(chunk);
         let chunk_record = ChunkPlain {
             chunk_index: idx as u32,
-            plain_len: chunk.len() as u32,
+            plain_len: u32::try_from(chunk.len())
+                .map_err(|_| ArchiveError::InvalidInput("chunk length exceeds u32 max"))?,
             payload_hash: *chunk_hasher.finalize().as_bytes(),
             payload: chunk.to_vec(),
         };
         let chunk_plain =
             rkyv::to_bytes::<RkyvError>(&chunk_record).map_err(|_| ArchiveError::Serialize)?;
-        let nonce = chunk_nonce(archive_id, idx as u32);
+        let chunk_index = u32::try_from(idx)
+            .map_err(|_| ArchiveError::InvalidInput("chunk index exceeds u32 max"))?;
+        let nonce = chunk_nonce(archive_id, chunk_index);
         let chunk_ct = aead_encrypt(&dek, &nonce, &[], &chunk_plain)?;
         chunks.push(EncryptedChunkRecord {
-            chunk_index: idx as u32,
+            chunk_index,
             chunk_ct,
         });
     }
@@ -250,9 +253,15 @@ pub(crate) fn partition_chunks(
 }
 
 pub(crate) fn validate_inputs(
+    plaintext: &[u8],
     recipient_public_keys: &[[u8; 32]],
     options: &ArchiveOptions,
 ) -> Result<(), ArchiveError> {
+    if plaintext.len() > crate::MAX_IN_MEMORY_PLAINTEXT_BYTES {
+        return Err(ArchiveError::InvalidInput(
+            "plaintext exceeds in-memory archive limit",
+        ));
+    }
     if recipient_public_keys.is_empty() {
         return Err(ArchiveError::InvalidInput(
             "at least one recipient key is required",
@@ -272,6 +281,11 @@ pub(crate) fn validate_inputs(
     Ok(())
 }
 
+fn checked_total_chunks(plaintext_len: usize, chunk_size: usize) -> Result<u32, ArchiveError> {
+    let count = plaintext_len.div_ceil(chunk_size);
+    u32::try_from(count).map_err(|_| ArchiveError::InvalidInput("total chunks exceeds u32 max"))
+}
+
 pub(crate) fn ensure_version(version: u8, expected: u8) -> Result<(), ArchiveError> {
     if version != expected {
         return Err(ArchiveError::UnsupportedVersion(version));
@@ -284,4 +298,18 @@ pub(crate) fn ensure_profile(profile: u8, expected: u8) -> Result<(), ArchiveErr
         return Err(ArchiveError::UnsupportedProfile(profile));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_total_chunks;
+    use crate::ArchiveError;
+
+    #[test]
+    fn total_chunks_rejects_values_that_would_repeat_a_nonce() {
+        assert!(matches!(
+            checked_total_chunks(usize::MAX, 1),
+            Err(ArchiveError::InvalidInput("total chunks exceeds u32 max"))
+        ));
+    }
 }

@@ -26,6 +26,10 @@
 //!   tests only. Production archive creation should keep the default randomized
 //!   builders so archive identifiers, DEKs, and wrapping ephemeral keys remain
 //!   unique per build.
+//! - The current byte-vector builders are deliberately capped at
+//!   [`MAX_IN_MEMORY_PLAINTEXT_BYTES`]. They are not a general large-file
+//!   streaming API; callers needing larger files must split at an application
+//!   boundary or wait for an authenticated streaming archive format.
 
 mod build;
 mod codec;
@@ -48,7 +52,7 @@ pub use split::{
 };
 pub use types::{
     ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveBuildSecrets, ArchiveOptions, DEFAULT_CHUNK_SIZE,
-    EncryptedHeader, FileManifest, MANIFEST_MAGIC, PART_MAGIC,
+    EncryptedHeader, FileManifest, MANIFEST_MAGIC, MAX_IN_MEMORY_PLAINTEXT_BYTES, PART_MAGIC,
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, SplitArchive, WIRE_VERSION_V0, WrappedDek,
 };
 
