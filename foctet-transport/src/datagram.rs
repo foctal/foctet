@@ -33,6 +33,8 @@ use foctet_core::{
 };
 use thiserror::Error;
 
+use crate::error::TransportErrorDisposition;
+
 /// A message-oriented datagram transport that sends and receives whole datagrams.
 ///
 /// The futures intentionally do **not** require `Send`, so the trait is usable
@@ -66,6 +68,24 @@ where
     /// The underlying datagram transport failed.
     #[error("datagram transport error: {0}")]
     Transport(E),
+}
+
+impl<E> DatagramChannelError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    /// Classifies whether this channel may safely continue after the error.
+    pub const fn disposition(&self) -> TransportErrorDisposition {
+        match self {
+            Self::Transport(_) => TransportErrorDisposition::Terminal,
+            Self::Core(error) => match error.disposition() {
+                foctet_core::CoreErrorDisposition::Recoverable => {
+                    TransportErrorDisposition::Recoverable
+                }
+                foctet_core::CoreErrorDisposition::Terminal => TransportErrorDisposition::Terminal,
+            },
+        }
+    }
 }
 
 /// A secure Foctet datagram channel over any [`DatagramTransport`].

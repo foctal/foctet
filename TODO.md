@@ -51,8 +51,9 @@ public input, including apparently authenticated payloads.
   subsequent use. `SyncIo`, `FoctetFramed`, `Session`, high-level channels,
   and WASM now do the same for receive/session-control failures. HTTP error
   mapping now exposes `HttpErrorDisposition`, and `CoreError` exposes a
-  recoverable/terminal disposition. Transport-specific error mapping and a
-  published cross-crate classification table remain.
+  recoverable/terminal disposition. Transport helper errors now expose
+  `TransportErrorDisposition`; a published cross-crate classification table
+  remains.
 
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 

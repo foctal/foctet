@@ -68,7 +68,7 @@ pub mod webtrans_browser;
 pub use adapter::SplitIo;
 pub use config::TransportConfig;
 pub use datagram::{DatagramChannelError, DatagramTransport, SecureDatagramChannel};
-pub use error::TransportChannelError;
+pub use error::{TransportChannelError, TransportErrorDisposition};
 #[cfg(feature = "runtime-futures")]
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
 pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};

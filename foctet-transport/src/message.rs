@@ -20,6 +20,8 @@
 use foctet_core::{CoreError, DecodedMessage, KeyHandle, MessageConfig, MessageEndpoint, Session};
 use thiserror::Error;
 
+use crate::error::TransportErrorDisposition;
+
 /// A message-oriented transport that sends and receives whole, discrete messages.
 ///
 /// The futures intentionally do **not** require `Send`, so the trait is usable
@@ -53,6 +55,24 @@ where
     /// The underlying message transport failed.
     #[error("message transport error: {0}")]
     Transport(E),
+}
+
+impl<E> MessageChannelError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    /// Classifies whether this channel may safely continue after the error.
+    pub const fn disposition(&self) -> TransportErrorDisposition {
+        match self {
+            Self::Transport(_) => TransportErrorDisposition::Terminal,
+            Self::Core(error) => match error.disposition() {
+                foctet_core::CoreErrorDisposition::Recoverable => {
+                    TransportErrorDisposition::Recoverable
+                }
+                foctet_core::CoreErrorDisposition::Terminal => TransportErrorDisposition::Terminal,
+            },
+        }
+    }
 }
 
 /// A secure Foctet message channel over any [`MessageTransport`].
