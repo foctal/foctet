@@ -384,6 +384,9 @@ impl FoctetSession {
     /// failure. Establish a fresh session instead of reusing it.
     #[wasm_bindgen(js_name = isTerminal)]
     pub fn is_terminal(&self) -> bool {
+        if self.session.state() == SessionState::Closed {
+            return true;
+        }
         match self.endpoint.as_ref() {
             Some(SessionEndpoint::Message(endpoint)) => endpoint.is_terminal(),
             Some(SessionEndpoint::Datagram(endpoint)) => endpoint.is_terminal(),
@@ -479,7 +482,14 @@ impl FoctetSession {
 
     fn handle_handshake_inner(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, CoreError> {
         let control = ControlMessage::decode(message)?;
-        let reply = self.session.handle_control(&control)?;
+        let reply = match self.session.handle_control(&control) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.pending_rekey = None;
+                self.endpoint = None;
+                return Err(error);
+            }
+        };
         self.ensure_endpoint();
         // A rekey control message rotates the session's active key; adopt it
         // on the framing endpoint so subsequent seals use the new key while
@@ -797,6 +807,7 @@ mod tests {
             .expect("server hello");
         // The initiator must reject the responder whose identity it did not pin.
         assert!(initiator.handle_handshake_inner(&server_hello).is_err());
+        assert!(initiator.is_terminal());
     }
 
     #[test]

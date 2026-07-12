@@ -317,8 +317,12 @@ impl Session {
         &mut self,
         msg: &ControlMessage,
     ) -> Result<Option<ControlMessage>, CoreError> {
+        if self.state == SessionState::Closed {
+            return Err(CoreError::TransportTerminal);
+        }
         let result = self.handle_control_inner(msg);
         if result.is_err() {
+            self.close();
             self.observer.emit(SessionEvent::ControlRejected);
         }
         result
@@ -515,6 +519,9 @@ impl Session {
         &mut self,
         plaintext_len: usize,
     ) -> Result<Option<PreparedRekey>, CoreError> {
+        if self.state == SessionState::Closed {
+            return Err(CoreError::TransportTerminal);
+        }
         if self.state != SessionState::Active {
             return Err(CoreError::InvalidSessionState);
         }
@@ -549,6 +556,9 @@ impl Session {
     /// `old_key_id` before calling [`Self::commit_rekey`]. Dropping it leaves
     /// the session unchanged.
     pub fn prepare_rekey(&self) -> Result<PreparedRekey, CoreError> {
+        if self.state == SessionState::Closed {
+            return Err(CoreError::TransportTerminal);
+        }
         if self.state != SessionState::Active {
             return Err(CoreError::InvalidSessionState);
         }
@@ -592,6 +602,9 @@ impl Session {
 
     /// Commits a rekey that was already accepted for outbound delivery.
     pub fn commit_rekey(&mut self, prepared: PreparedRekey) -> Result<(), CoreError> {
+        if self.state == SessionState::Closed {
+            return Err(CoreError::TransportTerminal);
+        }
         let active = self
             .active_keys
             .as_ref()
@@ -654,6 +667,14 @@ impl Session {
             }
         }
         self.active_keys = Some(next.into());
+    }
+
+    fn close(&mut self) {
+        self.state = SessionState::Closed;
+        self.can_rekey = false;
+        self.ratchet_root.zeroize();
+        self.active_keys = None;
+        self.previous_keys.clear();
     }
 
     fn verify_client_auth(
@@ -1139,7 +1160,11 @@ mod tests {
             .handle_control(&hello)
             .expect_err("default responder must reject unauthenticated hello");
         assert!(matches!(err, CoreError::MissingPeerAuthentication));
-        assert_eq!(server.state(), SessionState::WaitingPeerHello);
+        assert_eq!(server.state(), SessionState::Closed);
+        assert!(matches!(
+            server.handle_control(&hello),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]
@@ -1342,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn rekey_delivered_ahead_of_order_is_rejected_and_state_is_unchanged() {
+    fn rekey_delivered_ahead_of_order_closes_the_session() {
         // Out-of-order delivery in the *forward* direction: the receiver is
         // active on key `k`, but a `Rekey` arrives that rotates away from
         // `k + 1` — the transition a *future* rekey would name, as if a later
@@ -1373,22 +1398,13 @@ mod tests {
             .expect_err("a rekey skipping ahead of the active key must be rejected");
         assert!(matches!(err, CoreError::UnexpectedControlMessage));
 
-        // No key was installed and the ratchet did not advance: the genuine
-        // in-order rekey from the peer still lands on both sides.
-        assert_eq!(
-            server.active_keys().expect("server key").key_id,
-            active_id,
-            "rejected rekey must not rotate the active key"
-        );
+        assert_eq!(server.state(), SessionState::Closed);
+        assert!(server.active_keys().is_none(), "closed session drops keys");
         let rekey = client.force_rekey().expect("client force rekey");
-        server
-            .handle_control(&rekey)
-            .expect("in-order rekey still applies after the rejected one");
-        assert_eq!(
-            client.active_keys().expect("client key"),
-            server.active_keys().expect("server key"),
-            "both sides must still converge on the same key"
-        );
+        assert!(matches!(
+            server.handle_control(&rekey),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]

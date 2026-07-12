@@ -78,10 +78,12 @@ supported-version policy will accompany the first `v1` release.
   format. After a crash or restart, applications must establish a fresh session;
   restoring traffic keys with reset or uncertain outbound sequence state can reuse
   a nonce and is unsafe.
-- **Terminal protocol failures.** Message/datagram endpoints, `SyncIo`, and
-  `FoctetFramed` reject all subsequent use after an inbound authentication,
-  parser, replay, key, sequence, or session-control failure. Establish a fresh
-  authenticated session; do not continue after a potentially diverged channel.
+- **Terminal protocol failures.** `Session`, message/datagram endpoints,
+  `SyncIo`, `FoctetFramed`, and WASM session endpoints reject all subsequent
+  use after an inbound authentication, parser, replay, key, sequence, or
+  session-control failure. Session closure drops active and retained traffic
+  keys. Establish a fresh authenticated session; do not continue after a
+  potentially diverged channel.
 - **Replay protection** via per-`(key_id, stream_id)` sliding windows, committed
   **only after AEAD authentication** so a forged frame cannot desynchronize or
   DoS the receiver. The number of tracked windows is bounded

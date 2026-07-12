@@ -48,9 +48,9 @@ public input, including apparently authenticated payloads.
   cross-surface CPU/allocation limits and adversarial budget tests are open.
 - [ ] **P1-1** — Message and datagram endpoints are now terminal after inbound
   authentication, parser, replay, key, or sequence failures, and reject all
-  subsequent use. `SyncIo` and `FoctetFramed` now do the same for receive and
-  session-control failures; `Session` and high-level channel terminal state
-  remain incomplete.
+  subsequent use. `SyncIo`, `FoctetFramed`, `Session`, high-level channels,
+  and WASM now do the same for receive/session-control failures. HTTP error
+  mapping and an explicit complete error-classification table remain.
 
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 
