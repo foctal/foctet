@@ -26,8 +26,8 @@ pub(crate) fn wrap_dek_with_ephemeral_secret(
 ) -> Result<WrappedDek, ArchiveError> {
     let eph_priv = StaticSecret::from(ephemeral_secret);
     let eph_pub = PublicKey::from(&eph_priv);
-    let recipient = PublicKey::from(recipient_public);
-    let shared = Zeroizing::new(eph_priv.diffie_hellman(&recipient).to_bytes());
+    let shared = foctet_core::x25519_shared_secret(&eph_priv, recipient_public)
+        .map_err(|_| ArchiveError::InvalidRecipientKey)?;
 
     let mut okm = Zeroizing::new([0u8; 56]);
     let hk = Hkdf::<Sha256>::new(None, &shared[..]);
@@ -65,8 +65,10 @@ pub(crate) fn unwrap_dek_from_recipients(
             continue;
         }
 
-        let eph_pub = PublicKey::from(item.ephemeral_public);
-        let shared = Zeroizing::new(priv_key.diffie_hellman(&eph_pub).to_bytes());
+        // Do not distinguish a malicious low-order ephemeral key from a
+        // failed wrapper authentication to callers opening attacker input.
+        let shared = foctet_core::x25519_shared_secret(&priv_key, item.ephemeral_public)
+            .map_err(|_| ArchiveError::Aead)?;
 
         let mut okm = Zeroizing::new([0u8; 56]);
         let hk = Hkdf::<Sha256>::new(None, &shared[..]);

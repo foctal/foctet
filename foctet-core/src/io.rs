@@ -365,6 +365,7 @@ pub struct SyncIo<T> {
     default_flags: u8,
     next_seq: OutboundSequence,
     replay: ReplayProtector,
+    terminal: bool,
 }
 
 impl<T> SyncIo<T> {
@@ -386,6 +387,7 @@ impl<T> SyncIo<T> {
             default_flags: 0,
             next_seq: OutboundSequence::default(),
             replay: limits.replay_protector(),
+            terminal: false,
             limits,
         }
     }
@@ -440,6 +442,13 @@ impl<T> SyncIo<T> {
     /// an observability counter that carries no key material.
     pub fn replay_rejections(&self) -> u64 {
         self.replay.rejections()
+    }
+
+    /// Returns whether an ambiguous outbound I/O failure permanently closed
+    /// this wrapper. A closed wrapper must be discarded along with its session;
+    /// it cannot safely retry or emit another encrypted frame.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
     }
 
     /// Returns known key IDs, active first.
@@ -498,6 +507,9 @@ impl<T: Read + Write> SyncIo<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
         if plaintext.len() > self.limits.max_plaintext_len {
             return Err(CoreError::FrameTooLarge);
         }
@@ -509,14 +521,25 @@ impl<T: Read + Write> SyncIo<T> {
             self.next_seq.current(),
             plaintext,
         )?;
-        // Fail closed on sequence exhaustion: never wrap the counter, otherwise
-        // the `(key_id, stream_id, seq)` nonce would repeat under the same key.
-        // This mirrors the async `FoctetFramed` path exactly so the two
-        // implementations cannot diverge in their exhaustion policy.
+        // Reserve before the first byte reaches the transport. `write_all` may
+        // fail after emitting a prefix (or all bytes), and `flush` may fail
+        // after peer delivery. Consuming the sequence first prevents a retry
+        // from ever encrypting different plaintext under the same nonce.
         let next_seq = self.next_seq.prepared_next()?;
-        self.io.write_all(&frame.to_bytes())?;
-        self.io.flush()?;
         self.next_seq.commit(next_seq);
+
+        // Keep the exact serialized frame alive for the complete write. There
+        // is intentionally no resume API: any write/flush error has ambiguous
+        // delivery semantics, so the only safe default is terminal closure.
+        let serialized = frame.to_bytes();
+        if let Err(error) = self.io.write_all(&serialized) {
+            self.terminal = true;
+            return Err(CoreError::Io(error));
+        }
+        if let Err(error) = self.io.flush() {
+            self.terminal = true;
+            return Err(CoreError::Io(error));
+        }
         Ok(())
     }
 
@@ -721,6 +744,38 @@ mod tests {
         outbound: Vec<u8>,
     }
 
+    struct FailingWriteIo {
+        outbound: Vec<u8>,
+        fail_after: usize,
+        fail_flush: bool,
+    }
+
+    impl Read for FailingWriteIo {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for FailingWriteIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let remaining = self.fail_after.saturating_sub(self.outbound.len());
+            if remaining == 0 {
+                return Err(std::io::Error::other("injected write failure"));
+            }
+            let written = remaining.min(buf.len());
+            self.outbound.extend_from_slice(&buf[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_flush {
+                Err(std::io::Error::other("injected flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     impl Read for MockIo {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.inbound.is_empty() {
@@ -777,6 +832,57 @@ mod tests {
             "no wrapped frame may be written"
         );
         assert_eq!(io.next_seq.current(), u64::MAX);
+    }
+
+    #[test]
+    fn partial_write_failure_consumes_sequence_and_is_terminal() {
+        let keys = test_keys();
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: 7,
+            fail_flush: false,
+        };
+        let mut io = SyncIo::new(transport, keys, Direction::S2C, Direction::C2S);
+
+        assert!(matches!(io.send(b"first"), Err(CoreError::Io(_))));
+        assert!(io.is_terminal());
+        assert_eq!(
+            io.next_seq.current(),
+            1,
+            "reserved sequence is never reused"
+        );
+        let emitted = io.io.outbound.clone();
+
+        assert!(matches!(
+            io.send(b"different retry"),
+            Err(CoreError::TransportTerminal)
+        ));
+        assert_eq!(io.io.outbound, emitted, "terminal retry emits no bytes");
+    }
+
+    #[test]
+    fn flush_failure_after_complete_frame_is_terminal() {
+        let keys = test_keys();
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: usize::MAX,
+            fail_flush: true,
+        };
+        let mut io = SyncIo::new(transport, keys, Direction::S2C, Direction::C2S);
+
+        assert!(matches!(
+            io.send(b"complete but ambiguous"),
+            Err(CoreError::Io(_))
+        ));
+        assert!(io.is_terminal());
+        assert_eq!(io.next_seq.current(), 1);
+        let emitted = io.io.outbound.clone();
+
+        assert!(matches!(
+            io.send(b"retry"),
+            Err(CoreError::TransportTerminal)
+        ));
+        assert_eq!(io.io.outbound, emitted);
     }
 
     #[test]

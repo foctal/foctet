@@ -78,6 +78,21 @@ mod tests {
     }
 
     #[test]
+    fn wrapping_rejects_low_order_recipient_public_keys() {
+        let dek = [0xA5; 32];
+        for recipient_public in [[0u8; 32], {
+            let mut low_order = [0u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert!(matches!(
+                wrap_dek(&dek, recipient_public),
+                Err(ArchiveError::InvalidRecipientKey)
+            ));
+        }
+    }
+
+    #[test]
     fn archive_encrypt_decrypt_roundtrip() {
         let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();

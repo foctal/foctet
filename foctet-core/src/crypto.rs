@@ -253,13 +253,28 @@ impl EphemeralKeyPair {
     /// Computes shared secret with peer ephemeral public key.
     pub fn shared_secret(&self, peer_public: [u8; 32]) -> Result<[u8; 32], CoreError> {
         let private = StaticSecret::from(*self.private);
-        let peer = PublicKey::from(peer_public);
-        let shared = private.diffie_hellman(&peer).to_bytes();
-        if shared.iter().all(|byte| *byte == 0) {
-            return Err(CoreError::InvalidSharedSecret);
-        }
-        Ok(shared)
+        let shared = x25519_shared_secret(&private, peer_public)?;
+        Ok(*shared)
     }
+}
+
+/// Computes an X25519 shared secret and rejects the forbidden all-zero result.
+///
+/// X25519 accepts every 32-byte input at the type level. Some low-order public
+/// inputs, however, produce an all-zero shared secret. Callers must use this
+/// helper instead of calling `StaticSecret::diffie_hellman` directly so those
+/// inputs cannot turn a public recipient key into a predictable wrapping key.
+/// The returned secret is zeroized when dropped.
+pub fn x25519_shared_secret(
+    private: &StaticSecret,
+    peer_public: [u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, CoreError> {
+    let peer = PublicKey::from(peer_public);
+    let shared = Zeroizing::new(private.diffie_hellman(&peer).to_bytes());
+    if shared.iter().all(|byte| *byte == 0) {
+        return Err(CoreError::InvalidSharedSecret);
+    }
+    Ok(shared)
 }
 
 /// XChaCha20-Poly1305 authentication tag length, in bytes.
@@ -378,6 +393,31 @@ pub fn decrypt_frame_with_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x25519_dalek::StaticSecret;
+
+    #[test]
+    fn x25519_rejects_all_zero_and_low_order_public_inputs() {
+        let private = StaticSecret::from([0x42; 32]);
+        for public in [[0u8; 32], {
+            let mut low_order = [0u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert!(matches!(
+                x25519_shared_secret(&private, public),
+                Err(CoreError::InvalidSharedSecret)
+            ));
+        }
+    }
+
+    #[test]
+    fn ephemeral_key_pair_uses_shared_secret_helper() {
+        let pair = EphemeralKeyPair::generate();
+        assert!(matches!(
+            pair.shared_secret([0u8; 32]),
+            Err(CoreError::InvalidSharedSecret)
+        ));
+    }
 
     #[test]
     fn frame_roundtrip_encrypt_decrypt() {

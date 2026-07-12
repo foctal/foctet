@@ -75,6 +75,10 @@ pub enum BodyEnvelopeError {
     /// No matching recipient entry could be used.
     #[error("recipient not found")]
     RecipientNotFound,
+    /// A caller attempted to seal to an X25519 public key that produces a
+    /// forbidden all-zero shared secret.
+    #[error("invalid recipient public key")]
+    InvalidRecipientKey,
     /// Content-key unwrap failed for a selected recipient entry.
     #[error("content-key unwrap failed")]
     KeyUnwrapFailed,
@@ -548,8 +552,8 @@ pub(crate) fn wrap_content_key(
     eph_pub: [u8; 32],
     key_id: &[u8],
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
-    let recipient = PublicKey::from(recipient_public_key);
-    let shared = Zeroizing::new(eph_priv.diffie_hellman(&recipient).to_bytes());
+    let shared = crate::crypto::x25519_shared_secret(&eph_priv, recipient_public_key)
+        .map_err(|_| BodyEnvelopeError::InvalidRecipientKey)?;
 
     let (wrap_key, wrap_nonce) = derive_wrap_material(&shared, eph_pub, recipient_public_key)?;
 
@@ -574,9 +578,11 @@ pub(crate) fn unwrap_content_key(
 ) -> Result<[u8; CONTENT_KEY_LEN], BodyEnvelopeError> {
     let recipient_priv = StaticSecret::from(recipient_secret_key);
     let recipient_public = PublicKey::from(&recipient_priv).to_bytes();
-    let eph_pub = PublicKey::from(ephemeral_public_key);
-
-    let shared = Zeroizing::new(recipient_priv.diffie_hellman(&eph_pub).to_bytes());
+    // Deliberately collapse invalid peer keys into the same error as an
+    // authentication failure. An opener must not reveal whether a recipient
+    // entry matched its private key to an attacker controlling the envelope.
+    let shared = crate::crypto::x25519_shared_secret(&recipient_priv, ephemeral_public_key)
+        .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
     let (wrap_key, wrap_nonce) =
         derive_wrap_material(&shared, ephemeral_public_key, recipient_public)?;
 
@@ -747,6 +753,37 @@ mod tests {
         let out = open_body(&envelope, recipient_priv.to_bytes()).expect("open");
 
         assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn seal_rejects_low_order_recipient_public_keys() {
+        for recipient_public in [[0u8; 32], {
+            let mut low_order = [0u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert_eq!(
+                seal_body(b"secret", recipient_public, b"kid"),
+                Err(BodyEnvelopeError::InvalidRecipientKey)
+            );
+        }
+    }
+
+    #[test]
+    fn open_hides_low_order_ephemeral_key_as_wrapper_failure() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let mut envelope = seal_body(b"secret", recipient_pub, b"kid").expect("seal");
+
+        // The ephemeral public key immediately follows the fixed prefix and
+        // three single-byte varints in this small fixture.
+        let eph_offset = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+        envelope[eph_offset..eph_offset + 32].fill(0);
+
+        assert_eq!(
+            open_body(&envelope, recipient_priv.to_bytes()),
+            Err(BodyEnvelopeError::RecipientNotFound)
+        );
     }
 
     #[test]

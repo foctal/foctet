@@ -291,7 +291,7 @@ Draft v0 defines **Native**.
 
 *   Each side generates an ephemeral X25519 key pair.
 *   Ephemeral public keys are exchanged in control frames (§8.2.1 for the authentication trailer; the exact control-message wire layouts are fixed by `test-vectors/handshake-v0.json` and verified by the independent decoder in `interop/`).
-*   Derive shared secret `ss = X25519(eph_priv, peer_eph_pub)`. An all-zero `ss` MUST be rejected.
+*   Derive shared secret `ss = X25519(eph_priv, peer_eph_pub)`. An all-zero `ss` MUST be rejected. This rule applies to every X25519 use in this specification, including body-envelope and archive recipient wrapping. A sealing API MUST reject a low-order recipient public key; an opening API MUST treat a low-order attacker-supplied ephemeral key as a generic unwrap/authentication failure and MUST NOT disclose recipient matching information.
 *   Derive traffic keys:
     *   `prk = HKDF-Extract(salt=session_salt, IKM=ss)`
     *   `key_c2s = HKDF-Expand(prk, info="foctet c2s", L=keylen)`

@@ -48,6 +48,10 @@ pub enum ArchiveError {
     /// Caller-provided input parameters are invalid.
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
+    /// A caller attempted to wrap to an X25519 public key that produces a
+    /// forbidden all-zero shared secret.
+    #[error("invalid recipient public key")]
+    InvalidRecipientKey,
     /// Caller-provided deterministic build secrets are inconsistent.
     #[error("invalid build secrets: {0}")]
     InvalidBuildSecrets(&'static str),

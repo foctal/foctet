@@ -25,6 +25,21 @@ public input, including apparently authenticated payloads.
 
 ## P0 — fix before any further production recommendation
 
+### Implementation tracking (updated 2026-07-12)
+
+- [ ] **P0-1** — Synchronous `SyncIo` now reserves its sequence before writing
+  and permanently closes after write/flush failure, with partial-write and
+  flush-failure regression coverage. The equivalent state machine and failure
+  contract still need to be completed for framing, control/handshake/rekey,
+  and all adapters.
+- [x] **P0-2** — A shared zeroizing X25519 helper rejects all-zero shared
+  secrets for handshake, body envelopes (including streaming bodies), and
+  archive wrapping/unwrapping. Regression coverage includes all-zero and a
+  known low-order input on seal/open paths; documentation now specifies the
+  non-oracle error behavior.
+- [ ] **P0-3** — Not started. Rekey state is not yet transactional with its
+  control-frame delivery.
+
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 
 **Finding.** `SyncIo::send_with_key` encrypts at the current sequence number,

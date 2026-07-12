@@ -93,7 +93,7 @@ pub use control::{ControlMessage, ControlMessageKind, MAX_CONTROL_MESSAGE_LEN};
 pub use crypto::{
     Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
     derive_ratchet_root, derive_traffic_keys, dh_ratchet_step, encrypt_frame, make_nonce,
-    random_session_salt,
+    random_session_salt, x25519_shared_secret,
 };
 pub use datagram::{
     DATAGRAM_FRAME_OVERHEAD, DEFAULT_MAX_DATAGRAM_SIZE, DatagramConfig, DatagramEndpoint,
@@ -212,6 +212,11 @@ pub enum CoreError {
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The transport entered a terminal state after an ambiguous outbound I/O
+    /// failure. It must not be reused because the peer may have received a
+    /// frame whose delivery outcome cannot be determined locally.
+    #[error("transport is terminal after an ambiguous outbound send failure")]
+    TransportTerminal,
     /// X25519 produced a forbidden all-zero shared secret.
     #[error("invalid shared secret")]
     InvalidSharedSecret,
