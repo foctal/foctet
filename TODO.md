@@ -37,8 +37,10 @@ public input, including apparently authenticated payloads.
   archive wrapping/unwrapping. Regression coverage includes all-zero and a
   known low-order input on seal/open paths; documentation now specifies the
   non-oracle error behavior.
-- [ ] **P0-3** — Not started. Rekey state is not yet transactional with its
-  control-frame delivery.
+- [ ] **P0-3** — `Session` now supports an immutable prepare/commit rekey
+  transaction, and synchronous/async byte-stream automatic rekey commits only
+  after the old-key control frame enters the transport. Datagram workflows,
+  WASM, and replacement of the legacy immediate `force_rekey` API remain.
 
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 

@@ -499,23 +499,22 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         let app_payload = payload::encode_tlvs(&[app_tlv])?;
         this.enqueue_with_specific_key(this.active_key_id, flags, stream_id, &app_payload)?;
 
-        if let Some(ctrl) = session.on_outbound_payload(plaintext.len())? {
-            let ctrl_bytes = ctrl.encode();
-            let rekey_old = match ctrl {
-                ControlMessage::Rekey { old_key_id, .. } => Some(old_key_id),
-                _ => None,
-            };
-            if let Some(old_key_id) = rekey_old {
-                this.enqueue_with_specific_key(old_key_id, flags::IS_CONTROL, 0, &ctrl_bytes)?;
-                this.set_key_ring_from_session(session)?;
-            } else {
-                this.enqueue_with_specific_key(
-                    this.active_key_id,
-                    flags::IS_CONTROL,
-                    0,
-                    &ctrl_bytes,
-                )?;
+        if let Some(prepared) = session.on_outbound_payload(plaintext.len())? {
+            let ctrl_bytes = prepared.control_message().encode();
+            if let Err(error) = this.enqueue_with_specific_key(
+                prepared.old_key_id(),
+                flags::IS_CONTROL,
+                0,
+                &ctrl_bytes,
+            ) {
+                // The application frame was already queued. Continuing without
+                // its required rekey control would leave counters and peer
+                // expectations ambiguous, so discard this transport/session.
+                this.terminal = true;
+                return Err(error);
             }
+            session.commit_rekey(prepared)?;
+            this.set_key_ring_from_session(session)?;
         }
         Ok(())
     }
@@ -822,7 +821,7 @@ mod tests {
     use futures_sink::Sink;
 
     use crate::{
-        ControlMessage, CoreError,
+        ControlMessage, CoreError, RekeyThresholds, Session, SessionAuthConfig,
         crypto::{
             Direction, EphemeralKeyPair, KeyHandle, derive_traffic_keys, encrypt_frame,
             random_session_salt,
@@ -1025,6 +1024,54 @@ mod tests {
             Pin::new(&mut framed).poll_ready(&mut cx),
             Poll::Ready(Err(CoreError::TransportTerminal))
         ));
+    }
+
+    #[test]
+    fn auto_rekey_does_not_commit_when_control_cannot_be_enqueued() {
+        use crate::limits::ProtocolLimits;
+
+        let thresholds = RekeyThresholds {
+            max_frames: 1,
+            max_bytes: u64::MAX,
+            max_age: std::time::Duration::MAX,
+            max_previous_keys: 2,
+        };
+        let (mut initiator, hello) = Session::new_initiator_with_auth(
+            thresholds.clone(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut responder = Session::new_responder_with_auth(
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let server_hello = responder
+            .handle_control(&hello)
+            .expect("responder handles hello")
+            .expect("server hello");
+        initiator
+            .handle_control(&server_hello)
+            .expect("initiator completes handshake");
+        let active = initiator.active_keys().expect("active key");
+
+        // The application frame fits; the following rekey control does not.
+        let mut framed = FoctetFramed::new(
+            MemoryIo::default(),
+            active.clone(),
+            initiator.inbound_direction(),
+            initiator.outbound_direction(),
+        )
+        .with_limits(ProtocolLimits::default().with_max_buffered_tx_bytes(64));
+
+        let err = Pin::new(&mut framed)
+            .start_send_data_with_session(&mut initiator, 0, 0, b"x")
+            .expect_err("rekey control must exceed tx cap");
+        assert!(matches!(err, CoreError::OutboundBufferLimitExceeded));
+        assert!(framed.is_terminal());
+        assert_eq!(initiator.active_keys().expect("old key retained"), active);
+        assert!(
+            initiator.can_rekey(),
+            "failed enqueue must not hand over turn"
+        );
     }
 
     #[test]

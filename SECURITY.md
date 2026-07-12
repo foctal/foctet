@@ -124,6 +124,9 @@ documented, and thoroughly tested:
    Operational note: under strictly one-directional traffic the alternation can
    stall after one step (the quiet side never takes its turn); rekey
    periodically from both ends for continued ratcheting.
+   Byte-stream transports prepare the new ratchet generation, enqueue the
+   old-key control frame, and only then commit. An ambiguous output failure is
+   terminal because Foctet has no rekey-delivery acknowledgement.
 3. **Datagram support (near-complete).** A dedicated datagram API
    (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
    size cap, authenticate-before-replay, loss/reorder tolerant) ships with a

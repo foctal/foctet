@@ -657,17 +657,10 @@ impl<T: Read + Write> SyncIo<T> {
         let app_tlv = Tlv::application_data(plaintext)?;
         self.send_tlvs_with(flags, stream_id, &[app_tlv])?;
 
-        if let Some(ctrl) = session.on_outbound_payload(plaintext.len())? {
-            let rekey_old = match &ctrl {
-                ControlMessage::Rekey { old_key_id, .. } => Some(*old_key_id),
-                _ => None,
-            };
-            if let Some(old_key_id) = rekey_old {
-                self.send_control_with_key_id(0, old_key_id, &ctrl)?;
-                self.set_key_ring_from_session(session)?;
-            } else {
-                self.send_control(0, &ctrl)?;
-            }
+        if let Some(prepared) = session.on_outbound_payload(plaintext.len())? {
+            self.send_control_with_key_id(0, prepared.old_key_id(), prepared.control_message())?;
+            session.commit_rekey(prepared)?;
+            self.set_key_ring_from_session(session)?;
         }
         Ok(())
     }

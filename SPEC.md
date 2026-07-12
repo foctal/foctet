@@ -234,6 +234,13 @@ the `Rekey` control message (replacing the former random rekey salt). The
 receiver computes the same `dh` with its current ratchet private key against the
 new public, advancing identically.
 
+The sender MUST prepare the next root and traffic keys without activating them,
+enqueue the exact `Rekey` control frame under `old_key_id`, and activate the
+prepared generation only after the transport accepts that frame. If enqueueing
+is rejected, the session MUST remain on the old generation. If transmission is
+ambiguous after output begins, the transport/session MUST close; the protocol
+does not acknowledge rekey delivery or provide ratchet resynchronization.
+
 Rekeys **alternate** between the two peers: after a side initiates a rekey it MUST
 NOT initiate another until it has received one from the peer (`old_key_id` and the
 turn flag enforce this). This prevents the root chain from forking and ensures

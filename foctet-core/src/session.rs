@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use self::mono::MonoInstant;
 
@@ -51,8 +51,8 @@ use crate::{
     auth::{AuthenticatedPeer, HandshakeAuth, SessionAuthConfig},
     control::ControlMessage,
     crypto::{
-        Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, derive_ratchet_root,
-        derive_traffic_keys, dh_ratchet_step, random_session_salt,
+        Direction, EphemeralKeyPair, KeyHandle, derive_ratchet_root, derive_traffic_keys,
+        dh_ratchet_step, random_session_salt,
     },
     observe::{ObserverHandle, SessionEvent, SessionObserver},
 };
@@ -90,6 +90,47 @@ pub struct RekeyThresholds {
     pub max_age: Duration,
     /// Number of previous keys retained for inbound compatibility.
     pub max_previous_keys: usize,
+}
+
+/// An immutable, not-yet-committed outbound DH-ratchet transition.
+///
+/// A prepared rekey contains the control message that must be encrypted with
+/// the current (old) traffic key. It changes no session state until consumed by
+/// [`Session::commit_rekey`]. Transport integrations must enqueue that exact
+/// control message first, then commit; if output is rejected or ambiguous they
+/// must close rather than use the prepared next generation.
+pub struct PreparedRekey {
+    message: ControlMessage,
+    old_key_id: u8,
+    new_key_id: u8,
+    local_eph: EphemeralKeyPair,
+    ratchet_root: Zeroizing<[u8; 32]>,
+    next_keys: KeyHandle,
+}
+
+impl core::fmt::Debug for PreparedRekey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreparedRekey")
+            .field("message", &self.message)
+            .field("old_key_id", &self.old_key_id)
+            .field("new_key_id", &self.new_key_id)
+            .field("local_eph", &self.local_eph)
+            .field("ratchet_root", &"<redacted>")
+            .field("next_keys", &self.next_keys)
+            .finish()
+    }
+}
+
+impl PreparedRekey {
+    /// Returns the old-key control message to enqueue exactly once.
+    pub fn control_message(&self) -> &ControlMessage {
+        &self.message
+    }
+
+    /// Returns the key identifier that protects [`Self::control_message`].
+    pub fn old_key_id(&self) -> u8 {
+        self.old_key_id
+    }
 }
 
 impl Default for RekeyThresholds {
@@ -470,10 +511,10 @@ impl Session {
     }
 
     /// Records outbound payload usage and emits rekey control when needed.
-    pub fn on_outbound_payload(
+    pub(crate) fn on_outbound_payload(
         &mut self,
         plaintext_len: usize,
-    ) -> Result<Option<ControlMessage>, CoreError> {
+    ) -> Result<Option<PreparedRekey>, CoreError> {
         if self.state != SessionState::Active {
             return Err(CoreError::InvalidSessionState);
         }
@@ -486,8 +527,7 @@ impl Session {
         // we keep using the current key until the peer rekeys (which hands the
         // turn back) or the threshold is re-checked on a later send.
         if self.should_rekey() && self.can_rekey {
-            let msg = self.force_rekey()?;
-            return Ok(Some(msg));
+            return self.prepare_rekey().map(Some);
         }
 
         Ok(None)
@@ -503,14 +543,12 @@ impl Session {
         self.state == SessionState::Active && self.can_rekey
     }
 
-    /// Forces an immediate rekey (one DH-ratchet step) and returns the `Rekey`
-    /// control message to send to the peer.
+    /// Prepares an immediate rekey without changing this session.
     ///
-    /// Fails with [`CoreError::RekeyNotPermitted`] when it is the peer's turn to
-    /// ratchet: rekeys strictly alternate between the two sides so the root
-    /// chain never forks and both peers' ratchet keys rotate (giving forward
-    /// secrecy and post-compromise security in both directions).
-    pub fn force_rekey(&mut self) -> Result<ControlMessage, CoreError> {
+    /// The returned control message MUST be accepted by the transport under
+    /// `old_key_id` before calling [`Self::commit_rekey`]. Dropping it leaves
+    /// the session unchanged.
+    pub fn prepare_rekey(&self) -> Result<PreparedRekey, CoreError> {
         if self.state != SessionState::Active {
             return Err(CoreError::InvalidSessionState);
         }
@@ -535,29 +573,71 @@ impl Session {
         let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, new_key_id)?;
         dh.zeroize();
         let ratchet_public = new_eph.public;
-        self.local_eph = new_eph;
-        self.ratchet_root = new_root;
-        self.install_new_active_key(next);
-        // It is now the peer's turn to initiate the next rekey.
-        self.can_rekey = false;
+        let transcript_binding =
+            rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);
+        Ok(PreparedRekey {
+            message: ControlMessage::Rekey {
+                old_key_id,
+                new_key_id,
+                ratchet_public,
+                transcript_binding,
+            },
+            old_key_id,
+            new_key_id,
+            local_eph: new_eph,
+            ratchet_root: Zeroizing::new(new_root),
+            next_keys: KeyHandle::new(next),
+        })
+    }
 
+    /// Commits a rekey that was already accepted for outbound delivery.
+    pub fn commit_rekey(&mut self, prepared: PreparedRekey) -> Result<(), CoreError> {
+        let active = self
+            .active_keys
+            .as_ref()
+            .ok_or(CoreError::InvalidSessionState)?;
+        if self.state != SessionState::Active
+            || !self.can_rekey
+            || active.key_id != prepared.old_key_id
+            || prepared.next_keys.key_id != prepared.new_key_id
+        {
+            return Err(CoreError::InvalidSessionState);
+        }
+
+        let PreparedRekey {
+            old_key_id,
+            new_key_id,
+            local_eph,
+            ratchet_root,
+            next_keys,
+            ..
+        } = prepared;
+        self.local_eph = local_eph;
+        self.ratchet_root.zeroize();
+        self.ratchet_root = *ratchet_root;
+        self.install_new_active_key(next_keys);
+        self.can_rekey = false;
         self.outbound_frames = 0;
         self.outbound_bytes = 0;
         self.last_rekey_at = MonoInstant::now();
-
         self.observer.emit(SessionEvent::RekeyInitiated {
             old_key_id,
             new_key_id,
         });
+        Ok(())
+    }
 
-        let transcript_binding =
-            rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);
-        Ok(ControlMessage::Rekey {
-            old_key_id,
-            new_key_id,
-            ratchet_public,
-            transcript_binding,
-        })
+    /// Legacy immediate rekey API.
+    ///
+    /// This commits before the caller delivers the returned control message and
+    /// is therefore not suitable for a production transport. New integrations
+    /// must use [`Self::prepare_rekey`] and [`Self::commit_rekey`] around their
+    /// atomic output transaction.
+    pub fn force_rekey(&mut self) -> Result<ControlMessage, CoreError> {
+        let prepared = self.prepare_rekey()?;
+        let message = prepared.control_message().clone();
+        self.commit_rekey(prepared)?;
+        Ok(message)
     }
 
     fn should_rekey(&self) -> bool {
@@ -566,7 +646,7 @@ impl Session {
             || self.last_rekey_at.elapsed() >= self.thresholds.max_age
     }
 
-    fn install_new_active_key(&mut self, next: TrafficKeys) {
+    fn install_new_active_key(&mut self, next: impl Into<KeyHandle>) {
         if let Some(current) = self.active_keys.take() {
             self.previous_keys.insert(0, current);
             if self.previous_keys.len() > self.thresholds.max_previous_keys {
@@ -574,7 +654,7 @@ impl Session {
                     .truncate(self.thresholds.max_previous_keys);
             }
         }
-        self.active_keys = Some(KeyHandle::new(next));
+        self.active_keys = Some(next.into());
     }
 
     fn verify_client_auth(
@@ -1143,6 +1223,29 @@ mod tests {
             .handle_control(&rekey)
             .expect_err("replaying the same rekey message must be rejected");
         assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
+
+    #[test]
+    fn prepared_rekey_does_not_mutate_until_committed() {
+        let (mut client, mut server) = active_pair();
+        let old = client.active_keys().expect("active key");
+
+        let prepared = client.prepare_rekey().expect("prepare rekey");
+        assert_eq!(prepared.old_key_id(), old.key_id);
+        assert_eq!(client.active_keys().expect("still old key"), old);
+        assert!(client.can_rekey(), "prepare must not hand over the turn");
+
+        let message = prepared.control_message().clone();
+        client.commit_rekey(prepared).expect("commit rekey");
+        assert_eq!(
+            client.active_keys().expect("new key").key_id,
+            old.key_id + 1
+        );
+        assert!(!client.can_rekey());
+        server
+            .handle_control(&message)
+            .expect("peer applies committed rekey");
+        assert_eq!(client.active_keys(), server.active_keys());
     }
 
     #[test]

@@ -117,7 +117,7 @@ pub use replay::{
     DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow,
 };
 pub use secure_channel::{AsyncSecureChannel, SecureChannel};
-pub use session::{HandshakeRole, RekeyThresholds, Session, SessionState};
+pub use session::{HandshakeRole, PreparedRekey, RekeyThresholds, Session, SessionState};
 pub use storage::{
     StorageRecord, open_storage_record, open_storage_record_with_limits, seal_storage_record,
     seal_storage_record_with_limits,
