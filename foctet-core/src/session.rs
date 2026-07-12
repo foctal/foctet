@@ -537,7 +537,7 @@ impl Session {
     ///
     /// Rekeys strictly alternate: the initiator holds the first turn, and each
     /// applied rekey hands the turn to the other side. When this returns
-    /// `false`, [`Session::force_rekey`] fails with
+    /// `false`, [`Session::prepare_rekey`] fails with
     /// [`CoreError::RekeyNotPermitted`].
     pub fn can_rekey(&self) -> bool {
         self.state == SessionState::Active && self.can_rekey
@@ -627,12 +627,11 @@ impl Session {
         Ok(())
     }
 
-    /// Legacy immediate rekey API.
+    /// Test-only convenience that commits a prepared rekey immediately.
     ///
-    /// This commits before the caller delivers the returned control message and
-    /// is therefore not suitable for a production transport. New integrations
-    /// must use [`Self::prepare_rekey`] and [`Self::commit_rekey`] around their
-    /// atomic output transaction.
+    /// Production code must use [`Self::prepare_rekey`] and
+    /// [`Self::commit_rekey`] around its atomic output transaction.
+    #[cfg(test)]
     pub fn force_rekey(&mut self) -> Result<ControlMessage, CoreError> {
         let prepared = self.prepare_rekey()?;
         let message = prepared.control_message().clone();
