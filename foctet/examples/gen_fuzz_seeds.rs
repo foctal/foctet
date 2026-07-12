@@ -74,7 +74,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .handle_control(&client_hello)?
         .ok_or("responder must produce a server hello")?;
     initiator.handle_control(&server_hello)?;
-    let rekey = initiator.force_rekey()?;
+    let prepared = initiator.prepare_rekey()?;
+    let rekey = prepared.control_message().clone();
+    initiator.commit_rekey(prepared)?;
 
     for (name, msg) in [
         ("client_hello", &client_hello),

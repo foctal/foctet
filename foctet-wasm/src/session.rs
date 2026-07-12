@@ -15,12 +15,12 @@
 //!
 //! Datagram sessions still require a reliable channel for the handshake and
 //! rekey control messages. In-session rekey is available through `canRekey`,
-//! `forceRekey`, and `handleControlMessage`.
+//! `prepareRekey`, `commitRekey`, and `handleControlMessage`.
 
 use foctet_core::{
     ChannelBinding, ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram,
-    DecodedMessage, IdentityKeyPair, MessageEndpoint, PeerIdentity, RekeyThresholds, Session,
-    SessionAuthConfig, SessionState,
+    DecodedMessage, IdentityKeyPair, MessageEndpoint, PeerIdentity, PreparedRekey, RekeyThresholds,
+    Session, SessionAuthConfig, SessionState,
 };
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
@@ -273,6 +273,7 @@ pub struct FoctetSession {
     kind: TransportKind,
     endpoint: Option<SessionEndpoint>,
     pending_handshake: Option<Vec<u8>>,
+    pending_rekey: Option<PreparedRekey>,
 }
 
 #[wasm_bindgen]
@@ -349,15 +350,21 @@ impl FoctetSession {
         self.session.can_rekey()
     }
 
-    /// Performs one DH-ratchet rekey step and returns the control message to
-    /// send to the peer **over the reliable channel**. This side's keys rotate
-    /// immediately; the peer rotates when it feeds the message to
-    /// [`Self::handle_control_message`].
-    ///
-    /// Throws when it is the peer's turn to rekey (`canRekey() === false`).
-    #[wasm_bindgen(js_name = forceRekey)]
-    pub fn force_rekey(&mut self) -> Result<Vec<u8>, JsError> {
-        self.force_rekey_inner().map_err(core_to_js)
+    /// Prepares one DH-ratchet rekey and returns the exact control message to
+    /// send over the reliable channel. This side remains on the old key until
+    /// [`Self::commit_rekey`] is called after the transport accepts those bytes.
+    #[wasm_bindgen(js_name = prepareRekey)]
+    pub fn prepare_rekey(&mut self) -> Result<Vec<u8>, JsError> {
+        self.prepare_rekey_inner().map_err(core_to_js)
+    }
+
+    /// Commits the rekey previously returned by [`Self::prepare_rekey`]. Call
+    /// this only after the exact bytes were accepted by the transport. If send
+    /// outcome is ambiguous, discard this session instead of committing or
+    /// retrying with different bytes.
+    #[wasm_bindgen(js_name = commitRekey)]
+    pub fn commit_rekey(&mut self) -> Result<(), JsError> {
+        self.commit_rekey_inner().map_err(core_to_js)
     }
 
     /// The identifier of the traffic key currently used for sealing, or
@@ -445,6 +452,7 @@ impl FoctetSession {
             kind,
             endpoint: None,
             pending_handshake: Some(hello.encode()),
+            pending_rekey: None,
         }
     }
 
@@ -454,6 +462,7 @@ impl FoctetSession {
             kind,
             endpoint: None,
             pending_handshake: None,
+            pending_rekey: None,
         }
     }
 
@@ -468,10 +477,24 @@ impl FoctetSession {
         Ok(reply.map(|msg| msg.encode()))
     }
 
-    fn force_rekey_inner(&mut self) -> Result<Vec<u8>, CoreError> {
-        let msg = self.session.force_rekey()?;
+    fn prepare_rekey_inner(&mut self) -> Result<Vec<u8>, CoreError> {
+        if self.pending_rekey.is_some() {
+            return Err(CoreError::InvalidSessionState);
+        }
+        let prepared = self.session.prepare_rekey()?;
+        let message = prepared.control_message().encode();
+        self.pending_rekey = Some(prepared);
+        Ok(message)
+    }
+
+    fn commit_rekey_inner(&mut self) -> Result<(), CoreError> {
+        let prepared = self
+            .pending_rekey
+            .take()
+            .ok_or(CoreError::InvalidSessionState)?;
+        self.session.commit_rekey(prepared)?;
         self.sync_endpoint_keys();
-        Ok(msg.encode())
+        Ok(())
     }
 
     /// Installs the session's current active key on the framing endpoint
@@ -788,7 +811,7 @@ mod tests {
         // The initiator holds the first ratchet turn; the responder does not.
         assert!(initiator.session.can_rekey());
         assert!(!responder.session.can_rekey());
-        assert!(responder.force_rekey_inner().is_err());
+        assert!(responder.prepare_rekey_inner().is_err());
 
         // A frame sealed under the old key, delivered after the rekey below,
         // must still open (previous key generations are retained).
@@ -796,7 +819,13 @@ mod tests {
             .seal_message_inner(1, 0, b"sealed before rekey")
             .expect("seal under old key");
 
-        let rekey = initiator.force_rekey_inner().expect("initiator rekeys");
+        let rekey = initiator
+            .prepare_rekey_inner()
+            .expect("initiator prepares rekey");
+        assert!(initiator.session.can_rekey(), "prepare must not rotate yet");
+        initiator
+            .commit_rekey_inner()
+            .expect("initiator commits rekey");
         assert!(
             !initiator.session.can_rekey(),
             "after rekeying, the turn passes to the peer"
@@ -833,7 +862,12 @@ mod tests {
         );
 
         // And the responder can now take its turn.
-        let rekey_back = responder.force_rekey_inner().expect("responder rekeys");
+        let rekey_back = responder
+            .prepare_rekey_inner()
+            .expect("responder prepares rekey");
+        responder
+            .commit_rekey_inner()
+            .expect("responder commits rekey");
         initiator
             .handle_handshake_inner(&rekey_back)
             .expect("initiator applies the responder's rekey");
@@ -876,7 +910,12 @@ mod tests {
             .expect("seal under old key");
 
         // The rekey control message itself travels over the reliable channel.
-        let rekey = initiator.force_rekey_inner().expect("initiator rekeys");
+        let rekey = initiator
+            .prepare_rekey_inner()
+            .expect("initiator prepares rekey");
+        initiator
+            .commit_rekey_inner()
+            .expect("initiator commits rekey");
         responder
             .handle_handshake_inner(&rekey)
             .expect("responder applies rekey");

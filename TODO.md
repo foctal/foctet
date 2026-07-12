@@ -38,9 +38,10 @@ public input, including apparently authenticated payloads.
   known low-order input on seal/open paths; documentation now specifies the
   non-oracle error behavior.
 - [ ] **P0-3** — `Session` now supports an immutable prepare/commit rekey
-  transaction, and synchronous/async byte-stream automatic rekey commits only
-  after the old-key control frame enters the transport. Datagram workflows,
-  WASM, and replacement of the legacy immediate `force_rekey` API remain.
+  transaction; synchronous/async byte-stream automatic rekey and WASM use it,
+  and datagram tests use it for their reliable control channel. Replacement of
+  the native legacy immediate `force_rekey` API and real control-channel
+  delivery integration for every datagram adapter remain.
 
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 

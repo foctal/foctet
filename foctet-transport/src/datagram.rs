@@ -265,7 +265,13 @@ mod tests {
 
         // Rekey the sessions over the (reliable) control channel, then adopt the
         // rotated key into both datagram channels.
-        let rekey = session_init.force_rekey().expect("initiator rekeys");
+        let prepared = session_init
+            .prepare_rekey()
+            .expect("initiator prepares rekey");
+        let rekey = prepared.control_message().clone();
+        session_init
+            .commit_rekey(prepared)
+            .expect("initiator commits rekey");
         session_resp
             .handle_control(&rekey)
             .expect("responder applies rekey");
