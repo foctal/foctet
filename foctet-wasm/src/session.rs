@@ -380,6 +380,17 @@ impl FoctetSession {
         self.session.state() == SessionState::Active
     }
 
+    /// Whether the message/datagram endpoint is terminal after a protocol
+    /// failure. Establish a fresh session instead of reusing it.
+    #[wasm_bindgen(js_name = isTerminal)]
+    pub fn is_terminal(&self) -> bool {
+        match self.endpoint.as_ref() {
+            Some(SessionEndpoint::Message(endpoint)) => endpoint.is_terminal(),
+            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.is_terminal(),
+            None => false,
+        }
+    }
+
     /// Whether the peer proved a pinned identity during the handshake.
     #[wasm_bindgen(js_name = peerAuthenticated)]
     pub fn peer_authenticated(&self) -> bool {
@@ -626,18 +637,8 @@ mod tests {
 
         // A duplicate frame must be rejected as a replay.
         assert!(responder.open_message_inner(&frame).is_err());
-
-        // Reverse direction works too.
-        let back = responder
-            .seal_message_inner(7, 0, b"reply")
-            .expect("seal back");
-        assert_eq!(
-            initiator
-                .open_message_inner(&back)
-                .expect("open back")
-                .plaintext,
-            b"reply"
-        );
+        assert!(responder.is_terminal());
+        assert!(responder.seal_message_inner(7, 0, b"reply").is_err());
     }
 
     #[test]

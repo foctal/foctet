@@ -17,6 +17,9 @@
 //!   still used, so duplicate or reordered messages (e.g. from a buggy or hostile
 //!   peer) are rejected, and **replay state is committed only after AEAD
 //!   authentication**.
+//! - **Fail-closed endpoint lifetime.** Authentication, parsing, replay, key,
+//!   or sequence failures make an endpoint terminal; applications must create
+//!   a fresh authenticated session rather than continue on a diverged channel.
 //!
 //! Outbound sequence numbers are tracked per `(key_id, stream_id)` and fail
 //! closed on exhaustion, so a `(key_id, stream_id, seq)` nonce is never reused.
@@ -94,6 +97,7 @@ pub struct MessageEndpoint {
     next_seq: HashMap<(u8, u32), OutboundSequence>,
     replay: ReplayProtector,
     max_message_size: usize,
+    terminal: bool,
 }
 
 impl MessageEndpoint {
@@ -128,6 +132,7 @@ impl MessageEndpoint {
             replay: ReplayProtector::new(config.replay_window)
                 .with_max_windows(config.max_replay_windows),
             max_message_size: config.max_message_size.max(MESSAGE_FRAME_OVERHEAD + 1),
+            terminal: false,
         }
     }
 
@@ -152,6 +157,11 @@ impl MessageEndpoint {
     /// carries no key material.
     pub fn replay_rejections(&self) -> u64 {
         self.replay.rejections()
+    }
+
+    /// Returns whether a protocol failure made this endpoint terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
     }
 
     /// Returns known key IDs, active first.
@@ -193,6 +203,9 @@ impl MessageEndpoint {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
         let keys = self.active_keys()?.clone();
         let key_id = keys.key_id;
         let sequence = self
@@ -217,7 +230,13 @@ impl MessageEndpoint {
 
         // Reserve the next sequence only after the message is known to be
         // emittable, so a rejected message never consumes a nonce.
-        let next = sequence.prepared_next()?;
+        let next = match sequence.prepared_next() {
+            Ok(next) => next,
+            Err(error) => {
+                self.terminal = true;
+                return Err(error);
+            }
+        };
         self.next_seq.insert((key_id, stream_id), next);
         Ok(bytes)
     }
@@ -227,6 +246,17 @@ impl MessageEndpoint {
     /// The message MUST contain exactly one complete frame and no trailing
     /// bytes. The ciphertext is authenticated before replay state is committed.
     pub fn open(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.open_inner(message);
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn open_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
         if message.len() > self.max_message_size {
             return Err(CoreError::FrameTooLarge);
         }
@@ -309,6 +339,11 @@ mod tests {
 
         let err = server.open(&m1).expect_err("duplicate rejected");
         assert!(matches!(err, CoreError::Replay));
+        assert!(server.is_terminal());
+        assert!(matches!(
+            server.open(&m0),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]
@@ -335,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_state_committed_only_after_auth() {
+    fn authentication_failure_makes_message_endpoint_terminal() {
         let (mut client, mut server) = endpoints();
         let mut forged = client.seal(0, 0, b"forged").expect("seal");
         let last = forged.len() - 1;
@@ -343,11 +378,10 @@ mod tests {
 
         let err = server.open(&forged).expect_err("forged must fail auth");
         assert!(matches!(err, CoreError::Aead));
+        assert!(server.is_terminal());
 
-        // The forged message must not have advanced the replay window, so a
-        // genuine message on a fresh stream is still accepted.
         let m = client.seal(1, 0, b"genuine").expect("seal new stream");
-        assert_eq!(server.open(&m).expect("genuine").plaintext, b"genuine");
+        assert!(matches!(server.open(&m), Err(CoreError::TransportTerminal)));
     }
 
     #[test]

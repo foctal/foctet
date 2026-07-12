@@ -16,6 +16,9 @@
 //!   dropped or reordered datagrams do not break the channel.
 //! - **Replay state is committed only after AEAD authentication**, so a forged
 //!   datagram cannot advance the window (matching the stream paths).
+//! - **Fail-closed endpoint lifetime.** Authentication, parsing, replay, key,
+//!   or sequence failures make an endpoint terminal; applications must create
+//!   a fresh authenticated session rather than continue on a diverged channel.
 //! - **Anti-amplification** (not sending many bytes to an unverified peer) is a
 //!   transport-layer responsibility and is documented for adapters; this codec
 //!   does not itself send data.
@@ -92,6 +95,7 @@ pub struct DatagramEndpoint {
     next_seq: HashMap<(u8, u32), OutboundSequence>,
     replay: ReplayProtector,
     max_datagram_size: usize,
+    terminal: bool,
 }
 
 impl DatagramEndpoint {
@@ -126,6 +130,7 @@ impl DatagramEndpoint {
             replay: ReplayProtector::new(config.replay_window)
                 .with_max_windows(config.max_replay_windows),
             max_datagram_size: config.max_datagram_size.max(DATAGRAM_FRAME_OVERHEAD + 1),
+            terminal: false,
         }
     }
 
@@ -150,6 +155,11 @@ impl DatagramEndpoint {
     /// carries no key material.
     pub fn replay_rejections(&self) -> u64 {
         self.replay.rejections()
+    }
+
+    /// Returns whether a protocol failure made this endpoint terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
     }
 
     /// Returns known key IDs, active first.
@@ -191,6 +201,9 @@ impl DatagramEndpoint {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
         let keys = self.active_keys()?.clone();
         let key_id = keys.key_id;
         let sequence = self
@@ -215,7 +228,13 @@ impl DatagramEndpoint {
 
         // Reserve the next sequence only after the datagram is known to be
         // emittable, so a rejected datagram never consumes a nonce.
-        let next = sequence.prepared_next()?;
+        let next = match sequence.prepared_next() {
+            Ok(next) => next,
+            Err(error) => {
+                self.terminal = true;
+                return Err(error);
+            }
+        };
         self.next_seq.insert((key_id, stream_id), next);
         Ok(bytes)
     }
@@ -225,6 +244,17 @@ impl DatagramEndpoint {
     /// The datagram MUST contain exactly one complete frame and no trailing
     /// bytes. The ciphertext is authenticated before replay state is committed.
     pub fn open(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.open_inner(datagram);
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn open_inner(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
         if datagram.len() > self.max_datagram_size {
             return Err(CoreError::FrameTooLarge);
         }
@@ -300,6 +330,11 @@ mod tests {
         // A duplicate is rejected as a replay.
         let err = server.open(&d1).expect_err("duplicate rejected");
         assert!(matches!(err, CoreError::Replay));
+        assert!(server.is_terminal());
+        assert!(matches!(
+            server.open(&d0),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]
@@ -329,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_state_committed_only_after_auth() {
+    fn authentication_failure_makes_datagram_endpoint_terminal() {
         let (mut client, mut server) = endpoints();
         // Forge a high-sequence datagram by corrupting an authentic one.
         let _warm = client.seal(0, 0, b"warm");
@@ -339,11 +374,13 @@ mod tests {
 
         let err = server.open(&forged).expect_err("forged must fail auth");
         assert!(matches!(err, CoreError::Aead));
+        assert!(server.is_terminal());
 
-        // The forged datagram must not have advanced the replay window, so the
-        // genuine low-sequence datagrams are still accepted.
         let d0 = client.seal(1, 0, b"genuine").expect("seal new stream");
-        assert_eq!(server.open(&d0).expect("genuine").plaintext, b"genuine");
+        assert!(matches!(
+            server.open(&d0),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]
