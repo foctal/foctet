@@ -1,6 +1,17 @@
 use foctet_core::BodyEnvelopeError;
 use thiserror::Error;
 
+/// Required caller action after an HTTP protection error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpErrorDisposition {
+    /// Reject the current request/response without retrying its protected
+    /// payload. A new request requires a new message ID and fresh context.
+    Reject,
+    /// The request was not cryptographically accepted; retry is possible only
+    /// according to application idempotency and replay-store policy.
+    Retryable,
+}
+
 /// Error type for HTTP integration over `foctet-core` body envelopes.
 #[derive(Debug, Error)]
 pub enum HttpError {
@@ -38,4 +49,36 @@ pub enum HttpError {
     /// cancelled); the partial plaintext must be discarded.
     #[error("streaming body incomplete (no final chunk)")]
     StreamIncomplete,
+}
+
+impl HttpError {
+    /// Classifies the required handling of this stateless HTTP operation.
+    pub const fn disposition(&self) -> HttpErrorDisposition {
+        match self {
+            Self::ReplayStore(_) => HttpErrorDisposition::Retryable,
+            Self::MissingContentType
+            | Self::InvalidContentType
+            | Self::SealFailed(_)
+            | Self::OpenFailed(_)
+            | Self::MissingContext(_)
+            | Self::InvalidContext(_)
+            | Self::ContextTimestampInFuture
+            | Self::ContextExpired
+            | Self::Replayed
+            | Self::StreamIncomplete => HttpErrorDisposition::Reject,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpError, HttpErrorDisposition};
+
+    #[test]
+    fn classifies_expired_context_as_rejected() {
+        assert_eq!(
+            HttpError::ContextExpired.disposition(),
+            HttpErrorDisposition::Reject
+        );
+    }
 }

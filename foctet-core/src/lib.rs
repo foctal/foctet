@@ -125,6 +125,17 @@ pub use storage::{
 
 use thiserror::Error;
 
+/// Required action after a [`CoreError`] on a stateful protocol endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoreErrorDisposition {
+    /// The operation was rejected before state changed; the endpoint may be
+    /// used again with corrected input or after backpressure is relieved.
+    Recoverable,
+    /// The endpoint/session must be discarded and a fresh authenticated
+    /// session established. Continuing could conceal state divergence.
+    Terminal,
+}
+
 /// Core protocol error type.
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -242,4 +253,68 @@ pub enum CoreError {
     /// (rate limiting); retry later or drop the connection.
     #[error("handshake rate limited")]
     HandshakeRateLimited,
+}
+
+impl CoreError {
+    /// Classifies whether a stateful endpoint may safely continue after this
+    /// error. Stateless helpers may surface the same errors without retaining
+    /// protocol state; callers of those helpers should apply their own scope.
+    pub const fn disposition(&self) -> CoreErrorDisposition {
+        match self {
+            Self::FrameTooLarge
+            | Self::OutboundBufferLimitExceeded
+            | Self::TlvTooLarge
+            | Self::HandshakeRateLimited => CoreErrorDisposition::Recoverable,
+            Self::InvalidHeaderLength(_)
+            | Self::InvalidMagic
+            | Self::UnsupportedVersion(_)
+            | Self::UnsupportedProfile(_)
+            | Self::UnknownFlags(_)
+            | Self::CiphertextLengthMismatch { .. }
+            | Self::Aead
+            | Self::Hkdf
+            | Self::InvalidKeyLength
+            | Self::UnexpectedKeyId { .. }
+            | Self::InvalidControlMessage
+            | Self::UnexpectedControlMessage
+            | Self::InvalidSessionState
+            | Self::RekeyNotPermitted
+            | Self::MissingSessionSecret
+            | Self::InvalidTlv
+            | Self::Replay
+            | Self::ReplayWindowExceeded
+            | Self::ReplayCapacityExceeded
+            | Self::UnexpectedEof
+            | Self::Io(_)
+            | Self::TransportTerminal
+            | Self::InvalidSharedSecret
+            | Self::SequenceExhausted
+            | Self::KeyIdExhausted
+            | Self::MissingPeerAuthentication
+            | Self::InvalidPeerAuthentication
+            | Self::PeerIdentityMismatch
+            | Self::HandshakeTimeout => CoreErrorDisposition::Terminal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_disposition_tests {
+    use super::{CoreError, CoreErrorDisposition};
+
+    #[test]
+    fn classifies_backpressure_as_recoverable_and_protocol_failures_as_terminal() {
+        assert_eq!(
+            CoreError::OutboundBufferLimitExceeded.disposition(),
+            CoreErrorDisposition::Recoverable
+        );
+        assert_eq!(
+            CoreError::Aead.disposition(),
+            CoreErrorDisposition::Terminal
+        );
+        assert_eq!(
+            CoreError::SequenceExhausted.disposition(),
+            CoreErrorDisposition::Terminal
+        );
+    }
 }

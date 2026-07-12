@@ -48,7 +48,7 @@ pub use context::{
     ContextBinding, ContextCarrier, ContextDirection, DEFAULT_CONTEXT_TTL_SECS,
     DEFAULT_MAX_CLOCK_SKEW_SECS, MESSAGE_ID_LEN, ProtectedContext,
 };
-pub use error::HttpError;
+pub use error::{HttpError, HttpErrorDisposition};
 // Re-exported because it appears in public signatures (`HttpSealOptions`,
 // `open_request_stream`, `HttpStreamSealer::for_request`, …), so callers do not
 // need a direct `foctet-core` dependency to name it.
