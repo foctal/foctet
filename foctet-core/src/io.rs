@@ -572,6 +572,17 @@ impl<T: Read + Write> SyncIo<T> {
 
     /// Receives and decrypts one frame payload.
     pub fn recv(&mut self) -> Result<Vec<u8>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.recv_inner();
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn recv_inner(&mut self) -> Result<Vec<u8>, CoreError> {
         let mut header_buf = [0u8; FRAME_HEADER_LEN];
         self.io.read_exact(&mut header_buf)?;
         let header = FrameHeader::decode(&header_buf)?;
@@ -667,6 +678,20 @@ impl<T: Read + Write> SyncIo<T> {
 
     /// Receives next frame and applies session-aware control handling.
     pub fn recv_application_with_session(
+        &mut self,
+        session: &mut Session,
+    ) -> Result<Option<Vec<u8>>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.recv_application_with_session_inner(session);
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn recv_application_with_session_inner(
         &mut self,
         session: &mut Session,
     ) -> Result<Option<Vec<u8>>, CoreError> {
@@ -879,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_replay_state_committed_only_after_auth() {
+    fn authentication_failure_makes_sync_io_terminal() {
         let keys = test_keys();
 
         // Receiver treats inbound traffic as the C2S direction, so the peer
@@ -902,14 +927,9 @@ mod tests {
             .recv()
             .expect_err("forged frame must fail authentication");
         assert!(matches!(err, CoreError::Aead));
+        assert!(io.is_terminal());
 
-        // Because replay state is only committed after authentication, the
-        // forged seq=1_000_000 must NOT have advanced the window. The genuine
-        // seq=0 frame is therefore still accepted.
-        let plaintext = io
-            .recv()
-            .expect("legitimate low-sequence frame after forgery");
-        assert_eq!(plaintext, b"hello");
+        assert!(matches!(io.recv(), Err(CoreError::TransportTerminal)));
     }
 
     #[test]

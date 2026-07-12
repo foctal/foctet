@@ -526,13 +526,28 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         frame: DecodedFrame,
     ) -> Result<Option<Vec<u8>>, CoreError> {
         let this = self.get_mut();
+        if this.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = this.handle_incoming_with_session_inner(session, frame);
+        if result.is_err() {
+            this.terminal = true;
+        }
+        result
+    }
+
+    fn handle_incoming_with_session_inner(
+        &mut self,
+        session: &mut Session,
+        frame: DecodedFrame,
+    ) -> Result<Option<Vec<u8>>, CoreError> {
         if frame.header.flags & flags::IS_CONTROL != 0 {
             let msg = ControlMessage::decode(&frame.plaintext)?;
             let response = session.handle_control(&msg)?;
-            this.set_key_ring_from_session(session)?;
+            self.set_key_ring_from_session(session)?;
             if let Some(resp) = response {
-                this.enqueue_with_specific_key(
-                    this.active_key_id,
+                self.enqueue_with_specific_key(
+                    self.active_key_id,
                     flags::IS_CONTROL,
                     0,
                     &resp.encode(),
@@ -628,12 +643,18 @@ impl<T: PollIo + Unpin> Stream for FoctetFramed<T> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.terminal {
+            return Poll::Ready(Some(Err(CoreError::TransportTerminal)));
+        }
 
         loop {
             match this.try_decode() {
                 Ok(Some(frame)) => return Poll::Ready(Some(Ok(frame))),
                 Ok(None) => {}
-                Err(e) => return Poll::Ready(Some(Err(e))),
+                Err(e) => {
+                    this.terminal = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
             }
 
             if this.eof {
@@ -643,7 +664,13 @@ impl<T: PollIo + Unpin> Stream for FoctetFramed<T> {
                 return Poll::Ready(Some(Err(CoreError::UnexpectedEof)));
             }
 
-            ready!(this.poll_fill_rx(cx))?;
+            match ready!(this.poll_fill_rx(cx)) {
+                Ok(()) => {}
+                Err(error) => {
+                    this.terminal = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
+            }
         }
     }
 }
@@ -1075,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn async_replay_state_committed_only_after_auth() {
+    fn authentication_failure_makes_framed_transport_terminal() {
         let eph_a = EphemeralKeyPair::generate();
         let eph_b = EphemeralKeyPair::generate();
         let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
@@ -1099,12 +1126,12 @@ mod tests {
             Poll::Ready(Some(Err(CoreError::Aead))) => {}
             other => panic!("expected aead failure, got {other:?}"),
         }
+        assert!(framed.is_terminal());
 
-        // The forged high sequence must not have advanced the replay window.
         framed.get_mut().push_inbound(&valid.to_bytes());
         match Pin::new(&mut framed).poll_next(&mut cx) {
-            Poll::Ready(Some(Ok(frame))) => assert_eq!(frame.plaintext, b"hello"),
-            other => panic!("expected the genuine seq=0 frame, got {other:?}"),
+            Poll::Ready(Some(Err(CoreError::TransportTerminal))) => {}
+            other => panic!("expected terminal error, got {other:?}"),
         }
     }
 
