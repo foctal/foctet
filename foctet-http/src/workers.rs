@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::{
     AsyncReplayStore, BODY_ONLY_SCOPE, CONTENT_TYPE, ContextBinding, ContextCarrier, HttpError,
-    HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayCheck, ReplayStore,
-    ReplayStoreError, SCOPE_HEADER,
+    HttpErrorDisposition, HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayCheck,
+    ReplayStore, ReplayStoreError, SCOPE_HEADER,
 };
 
 /// Durable Object path used by [`DurableObjectReplayStore`] and
@@ -181,6 +181,18 @@ pub enum WorkersError {
 }
 
 impl WorkersError {
+    /// Classifies the required handling of this request-scoped adapter error.
+    ///
+    /// A Workers runtime failure has an unknown request-delivery outcome. Do
+    /// not retry the same protected payload; create a new request only under
+    /// application idempotency policy.
+    pub const fn disposition(&self) -> HttpErrorDisposition {
+        match self {
+            Self::Worker(_) => HttpErrorDisposition::Reject,
+            Self::Http(error) => error.disposition(),
+        }
+    }
+
     /// Maps this error to the HTTP status code a Worker should return.
     ///
     /// The mapping mirrors the axum adapter (`AxumError::into_response`) so both

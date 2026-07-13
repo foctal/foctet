@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::{
     TokioTransportBuilder, TokioTransportChannel, TransportChannelError, TransportConfig,
-    adapter::SplitIo,
+    TransportErrorDisposition, adapter::SplitIo,
 };
 
 /// Error returned by the [`crate::DatagramTransport`] implementation for
@@ -22,6 +22,14 @@ pub enum QuinnDatagramTransportError {
     /// The Quinn connection failed while receiving a datagram.
     #[error("quinn connection error: {0}")]
     Connection(#[from] quinn::ConnectionError),
+}
+
+impl QuinnDatagramTransportError {
+    /// Quinn does not expose a delivery proof for these failures, so the
+    /// datagram channel must be discarded rather than retried in place.
+    pub const fn disposition(&self) -> TransportErrorDisposition {
+        TransportErrorDisposition::Terminal
+    }
 }
 
 /// Generic datagram-transport view of a [`quinn::Connection`], usable with
@@ -56,6 +64,21 @@ pub enum QuinnDatagramError {
     /// The Quinn connection failed while receiving a datagram.
     #[error("quinn connection error: {0}")]
     Connection(#[from] quinn::ConnectionError),
+}
+
+impl QuinnDatagramError {
+    /// Classifies whether this secure datagram channel may safely continue.
+    pub const fn disposition(&self) -> TransportErrorDisposition {
+        match self {
+            Self::Core(error) => match error.disposition() {
+                foctet_core::CoreErrorDisposition::Recoverable => {
+                    TransportErrorDisposition::Recoverable
+                }
+                foctet_core::CoreErrorDisposition::Terminal => TransportErrorDisposition::Terminal,
+            },
+            Self::Send(_) | Self::Connection(_) => TransportErrorDisposition::Terminal,
+        }
+    }
 }
 
 /// A Foctet datagram channel over a QUIC connection.

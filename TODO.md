@@ -51,14 +51,14 @@ the same work twice.
   use checked `u32` conversions for chunk counts, indices, lengths, and nonce
   inputs, preventing chunk-nonce repetition through truncation. The remaining
   cross-surface CPU/allocation limits and adversarial budget tests are open.
-- **P1-1 — In progress.** Message and datagram endpoints are now terminal after inbound
+- **P1-1 — Complete.** Message and datagram endpoints are now terminal after inbound
   authentication, parser, replay, key, or sequence failures, and reject all
   subsequent use. `SyncIo`, `FoctetFramed`, `Session`, high-level channels,
   and WASM now do the same for receive/session-control failures. HTTP error
   mapping now exposes `HttpErrorDisposition`, and `CoreError` exposes a
   recoverable/terminal disposition. Transport helper errors now expose
-  `TransportErrorDisposition`; a published cross-crate classification table
-  remains.
+  `TransportErrorDisposition`; `docs/error-handling.md` publishes the
+  cross-crate classification and required caller action.
 
 ### P0-1: Prevent nonce reuse after a synchronous partial write or flush failure
 
@@ -146,7 +146,7 @@ diverged ratchet.
 
 ### P1-1: Define and enforce a terminal error/state policy
 
-- [ ] Classify every `CoreError`, HTTP error, parser error, and transport error as
+- [x] Classify every `CoreError`, HTTP error, parser error, and transport error as
   recoverable, frame-local, or connection/session-terminal.
 - [x] Make terminal state sticky in `Session`, `SyncIo`, `FoctetFramed`, message,
   datagram, and WASM endpoints. After an authentication/state/sequence/key

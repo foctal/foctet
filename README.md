@@ -36,6 +36,7 @@ Security documentation:
 
 - [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — what Foctet defends against, residual risks, and explicit non-goals.
 - [`docs/POLICIES.md`](docs/POLICIES.md) — versioning/compatibility/deprecation, key lifecycle and rotation, incident response.
+- [`docs/error-handling.md`](docs/error-handling.md) — required action for core, HTTP, and transport errors.
 - [`SECURITY.md`](SECURITY.md) — current security posture, known limitations, vulnerability reporting.
 
 ## Examples

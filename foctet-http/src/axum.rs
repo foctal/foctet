@@ -38,8 +38,8 @@ use http_body_util::BodyExt;
 use thiserror::Error;
 
 use crate::{
-    AsyncReplayStore, ContextBinding, ContextCarrier, HttpError, HttpOpenOptions, HttpOpener,
-    HttpRequestStreamReader, HttpSealOptions, HttpSealer, ReplayStore,
+    AsyncReplayStore, ContextBinding, ContextCarrier, HttpError, HttpErrorDisposition,
+    HttpOpenOptions, HttpOpener, HttpRequestStreamReader, HttpSealOptions, HttpSealer, ReplayStore,
 };
 
 /// Error type for Axum adapter operations.
@@ -51,6 +51,19 @@ pub enum AxumError {
     /// Foctet HTTP-layer operation failed.
     #[error("foctet http operation failed")]
     Http(#[from] HttpError),
+}
+
+impl AxumError {
+    /// Classifies the required handling of this request-scoped adapter error.
+    ///
+    /// An Axum body-read failure can follow partial HTTP-body delivery, so the
+    /// protected request must be rejected rather than retried in place.
+    pub const fn disposition(&self) -> HttpErrorDisposition {
+        match self {
+            Self::BodyRead(_) => HttpErrorDisposition::Reject,
+            Self::Http(error) => error.disposition(),
+        }
+    }
 }
 
 /// High-level Axum request opener.

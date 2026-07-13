@@ -84,6 +84,9 @@ supported-version policy will accompany the first `v1` release.
   session-control failure. Session closure drops active and retained traffic
   keys. Establish a fresh authenticated session; do not continue after a
   potentially diverged channel.
+- **Published error policy.** [`docs/error-handling.md`](docs/error-handling.md)
+  defines the executable error dispositions and the required retry, rejection,
+  or terminal-close action for Core, HTTP, and transport surfaces.
 - **Replay protection** via per-`(key_id, stream_id)` sliding windows, committed
   **only after AEAD authentication** so a forged frame cannot desynchronize or
   DoS the receiver. The number of tracked windows is bounded
