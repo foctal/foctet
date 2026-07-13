@@ -328,6 +328,18 @@ impl Session {
         result
     }
 
+    /// Permanently closes this session and zeroizes its live key material.
+    ///
+    /// Transport integrations must call this after an ambiguous outbound
+    /// failure, such as a partial control-frame write or a failed flush. The
+    /// peer may have received the frame while the local transport cannot prove
+    /// delivery, so neither this session nor its traffic keys may be reused.
+    pub fn terminate(&mut self) {
+        if self.state != SessionState::Closed {
+            self.close();
+        }
+    }
+
     fn handle_control_inner(
         &mut self,
         msg: &ControlMessage,

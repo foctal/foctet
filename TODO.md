@@ -33,8 +33,9 @@ the same work twice.
 
 - **P0-1 — In progress.** Synchronous `SyncIo` and async `FoctetFramed` now reserve
   their sequence before output and permanently close after partial-write,
-  write, or flush failure, with regression coverage. The equivalent failure
-  contract still needs to be completed for control/handshake/rekey and all
+  write, or flush failure, with regression coverage. A failed automatic-rekey
+  control write now also closes the paired `Session`. The equivalent failure
+  contract still needs to be completed for handshake writes and all
   message/datagram transport adapters.
 - **P0-2 — Complete.** A shared zeroizing X25519 helper rejects all-zero shared
   secrets for handshake, body envelopes (including streaming bodies), and
@@ -79,12 +80,16 @@ integrity.
   default. Do not permit arbitrary `send` retry on the same session; expose
   only a narrowly specified resume/drain operation if it can prove it emits
   the retained bytes and cannot change plaintext, flags, stream ID, or key.
-- [ ] Apply the same failure contract to control frames, handshake writes, rekey
-  writes, `FoctetStream`, and every adapter built on blocking I/O.
-- [ ] Add fault-injection tests for zero-byte failure, partial-frame failure,
-  post-frame `write_all` failure, flush failure, retry, and connection close.
-  Assert byte-for-byte single emission or permanent closure, and assert that
-  no nonce tuple can be observed twice.
+- [x] Apply the same failure contract to automatic-rekey control writes in
+  `SyncIo` and `FoctetFramed`: an ambiguous write closes both the transport and
+  its paired `Session`.
+- [ ] Apply the same failure contract to handshake writes, `FoctetStream`, and
+  every message/datagram adapter built on blocking or async I/O.
+- [x] Add `SyncIo`/`FoctetFramed` fault-injection tests for partial writes,
+  post-frame failures, flush failure, retry, and session closure. Assert
+  byte-for-byte single emission or permanent closure and no nonce reuse.
+- [ ] Add equivalent fault-injection coverage for handshake and every
+  transport adapter, including zero-byte failure and connection close.
 - [x] Document the delivery semantics precisely: encrypted transport cannot infer
   whether an ambiguous failed send was received, so applications must use
   authenticated message IDs/idempotency where delivery matters.

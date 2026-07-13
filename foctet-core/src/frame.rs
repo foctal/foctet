@@ -499,7 +499,19 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         let app_payload = payload::encode_tlvs(&[app_tlv])?;
         this.enqueue_with_specific_key(this.active_key_id, flags, stream_id, &app_payload)?;
 
-        if let Some(prepared) = session.on_outbound_payload(plaintext.len())? {
+        let prepared = match session.on_outbound_payload(plaintext.len()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // The application frame is already queued. Its session
+                // accounting cannot be retried independently of that pending
+                // ciphertext, so close both objects.
+                this.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+        };
+
+        if let Some(prepared) = prepared {
             let ctrl_bytes = prepared.control_message().encode();
             if let Err(error) = this.enqueue_with_specific_key(
                 prepared.old_key_id(),
@@ -511,10 +523,19 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
                 // its required rekey control would leave counters and peer
                 // expectations ambiguous, so discard this transport/session.
                 this.terminal = true;
+                session.terminate();
                 return Err(error);
             }
-            session.commit_rekey(prepared)?;
-            this.set_key_ring_from_session(session)?;
+            if let Err(error) = session.commit_rekey(prepared) {
+                this.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+            if let Err(error) = this.set_key_ring_from_session(session) {
+                this.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1094,10 +1115,10 @@ mod tests {
             .expect_err("rekey control must exceed tx cap");
         assert!(matches!(err, CoreError::OutboundBufferLimitExceeded));
         assert!(framed.is_terminal());
-        assert_eq!(initiator.active_keys().expect("old key retained"), active);
+        assert_eq!(initiator.state(), crate::SessionState::Closed);
         assert!(
-            initiator.can_rekey(),
-            "failed enqueue must not hand over turn"
+            initiator.active_keys().is_none(),
+            "a session paired with a terminal transport cannot be reused"
         );
     }
 

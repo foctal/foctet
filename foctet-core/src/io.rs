@@ -666,12 +666,47 @@ impl<T: Read + Write> SyncIo<T> {
     ) -> Result<(), CoreError> {
         self.set_key_ring_from_session(session)?;
         let app_tlv = Tlv::application_data(plaintext)?;
-        self.send_tlvs_with(flags, stream_id, &[app_tlv])?;
+        if let Err(error) = self.send_tlvs_with(flags, stream_id, &[app_tlv]) {
+            if self.terminal {
+                session.terminate();
+            }
+            return Err(error);
+        }
 
-        if let Some(prepared) = session.on_outbound_payload(plaintext.len())? {
-            self.send_control_with_key_id(0, prepared.old_key_id(), prepared.control_message())?;
-            session.commit_rekey(prepared)?;
-            self.set_key_ring_from_session(session)?;
+        let prepared = match session.on_outbound_payload(plaintext.len()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // The application frame may already be delivered. A failure to
+                // account for its required session transition leaves delivery
+                // and ratchet state ambiguous, so fail closed as a pair.
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+        };
+
+        if let Some(prepared) = prepared {
+            if let Err(error) =
+                self.send_control_with_key_id(0, prepared.old_key_id(), prepared.control_message())
+            {
+                // The application frame was already emitted and the rekey
+                // control may have been partially emitted. Do not permit the
+                // caller to transplant the unchanged session to another I/O
+                // object after this ambiguous delivery failure.
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+            if let Err(error) = session.commit_rekey(prepared) {
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+            if let Err(error) = self.set_key_ring_from_session(session) {
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -746,15 +781,18 @@ impl From<CoreError> for std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::io::{Read, Write};
+    use std::{
+        collections::VecDeque,
+        io::{Read, Write},
+        time::Duration,
+    };
 
     use super::SyncIo;
-    use crate::CoreError;
     use crate::crypto::{
         Direction, EphemeralKeyPair, KeyHandle, derive_traffic_keys, encrypt_frame,
         random_session_salt,
     };
+    use crate::{CoreError, RekeyThresholds, Session, SessionAuthConfig, SessionState};
 
     #[derive(Default)]
     struct MockIo {
@@ -765,7 +803,8 @@ mod tests {
     struct FailingWriteIo {
         outbound: Vec<u8>,
         fail_after: usize,
-        fail_flush: bool,
+        fail_on_flush: Option<usize>,
+        flushes: usize,
     }
 
     impl Read for FailingWriteIo {
@@ -786,9 +825,10 @@ mod tests {
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
-            if self.fail_flush {
+            if self.fail_on_flush == Some(self.flushes) {
                 Err(std::io::Error::other("injected flush failure"))
             } else {
+                self.flushes += 1;
                 Ok(())
             }
         }
@@ -826,6 +866,31 @@ mod tests {
         KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"))
     }
 
+    fn active_initiator(max_frames: u64) -> Session {
+        let thresholds = RekeyThresholds {
+            max_frames,
+            max_bytes: 1 << 30,
+            max_age: Duration::from_secs(3600),
+            max_previous_keys: 2,
+        };
+        let (mut initiator, hello) = Session::new_initiator_with_auth(
+            thresholds.clone(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut responder = Session::new_responder_with_auth(
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let reply = responder
+            .handle_control(&hello)
+            .expect("responder accepts hello")
+            .expect("responder reply");
+        initiator
+            .handle_control(&reply)
+            .expect("initiator accepts reply");
+        initiator
+    }
+
     #[test]
     fn sync_send_fails_closed_on_sequence_exhaustion() {
         let keys = test_keys();
@@ -858,7 +923,8 @@ mod tests {
         let transport = FailingWriteIo {
             outbound: Vec::new(),
             fail_after: 7,
-            fail_flush: false,
+            fail_on_flush: None,
+            flushes: 0,
         };
         let mut io = SyncIo::new(transport, keys, Direction::S2C, Direction::C2S);
 
@@ -884,7 +950,8 @@ mod tests {
         let transport = FailingWriteIo {
             outbound: Vec::new(),
             fail_after: usize::MAX,
-            fail_flush: true,
+            fail_on_flush: Some(0),
+            flushes: 0,
         };
         let mut io = SyncIo::new(transport, keys, Direction::S2C, Direction::C2S);
 
@@ -901,6 +968,37 @@ mod tests {
             Err(CoreError::TransportTerminal)
         ));
         assert_eq!(io.io.outbound, emitted);
+    }
+
+    #[test]
+    fn failed_rekey_control_closes_the_session_with_sync_io() {
+        let mut session = active_initiator(1);
+        let keys = session.active_keys().expect("active keys");
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: usize::MAX,
+            // The application frame flushes successfully. The following
+            // old-key rekey control flush fails after it may be delivered.
+            fail_on_flush: Some(1),
+            flushes: 0,
+        };
+        let mut io = SyncIo::new(
+            transport,
+            keys,
+            session.inbound_direction(),
+            session.outbound_direction(),
+        );
+
+        assert!(matches!(
+            io.send_data_with_session(&mut session, 0, 0, b"trigger rekey"),
+            Err(CoreError::Io(_))
+        ));
+        assert!(io.is_terminal());
+        assert_eq!(session.state(), SessionState::Closed);
+        assert!(
+            session.active_keys().is_none(),
+            "a session from an ambiguous rekey write cannot be reused"
+        );
     }
 
     #[test]
