@@ -54,8 +54,9 @@ the same work twice.
 - **P1-1 — Complete.** Message and datagram endpoints are now terminal after inbound
   authentication, parser, replay, key, or sequence failures, and reject all
   subsequent use. `SyncIo`, `FoctetFramed`, `Session`, high-level channels,
-  and WASM now do the same for receive/session-control failures. HTTP error
-  mapping now exposes `HttpErrorDisposition`, and `CoreError` exposes a
+  and WASM now do the same for receive/session-control failures; message and
+  datagram channel wrappers also become terminal after backend failures. HTTP
+  error mapping now exposes `HttpErrorDisposition`, and `CoreError` exposes a
   recoverable/terminal disposition. Transport helper errors now expose
   `TransportErrorDisposition`; `docs/error-handling.md` publishes the
   cross-crate classification and required caller action.

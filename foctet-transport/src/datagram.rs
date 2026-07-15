@@ -96,6 +96,7 @@ where
 pub struct SecureDatagramChannel<T> {
     transport: T,
     endpoint: DatagramEndpoint,
+    terminal: bool,
 }
 
 impl<T> SecureDatagramChannel<T>
@@ -131,12 +132,19 @@ where
         Ok(Self {
             transport,
             endpoint,
+            terminal: false,
         })
     }
 
     /// Returns the maximum plaintext bytes that fit in one datagram.
     pub fn max_plaintext_len(&self) -> usize {
         self.endpoint.max_plaintext_len()
+    }
+
+    /// Returns whether a terminal protocol or transport error closed this
+    /// channel. A terminal channel must be discarded with its session.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal || self.endpoint.is_terminal()
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
@@ -152,6 +160,9 @@ where
     /// peers. The previous key is retained, so datagrams sealed under the old
     /// key that arrive after the rekey still decrypt.
     pub fn rekey_from_session(&mut self, session: &Session) -> Result<(), CoreError> {
+        if self.is_terminal() {
+            return Err(CoreError::TransportTerminal);
+        }
         let keys = session
             .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
@@ -171,24 +182,50 @@ where
         flags: u8,
         plaintext: &[u8],
     ) -> Result<(), DatagramChannelError<T::Error>> {
-        let bytes = self.endpoint.seal(stream_id, flags, plaintext)?;
-        self.transport
-            .send_datagram(bytes)
-            .await
-            .map_err(DatagramChannelError::Transport)?;
-        Ok(())
+        if self.is_terminal() {
+            return Err(DatagramChannelError::Core(CoreError::TransportTerminal));
+        }
+        let bytes = match self.endpoint.seal(stream_id, flags, plaintext) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if error.disposition() == foctet_core::CoreErrorDisposition::Terminal {
+                    self.terminal = true;
+                }
+                return Err(DatagramChannelError::Core(error));
+            }
+        };
+        match self.transport.send_datagram(bytes).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.terminal = true;
+                Err(DatagramChannelError::Transport(error))
+            }
+        }
     }
 
     /// Receives one datagram and opens it into a decrypted payload.
     pub async fn recv_datagram(
         &mut self,
     ) -> Result<DecodedDatagram, DatagramChannelError<T::Error>> {
-        let bytes = self
-            .transport
-            .recv_datagram()
-            .await
-            .map_err(DatagramChannelError::Transport)?;
-        Ok(self.endpoint.open(&bytes)?)
+        if self.is_terminal() {
+            return Err(DatagramChannelError::Core(CoreError::TransportTerminal));
+        }
+        let bytes = match self.transport.recv_datagram().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.terminal = true;
+                return Err(DatagramChannelError::Transport(error));
+            }
+        };
+        match self.endpoint.open(&bytes) {
+            Ok(datagram) => Ok(datagram),
+            Err(error) => {
+                if error.disposition() == foctet_core::CoreErrorDisposition::Terminal {
+                    self.terminal = true;
+                }
+                Err(DatagramChannelError::Core(error))
+            }
+        }
     }
 }
 
@@ -317,5 +354,25 @@ mod tests {
         let new = b.recv_datagram().await.expect("recv new");
         assert_eq!(new.header.key_id, 1);
         assert_eq!(new.plaintext, b"sealed after rekey");
+    }
+
+    #[tokio::test]
+    async fn transport_error_makes_datagram_channel_terminal() {
+        let (initiator, _responder) = session_pair();
+        let (transport, _peer) = linked_pair();
+        let mut channel =
+            SecureDatagramChannel::from_active_session(transport, &initiator).expect("channel");
+
+        assert!(matches!(
+            channel.recv_datagram().await,
+            Err(DatagramChannelError::Transport(_))
+        ));
+        assert!(channel.is_terminal());
+        assert!(matches!(
+            channel
+                .send_datagram(0, 0, b"must not send after failure")
+                .await,
+            Err(DatagramChannelError::Core(CoreError::TransportTerminal))
+        ));
     }
 }

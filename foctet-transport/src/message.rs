@@ -83,6 +83,7 @@ where
 pub struct SecureMessageChannel<T> {
     transport: T,
     endpoint: MessageEndpoint,
+    terminal: bool,
 }
 
 impl<T> SecureMessageChannel<T>
@@ -118,12 +119,19 @@ where
         Ok(Self {
             transport,
             endpoint,
+            terminal: false,
         })
     }
 
     /// Returns the maximum plaintext bytes that fit in one message.
     pub fn max_plaintext_len(&self) -> usize {
         self.endpoint.max_plaintext_len()
+    }
+
+    /// Returns whether a terminal protocol or transport error closed this
+    /// channel. A terminal channel must be discarded with its session.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal || self.endpoint.is_terminal()
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
@@ -138,6 +146,9 @@ where
     /// previous key is retained, so a message sealed under the old key that is
     /// still in flight opens correctly.
     pub fn rekey_from_session(&mut self, session: &Session) -> Result<(), CoreError> {
+        if self.is_terminal() {
+            return Err(CoreError::TransportTerminal);
+        }
         let keys = session
             .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
@@ -157,22 +168,48 @@ where
         flags: u8,
         plaintext: &[u8],
     ) -> Result<(), MessageChannelError<T::Error>> {
-        let bytes = self.endpoint.seal(stream_id, flags, plaintext)?;
-        self.transport
-            .send_message(bytes)
-            .await
-            .map_err(MessageChannelError::Transport)?;
-        Ok(())
+        if self.is_terminal() {
+            return Err(MessageChannelError::Core(CoreError::TransportTerminal));
+        }
+        let bytes = match self.endpoint.seal(stream_id, flags, plaintext) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if error.disposition() == foctet_core::CoreErrorDisposition::Terminal {
+                    self.terminal = true;
+                }
+                return Err(MessageChannelError::Core(error));
+            }
+        };
+        match self.transport.send_message(bytes).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.terminal = true;
+                Err(MessageChannelError::Transport(error))
+            }
+        }
     }
 
     /// Receives one message and opens it into a decrypted payload.
     pub async fn recv_message(&mut self) -> Result<DecodedMessage, MessageChannelError<T::Error>> {
-        let bytes = self
-            .transport
-            .recv_message()
-            .await
-            .map_err(MessageChannelError::Transport)?;
-        Ok(self.endpoint.open(&bytes)?)
+        if self.is_terminal() {
+            return Err(MessageChannelError::Core(CoreError::TransportTerminal));
+        }
+        let bytes = match self.transport.recv_message().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.terminal = true;
+                return Err(MessageChannelError::Transport(error));
+            }
+        };
+        match self.endpoint.open(&bytes) {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                if error.disposition() == foctet_core::CoreErrorDisposition::Terminal {
+                    self.terminal = true;
+                }
+                Err(MessageChannelError::Core(error))
+            }
+        }
     }
 }
 
@@ -288,6 +325,13 @@ mod tests {
             .await
             .expect_err("duplicate must be replay-rejected");
         assert!(matches!(err, MessageChannelError::Core(CoreError::Replay)));
+        assert!(server.is_terminal());
+        assert!(matches!(
+            server
+                .send_message(0, 0, b"must not send after replay")
+                .await,
+            Err(MessageChannelError::Core(CoreError::TransportTerminal))
+        ));
     }
 
     #[tokio::test]
@@ -304,10 +348,12 @@ mod tests {
         let mut client = SecureMessageChannel {
             transport: client_io,
             endpoint: MessageEndpoint::new(k1.clone(), Direction::S2C, Direction::C2S),
+            terminal: false,
         };
         let mut server = SecureMessageChannel {
             transport: server_io,
             endpoint: MessageEndpoint::new(k1, Direction::C2S, Direction::S2C),
+            terminal: false,
         };
 
         client.send_message(0, 0, b"before").await.expect("send 1");
@@ -323,5 +369,25 @@ mod tests {
         let opened = server.recv_message().await.expect("recv 2");
         assert_eq!(opened.plaintext, b"after");
         assert_eq!(opened.header.key_id, 2);
+    }
+
+    #[tokio::test]
+    async fn transport_error_makes_message_channel_terminal() {
+        let (initiator, _responder) = shared_session_keys();
+        let (transport, _peer) = linked_pair();
+        let mut channel =
+            SecureMessageChannel::from_active_session(transport, &initiator).expect("channel");
+
+        assert!(matches!(
+            channel.recv_message().await,
+            Err(MessageChannelError::Transport(_))
+        ));
+        assert!(channel.is_terminal());
+        assert!(matches!(
+            channel
+                .send_message(0, 0, b"must not send after failure")
+                .await,
+            Err(MessageChannelError::Core(CoreError::TransportTerminal))
+        ));
     }
 }
