@@ -30,7 +30,7 @@ otherwise conceal a diverged peer state, so it is terminal.
 
 | Errors | Disposition | Required action |
 | --- | --- | --- |
-| `FrameTooLarge`, `TlvTooLarge`, `OutboundBufferLimitExceeded`, `HandshakeRateLimited` | Recoverable | Correct input, drain queued output, or wait before retrying. |
+| `FrameTooLarge`, `TlvTooLarge`, `OutboundBufferLimitExceeded`, `RekeyInProgress`, `HandshakeRateLimited` | Recoverable | Correct input, drain queued output, resume/cancel the prepared rekey, or wait before retrying. |
 | All other `CoreError` variants, including parser/header errors, AEAD/HKDF/DH failures, replay errors, invalid control or session state, key/sequence exhaustion, I/O/EOF, and handshake authentication/timeout failures | Terminal | Discard the endpoint/session and establish a new authenticated session. |
 
 Stateless helpers may return `CoreError` without retaining a session. Their
@@ -76,6 +76,20 @@ keys. Native transport builders own the connection while handshaking and
 discard both the connection and uncommitted session after a partial write,
 write-zero, flush failure, peer close, timeout, or cancellation. They never
 return a half-completed handshake connection for retry.
+
+`SecureChannel::rekey_now`, `AsyncSecureChannel::rekey_now`, and the native
+transport-channel `rekey_now` methods perform the same prepare/send/commit
+transaction. `SecureDatagramChannel::send_rekey` and `recv_rekey` require a
+`SecureMessageChannel` as their reliable encrypted control path. Any control
+backend failure closes the control channel, datagram channel, and session.
+If an async `rekey_now` future is cancelled while flush is pending, the channel
+retains the exact prepared control and returns `RekeyInProgress` from ordinary
+send/receive operations. Calling `rekey_now` again resumes that same
+transaction; extracting the channel parts instead closes them.
+
+WASM callers may use `cancelPreparedRekey()` only after proving that the
+transport accepted no bytes. After a partial write, failed flush, or otherwise
+ambiguous result they must call `terminate()` and discard the transport.
 
 Delivery-sensitive applications must use authenticated message IDs and
 idempotent application operations; Foctet cannot determine whether an

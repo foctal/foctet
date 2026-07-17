@@ -451,6 +451,10 @@ impl<T> SyncIo<T> {
         self.terminal
     }
 
+    pub(crate) fn terminate(&mut self) {
+        self.terminal = true;
+    }
+
     /// Returns known key IDs, active first.
     pub fn known_key_ids(&self) -> Vec<u8> {
         self.keys.iter().map(|k| k.key_id).collect()

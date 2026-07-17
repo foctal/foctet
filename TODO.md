@@ -45,10 +45,12 @@ the same work twice.
   known low-order input on seal/open paths; documentation now specifies the
   non-oracle error behavior.
 - **P0-3 — In progress.** `Session` now supports an immutable prepare/commit rekey
-  transaction; synchronous/async byte-stream automatic rekey and WASM use it,
-  and the native immediate `force_rekey` convenience is now test-only. Datagram
-  tests use it for their reliable control channel; real control-channel delivery
-  integration for every datagram adapter remains.
+  transaction with one pending generation per session; synchronous/async
+  byte-stream automatic and explicit rekey, native transport builders, WASM,
+  and message/datagram reliable-control workflows use it. Ambiguous delivery
+  closes every paired channel/session, while proven pre-delivery rejection may
+  explicitly cancel. Remaining work is deterministic allocation-failure and
+  broader concurrency/state-machine fault coverage.
 - **P1-2 — In progress.** Archive builders now cap in-memory plaintext at 512 MiB and
   use checked `u32` conversions for chunk counts, indices, lengths, and nonce
   inputs, preventing chunk-nonce repetition through truncation. The remaining
@@ -134,10 +136,10 @@ diverged ratchet.
 - [x] Model rekey as a two-phase operation: prepare immutable next-state and the
   old-key control frame, atomically enqueue/send it under the old key, then
   commit the new state only at the documented commit point.
-- [ ] Define failure behavior for each transport. An ambiguous transmission must
+- [x] Define failure behavior for each transport. An ambiguous transmission must
   close the session unless a protocol-level acknowledgement/resynchronization
   design proves both peers' ratchet generation.
-- [ ] Ensure automatic threshold rekey, explicit `force_rekey`, native transport
+- [x] Ensure automatic threshold rekey, explicit `force_rekey`, native transport
   builders, WASM `FoctetSession`, and datagram-control workflows use the same
   transaction.
 - [ ] Add deterministic tests for full outbound buffers, allocation failure hooks,

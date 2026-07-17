@@ -192,6 +192,10 @@ pub enum CoreError {
     /// peers; only the side whose turn it is may initiate the next rekey).
     #[error("rekey not permitted: it is the peer's turn to ratchet")]
     RekeyNotPermitted,
+    /// A prepared rekey must be resumed, committed, or safely cancelled before
+    /// other channel operations can proceed.
+    #[error("rekey transaction is already in progress")]
+    RekeyInProgress,
     /// Session/shared secret is not available.
     #[error("missing session secret")]
     MissingSessionSecret,
@@ -264,6 +268,7 @@ impl CoreError {
             Self::FrameTooLarge
             | Self::OutboundBufferLimitExceeded
             | Self::TlvTooLarge
+            | Self::RekeyInProgress
             | Self::HandshakeRateLimited => CoreErrorDisposition::Recoverable,
             Self::InvalidHeaderLength(_)
             | Self::InvalidMagic
@@ -306,6 +311,10 @@ mod error_disposition_tests {
     fn classifies_backpressure_as_recoverable_and_protocol_failures_as_terminal() {
         assert_eq!(
             CoreError::OutboundBufferLimitExceeded.disposition(),
+            CoreErrorDisposition::Recoverable
+        );
+        assert_eq!(
+            CoreError::RekeyInProgress.disposition(),
             CoreErrorDisposition::Recoverable
         );
         assert_eq!(

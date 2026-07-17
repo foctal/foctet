@@ -20,13 +20,15 @@
 //! handshake and key updates ride reliable streams while application data rides
 //! datagrams under the negotiated keys.
 //!
-//! The flow is therefore: rekey the [`Session`] over its control channel on both
-//! peers, then call [`SecureDatagramChannel::rekey_from_session`] on each side to
-//! adopt the rotated key. Each new key gets a new `key_id`, and the endpoint
-//! retains the previous key(s) ([`DatagramConfig::max_retained_keys`]), so
-//! datagrams sealed under the **old** key that arrive (reordered or delayed)
-//! after the rekey still decrypt — datagrams carry their `key_id`, and the
-//! receiver selects the matching retained key.
+//! The recommended flow uses [`SecureDatagramChannel::send_rekey`] and
+//! [`SecureDatagramChannel::recv_rekey`] with a [`SecureMessageChannel`] as the
+//! reliable encrypted control path. These methods bind control delivery,
+//! session commit, and datagram-key adoption into one fail-closed operation.
+//! Each new key gets a new `key_id`, and the endpoint retains the previous
+//! key(s) ([`DatagramConfig::max_retained_keys`]), so datagrams sealed under the
+//! **old** key that arrive (reordered or delayed) after the rekey still decrypt
+//! — datagrams carry their `key_id`, and the receiver selects the matching
+//! retained key.
 
 use foctet_core::{
     CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram, KeyHandle, Session,
@@ -34,6 +36,7 @@ use foctet_core::{
 use thiserror::Error;
 
 use crate::error::TransportErrorDisposition;
+use crate::message::{MessageChannelError, MessageTransport, SecureMessageChannel};
 
 /// A message-oriented datagram transport that sends and receives whole datagrams.
 ///
@@ -155,10 +158,10 @@ where
     /// Adopts the session's current active traffic keys after it has rekeyed
     /// over its (reliable) control channel.
     ///
-    /// See the module-level "Rekey over datagrams" section: drive the rekey on
-    /// the [`Session`] over a reliable control channel, then call this on both
-    /// peers. The previous key is retained, so datagrams sealed under the old
-    /// key that arrive after the rekey still decrypt.
+    /// This is a low-level adoption primitive. Prefer [`Self::send_rekey`] and
+    /// [`Self::recv_rekey`], which integrate the reliable control transaction.
+    /// The previous key is retained, so datagrams sealed under the old key that
+    /// arrive after the rekey still decrypt.
     pub fn rekey_from_session(&mut self, session: &Session) -> Result<(), CoreError> {
         if self.is_terminal() {
             return Err(CoreError::TransportTerminal);
@@ -167,6 +170,56 @@ where
             .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
         self.endpoint.install_active_keys(keys);
+        Ok(())
+    }
+
+    /// Initiates a transactional rekey over a reliable secure message channel,
+    /// then adopts the committed key for datagrams.
+    pub async fn send_rekey<C>(
+        &mut self,
+        control: &mut SecureMessageChannel<C>,
+        session: &mut Session,
+    ) -> Result<(), MessageChannelError<C::Error>>
+    where
+        C: MessageTransport,
+    {
+        if self.is_terminal() {
+            return Err(MessageChannelError::Core(CoreError::TransportTerminal));
+        }
+        if let Err(error) = control.send_rekey(session).await {
+            self.terminal = true;
+            return Err(error);
+        }
+        if let Err(error) = self.rekey_from_session(session) {
+            self.terminal = true;
+            session.terminate();
+            return Err(MessageChannelError::Core(error));
+        }
+        Ok(())
+    }
+
+    /// Receives a transactional rekey over a reliable secure message channel,
+    /// then adopts the applied key for datagrams.
+    pub async fn recv_rekey<C>(
+        &mut self,
+        control: &mut SecureMessageChannel<C>,
+        session: &mut Session,
+    ) -> Result<(), MessageChannelError<C::Error>>
+    where
+        C: MessageTransport,
+    {
+        if self.is_terminal() {
+            return Err(MessageChannelError::Core(CoreError::TransportTerminal));
+        }
+        if let Err(error) = control.recv_rekey(session).await {
+            self.terminal = true;
+            return Err(error);
+        }
+        if let Err(error) = self.rekey_from_session(session) {
+            self.terminal = true;
+            session.terminate();
+            return Err(MessageChannelError::Core(error));
+        }
         Ok(())
     }
 
@@ -249,6 +302,25 @@ mod tests {
     #[error("memory datagram transport closed")]
     struct MemoryError;
 
+    #[derive(Debug)]
+    struct FailingControlTransport;
+
+    impl MessageTransport for FailingControlTransport {
+        type Error = MemoryError;
+
+        async fn send_message(&self, _message: Vec<u8>) -> Result<(), Self::Error> {
+            Err(MemoryError)
+        }
+
+        async fn recv_message(&self) -> Result<Vec<u8>, Self::Error> {
+            Err(MemoryError)
+        }
+
+        fn max_message_size(&self) -> Option<usize> {
+            None
+        }
+    }
+
     impl DatagramTransport for MemoryDatagramTransport {
         type Error = MemoryError;
 
@@ -262,6 +334,23 @@ mod tests {
         }
 
         fn max_datagram_size(&self) -> Option<usize> {
+            None
+        }
+    }
+
+    impl MessageTransport for MemoryDatagramTransport {
+        type Error = MemoryError;
+
+        async fn send_message(&self, message: Vec<u8>) -> Result<(), Self::Error> {
+            self.outbox.borrow_mut().push_back(message);
+            Ok(())
+        }
+
+        async fn recv_message(&self) -> Result<Vec<u8>, Self::Error> {
+            self.inbox.borrow_mut().pop_front().ok_or(MemoryError)
+        }
+
+        fn max_message_size(&self) -> Option<usize> {
             None
         }
     }
@@ -307,6 +396,13 @@ mod tests {
             SecureDatagramChannel::from_active_session(transport_a, &session_init).expect("a");
         let mut b =
             SecureDatagramChannel::from_active_session(transport_b, &session_resp).expect("b");
+        let (control_transport_a, control_transport_b) = linked_pair();
+        let mut control_a =
+            SecureMessageChannel::from_active_session(control_transport_a, &session_init)
+                .expect("a control");
+        let mut control_b =
+            SecureMessageChannel::from_active_session(control_transport_b, &session_resp)
+                .expect("b control");
 
         // A sends a datagram under the original key (key_id 0); capture it off
         // the wire and withhold it so it arrives *after* the rekey.
@@ -320,20 +416,15 @@ mod tests {
             .pop_front()
             .expect("one datagram queued");
 
-        // Rekey the sessions over the (reliable) control channel, then adopt the
-        // rotated key into both datagram channels.
-        let prepared = session_init
-            .prepare_rekey()
-            .expect("initiator prepares rekey");
-        let rekey = prepared.control_message().clone();
-        session_init
-            .commit_rekey(prepared)
-            .expect("initiator commits rekey");
-        session_resp
-            .handle_control(&rekey)
-            .expect("responder applies rekey");
-        a.rekey_from_session(&session_init).expect("a rekey");
-        b.rekey_from_session(&session_resp).expect("b rekey");
+        // Rekey over a real reliable, encrypted control channel. The sender
+        // commits only after the backend accepts the old-key control message;
+        // each datagram endpoint adopts the session key in the same operation.
+        a.send_rekey(&mut control_a, &mut session_init)
+            .await
+            .expect("a sends rekey");
+        b.recv_rekey(&mut control_b, &mut session_resp)
+            .await
+            .expect("b receives rekey");
 
         // A sends a datagram under the new key (key_id 1).
         a.send_datagram(0, 0, b"sealed after rekey")
@@ -374,5 +465,25 @@ mod tests {
                 .await,
             Err(DatagramChannelError::Core(CoreError::TransportTerminal))
         ));
+    }
+
+    #[tokio::test]
+    async fn control_send_failure_closes_datagram_channel_and_session() {
+        let (mut initiator, _responder) = session_pair();
+        let (transport, _peer) = linked_pair();
+        let mut datagrams =
+            SecureDatagramChannel::from_active_session(transport, &initiator).expect("datagrams");
+        let mut control =
+            SecureMessageChannel::from_active_session(FailingControlTransport, &initiator)
+                .expect("control");
+
+        assert!(matches!(
+            datagrams.send_rekey(&mut control, &mut initiator).await,
+            Err(MessageChannelError::Transport(_))
+        ));
+        assert!(datagrams.is_terminal());
+        assert!(control.is_terminal());
+        assert_eq!(initiator.state(), foctet_core::SessionState::Closed);
+        assert!(initiator.active_keys().is_none());
     }
 }

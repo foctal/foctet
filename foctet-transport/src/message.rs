@@ -17,7 +17,10 @@
 //! unlike the MTU-bounded datagram shape. Replay state is committed only after
 //! AEAD authentication, so a forged message cannot advance the window.
 
-use foctet_core::{CoreError, DecodedMessage, KeyHandle, MessageConfig, MessageEndpoint, Session};
+use foctet_core::{
+    ControlMessage, CoreError, DecodedMessage, KeyHandle, MessageConfig, MessageEndpoint, Session,
+    frame::flags,
+};
 use thiserror::Error;
 
 use crate::error::TransportErrorDisposition;
@@ -189,6 +192,58 @@ where
         }
     }
 
+    /// Prepares, sends, and commits one rekey over this reliable channel.
+    ///
+    /// The control message is sealed under the old traffic key. A backend
+    /// failure is ambiguous and closes both this channel and `session`; a seal
+    /// rejection before transport delivery cancels the prepared transaction.
+    pub async fn send_rekey(
+        &mut self,
+        session: &mut Session,
+    ) -> Result<(), MessageChannelError<T::Error>> {
+        if self.is_terminal() {
+            return Err(MessageChannelError::Core(CoreError::TransportTerminal));
+        }
+        let prepared = session.prepare_rekey()?;
+        let bytes =
+            match self
+                .endpoint
+                .seal(0, flags::IS_CONTROL, &prepared.control_message().encode())
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if self.endpoint.is_terminal() {
+                        self.terminal = true;
+                        session.terminate();
+                    } else if let Err(cancel_error) = session.cancel_prepared_rekey(prepared) {
+                        self.terminal = true;
+                        return Err(MessageChannelError::Core(cancel_error));
+                    }
+                    return Err(MessageChannelError::Core(error));
+                }
+            };
+        if let Err(error) = self.transport.send_message(bytes).await {
+            self.terminal = true;
+            session.terminate();
+            return Err(MessageChannelError::Transport(error));
+        }
+        if let Err(error) = session.commit_rekey(prepared) {
+            self.terminal = true;
+            session.terminate();
+            return Err(MessageChannelError::Core(error));
+        }
+        let keys = match session.active_keys() {
+            Some(keys) => keys,
+            None => {
+                self.terminal = true;
+                session.terminate();
+                return Err(MessageChannelError::Core(CoreError::InvalidSessionState));
+            }
+        };
+        self.endpoint.install_active_keys(keys);
+        Ok(())
+    }
+
     /// Receives one message and opens it into a decrypted payload.
     pub async fn recv_message(&mut self) -> Result<DecodedMessage, MessageChannelError<T::Error>> {
         if self.is_terminal() {
@@ -210,6 +265,51 @@ where
                 Err(MessageChannelError::Core(error))
             }
         }
+    }
+
+    /// Receives and applies one rekey from this reliable control channel.
+    pub async fn recv_rekey(
+        &mut self,
+        session: &mut Session,
+    ) -> Result<(), MessageChannelError<T::Error>> {
+        let decoded = match self.recv_message().await {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                session.terminate();
+                return Err(error);
+            }
+        };
+        if decoded.header.flags & flags::IS_CONTROL == 0 {
+            self.terminal = true;
+            session.terminate();
+            return Err(MessageChannelError::Core(
+                CoreError::UnexpectedControlMessage,
+            ));
+        }
+        let control = match ControlMessage::decode(&decoded.plaintext) {
+            Ok(control @ ControlMessage::Rekey { .. }) => control,
+            Ok(_) | Err(_) => {
+                self.terminal = true;
+                session.terminate();
+                return Err(MessageChannelError::Core(
+                    CoreError::UnexpectedControlMessage,
+                ));
+            }
+        };
+        if let Err(error) = session.handle_control(&control) {
+            self.terminal = true;
+            return Err(MessageChannelError::Core(error));
+        }
+        let keys = match session.active_keys() {
+            Some(keys) => keys,
+            None => {
+                self.terminal = true;
+                session.terminate();
+                return Err(MessageChannelError::Core(CoreError::InvalidSessionState));
+            }
+        };
+        self.endpoint.install_active_keys(keys);
+        Ok(())
     }
 }
 

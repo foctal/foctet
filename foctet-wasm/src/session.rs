@@ -367,6 +367,22 @@ impl FoctetSession {
         self.commit_rekey_inner().map_err(core_to_js)
     }
 
+    /// Cancels a prepared rekey after the caller proves that no control bytes
+    /// reached the transport. The active key remains unchanged.
+    #[wasm_bindgen(js_name = cancelPreparedRekey)]
+    pub fn cancel_prepared_rekey(&mut self) -> Result<(), JsError> {
+        self.cancel_prepared_rekey_inner().map_err(core_to_js)
+    }
+
+    /// Permanently closes this session after ambiguous control delivery.
+    ///
+    /// Call this instead of cancelling when any rekey bytes may have reached
+    /// the peer, including after a partial write or failed flush.
+    #[wasm_bindgen(js_name = terminate)]
+    pub fn terminate(&mut self) {
+        self.terminate_inner();
+    }
+
     /// The identifier of the traffic key currently used for sealing, or
     /// `undefined` before the handshake completes.
     #[wasm_bindgen(getter, js_name = activeKeyId)]
@@ -516,6 +532,21 @@ impl FoctetSession {
         self.session.commit_rekey(prepared)?;
         self.sync_endpoint_keys();
         Ok(())
+    }
+
+    fn cancel_prepared_rekey_inner(&mut self) -> Result<(), CoreError> {
+        let prepared = self
+            .pending_rekey
+            .take()
+            .ok_or(CoreError::InvalidSessionState)?;
+        self.session.cancel_prepared_rekey(prepared)
+    }
+
+    fn terminate_inner(&mut self) {
+        self.pending_handshake = None;
+        self.pending_rekey = None;
+        self.endpoint = None;
+        self.session.terminate();
     }
 
     /// Installs the session's current active key on the framing endpoint
@@ -897,6 +928,53 @@ mod tests {
                 .plaintext,
             b"third key"
         );
+    }
+
+    #[test]
+    fn prepared_rekey_can_be_cancelled_only_before_delivery() {
+        let mut initiator =
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+        let mut responder =
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+        drive_handshake(&mut initiator, &mut responder);
+        let old_key_id = initiator.active_key_id().expect("active key");
+
+        initiator
+            .prepare_rekey_inner()
+            .expect("prepare first rekey");
+        initiator
+            .cancel_prepared_rekey_inner()
+            .expect("cancel rejected delivery");
+        assert_eq!(initiator.active_key_id(), Some(old_key_id));
+        assert!(initiator.session.can_rekey());
+        assert!(initiator.commit_rekey_inner().is_err());
+
+        initiator
+            .prepare_rekey_inner()
+            .expect("prepare replacement rekey");
+        initiator
+            .commit_rekey_inner()
+            .expect("commit replacement rekey");
+        assert_eq!(initiator.active_key_id(), Some(old_key_id + 1));
+    }
+
+    #[test]
+    fn ambiguous_rekey_delivery_can_terminate_the_wasm_session() {
+        let mut initiator =
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+        let mut responder =
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+        drive_handshake(&mut initiator, &mut responder);
+
+        initiator
+            .prepare_rekey_inner()
+            .expect("prepare ambiguous rekey");
+        initiator.terminate_inner();
+
+        assert!(initiator.is_terminal());
+        assert!(initiator.session.active_keys().is_none());
+        assert!(initiator.commit_rekey_inner().is_err());
+        assert!(initiator.prepare_rekey_inner().is_err());
     }
 
     #[test]

@@ -154,6 +154,8 @@ class FoctetSession {
   canRekey(): boolean;
   prepareRekey(): Uint8Array;
   commitRekey(): void;
+  cancelPreparedRekey(): void;
+  terminate(): void;
   readonly activeKeyId: number | undefined;
 
   // Message-mode sessions:
@@ -170,8 +172,10 @@ WebTransport datagrams, run the (reliable) handshake messages over a stream, the
 send each `sealDatagram` result as a datagram. Rekey control messages must also
 travel over that reliable channel: call `prepareRekey()` only when
 `canRekey() === true`, send its exact result once, and call `commitRekey()` only
-after the transport accepts it. If delivery is ambiguous, discard the session.
-Feed the peer's rekey bytes to `handleControlMessage()`.
+after the transport accepts it. Call `cancelPreparedRekey()` only when the
+transport proves that it accepted no bytes. If delivery is ambiguous, call
+`terminate()` and discard both the session and transport. Feed the peer's rekey
+bytes to `handleControlMessage()`.
 
 Example over a browser `WebSocket` (binary frames), as the initiator:
 

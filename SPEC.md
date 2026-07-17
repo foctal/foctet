@@ -240,6 +240,15 @@ prepared generation only after the transport accepts that frame. If enqueueing
 is rejected, the session MUST remain on the old generation. If transmission is
 ambiguous after output begins, the transport/session MUST close; the protocol
 does not acknowledge rekey delivery or provide ratchet resynchronization.
+Only one prepared rekey transaction may exist for a session. A sender may
+cancel it and prepare a replacement only when the transport proves that no
+control bytes were accepted; otherwise cancellation is forbidden and the
+session MUST close. Byte-stream channels flush before explicit rekey commit.
+Cancellation while an asynchronous flush is pending MUST retain the exact
+prepared control and allow only resumption of that transaction; it MUST NOT
+permit new application output or a different rekey.
+Datagram sessions MUST use a reliable, ordered encrypted control channel; the
+control send/receive and datagram-key adoption form one fail-closed operation.
 
 Rekeys **alternate** between the two peers: after a side initiates a rekey it MUST
 NOT initiate another until it has received one from the peer (`old_key_id` and the

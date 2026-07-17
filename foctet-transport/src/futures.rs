@@ -326,6 +326,11 @@ where
         self.inner.send_data(plaintext).await
     }
 
+    /// Immediately performs one fail-closed transactional rekey.
+    pub async fn rekey_now(&mut self) -> Result<(), CoreError> {
+        self.inner.rekey_now().await
+    }
+
     /// Receives the next application payload.
     pub async fn recv_application(&mut self) -> Result<Vec<u8>, CoreError> {
         self.inner.recv_application().await

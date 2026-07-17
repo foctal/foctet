@@ -324,6 +324,11 @@ impl<T> FoctetFramed<T> {
         self.terminal
     }
 
+    pub(crate) fn terminate(&mut self) {
+        self.terminal = true;
+        self.tx.clear();
+    }
+
     /// Installs new active keys and retains previous keys.
     pub fn install_active_keys(&mut self, keys: KeyHandle) {
         self.keys.retain(|k| k.key_id != keys.key_id);

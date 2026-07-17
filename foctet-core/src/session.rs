@@ -103,6 +103,7 @@ pub struct PreparedRekey {
     message: ControlMessage,
     old_key_id: u8,
     new_key_id: u8,
+    transaction_id: [u8; 32],
     local_eph: EphemeralKeyPair,
     ratchet_root: Zeroizing<[u8; 32]>,
     next_keys: KeyHandle,
@@ -157,6 +158,7 @@ pub struct Session {
     /// Whether this side may initiate the next rekey. The DH ratchet alternates:
     /// after initiating a rekey this becomes `false` until the peer rekeys.
     can_rekey: bool,
+    pending_rekey: Option<[u8; 32]>,
     active_keys: Option<KeyHandle>,
     previous_keys: Vec<KeyHandle>,
     thresholds: RekeyThresholds,
@@ -214,6 +216,7 @@ impl Session {
                 session_salt,
                 ratchet_root: [0u8; 32],
                 can_rekey: false,
+                pending_rekey: None,
                 active_keys: None,
                 previous_keys: Vec::new(),
                 thresholds,
@@ -244,6 +247,7 @@ impl Session {
             session_salt: [0u8; 32],
             ratchet_root: [0u8; 32],
             can_rekey: false,
+            pending_rekey: None,
             active_keys: None,
             previous_keys: Vec::new(),
             thresholds,
@@ -565,9 +569,11 @@ impl Session {
     /// Prepares an immediate rekey without changing this session.
     ///
     /// The returned control message MUST be accepted by the transport under
-    /// `old_key_id` before calling [`Self::commit_rekey`]. Dropping it leaves
-    /// the session unchanged.
-    pub fn prepare_rekey(&self) -> Result<PreparedRekey, CoreError> {
+    /// `old_key_id` before calling [`Self::commit_rekey`]. Only one prepared
+    /// transaction may exist at a time. If the transport proves that no bytes
+    /// were accepted, call [`Self::cancel_prepared_rekey`] before preparing
+    /// another transaction.
+    pub fn prepare_rekey(&mut self) -> Result<PreparedRekey, CoreError> {
         if self.state == SessionState::Closed {
             return Err(CoreError::TransportTerminal);
         }
@@ -576,6 +582,9 @@ impl Session {
         }
         if !self.can_rekey {
             return Err(CoreError::RekeyNotPermitted);
+        }
+        if self.pending_rekey.is_some() {
+            return Err(CoreError::RekeyInProgress);
         }
 
         let active = self
@@ -597,7 +606,7 @@ impl Session {
         let ratchet_public = new_eph.public;
         let transcript_binding =
             rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);
-        Ok(PreparedRekey {
+        let prepared = PreparedRekey {
             message: ControlMessage::Rekey {
                 old_key_id,
                 new_key_id,
@@ -606,10 +615,13 @@ impl Session {
             },
             old_key_id,
             new_key_id,
+            transaction_id: ratchet_public,
             local_eph: new_eph,
             ratchet_root: Zeroizing::new(new_root),
             next_keys: KeyHandle::new(next),
-        })
+        };
+        self.pending_rekey = Some(prepared.transaction_id);
+        Ok(prepared)
     }
 
     /// Commits a rekey that was already accepted for outbound delivery.
@@ -623,9 +635,11 @@ impl Session {
             .ok_or(CoreError::InvalidSessionState)?;
         if self.state != SessionState::Active
             || !self.can_rekey
+            || self.pending_rekey != Some(prepared.transaction_id)
             || active.key_id != prepared.old_key_id
             || prepared.next_keys.key_id != prepared.new_key_id
         {
+            self.close();
             return Err(CoreError::InvalidSessionState);
         }
 
@@ -637,6 +651,7 @@ impl Session {
             next_keys,
             ..
         } = prepared;
+        self.pending_rekey = None;
         self.local_eph = local_eph;
         self.ratchet_root.zeroize();
         self.ratchet_root = *ratchet_root;
@@ -649,6 +664,22 @@ impl Session {
             old_key_id,
             new_key_id,
         });
+        Ok(())
+    }
+
+    /// Cancels a prepared rekey after the transport proves that none of its
+    /// control bytes were accepted.
+    ///
+    /// Ambiguous delivery MUST call [`Self::terminate`] instead.
+    pub fn cancel_prepared_rekey(&mut self, prepared: PreparedRekey) -> Result<(), CoreError> {
+        if self.state == SessionState::Closed {
+            return Err(CoreError::TransportTerminal);
+        }
+        if self.pending_rekey != Some(prepared.transaction_id) {
+            self.close();
+            return Err(CoreError::InvalidSessionState);
+        }
+        self.pending_rekey = None;
         Ok(())
     }
 
@@ -684,6 +715,7 @@ impl Session {
     fn close(&mut self) {
         self.state = SessionState::Closed;
         self.can_rekey = false;
+        self.pending_rekey = None;
         self.ratchet_root.zeroize();
         self.active_keys = None;
         self.previous_keys.clear();
@@ -1282,6 +1314,34 @@ mod tests {
             .handle_control(&message)
             .expect("peer applies committed rekey");
         assert_eq!(client.active_keys(), server.active_keys());
+    }
+
+    #[test]
+    fn only_one_rekey_transaction_can_be_prepared_at_a_time() {
+        let (mut client, _server) = active_pair();
+        let old = client.active_keys().expect("active key");
+
+        let prepared = client.prepare_rekey().expect("prepare rekey");
+        assert!(matches!(
+            client.prepare_rekey(),
+            Err(CoreError::RekeyInProgress)
+        ));
+        assert_eq!(client.active_keys().expect("old key retained"), old);
+
+        client
+            .cancel_prepared_rekey(prepared)
+            .expect("cancel before delivery");
+        assert_eq!(client.active_keys().expect("old key retained"), old);
+        assert!(client.can_rekey());
+
+        let replacement = client.prepare_rekey().expect("prepare replacement");
+        client
+            .commit_rekey(replacement)
+            .expect("commit replacement");
+        assert_eq!(
+            client.active_keys().expect("new key").key_id,
+            old.key_id + 1
+        );
     }
 
     #[test]
