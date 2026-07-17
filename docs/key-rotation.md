@@ -22,7 +22,9 @@ key during an overlap window:
 ```rust
 // Accept the current key (v2) and the retiring key (v1).
 let opener = HttpOpener::new(
-    HttpOpenOptions::new(server_secret_v2).with_recipient_key(server_secret_v1),
+    HttpOpenOptions::new(server_secret_v2)
+        .with_recipient_key(server_secret_v1)
+        .expect("two keys fit"),
 );
 ```
 
@@ -31,6 +33,9 @@ Trial decryption is safe:
 - Every keyring entry is one of the recipient's own secret keys, and each attempt
   is against context-bound, authenticated ciphertext, so a non-matching key
   simply fails to open — there is no decryption oracle.
+- An opener accepts at most 16 keys. Keyring construction returns
+  `HttpOptionsError::TooManyRecipientKeys` before retaining a seventeenth key,
+  bounding X25519, HKDF, and AEAD trial work per envelope.
 - Authentication runs **before** the replay store is consulted, so a failing key
   attempt never consumes a replay slot. A request sealed to a key the recipient
   no longer holds is rejected identically on every retry.

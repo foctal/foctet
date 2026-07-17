@@ -29,7 +29,9 @@ pub async fn fetch(request: Request, _env: Env, _ctx: Context) -> Result<Respons
     // sealed to either opens; one sealed to any other key fails authentication
     // and is answered 401 via `WorkersError::status_code()` below.
     let opener = WorkersOpener::new(
-        HttpOpenOptions::new(SERVER_SECRET_KEY_V2).with_recipient_key(SERVER_SECRET_KEY_V1),
+        HttpOpenOptions::new(SERVER_SECRET_KEY_V2)
+            .with_recipient_key(SERVER_SECRET_KEY_V1)
+            .expect("two-key rotation window fits the HTTP keyring limit"),
     );
     let namespace = _env.durable_object("FOCTET_REPLAY")?;
     let replay_store = DurableObjectReplayStore::new(namespace, "foctet-replay-v1");

@@ -52,7 +52,7 @@ impl HttpStreamSealer {
         recipient_key_id: &[u8],
         limits: &BodyEnvelopeLimits,
     ) -> Result<(Self, Vec<u8>), HttpError> {
-        let context = ProtectedContext::for_request(parts, carrier.clone(), binding);
+        let context = ProtectedContext::for_request(parts, carrier.clone(), binding)?;
         let aad = context.to_aad_bytes();
         let (inner, header) =
             StreamSealer::new(recipient_public_key, recipient_key_id, &aad, limits)
@@ -101,7 +101,7 @@ impl HttpStreamOpener {
         S: ReplayStore + ?Sized,
     {
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
-        let context = ProtectedContext::for_request(parts, carrier.clone(), binding);
+        let context = ProtectedContext::for_request(parts, carrier.clone(), binding)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
 
         match ReplayStore::check_and_insert(

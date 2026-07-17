@@ -15,6 +15,9 @@ pub enum HttpErrorDisposition {
 /// Error type for HTTP integration over `foctet-core` body envelopes.
 #[derive(Debug, Error)]
 pub enum HttpError {
+    /// A configured HTTP resource limit was exceeded.
+    #[error("HTTP resource limit exceeded: {0}")]
+    LimitExceeded(&'static str),
     /// Missing `Content-Type` header.
     #[error("missing content-type header")]
     MissingContentType,
@@ -56,7 +59,8 @@ impl HttpError {
     pub const fn disposition(&self) -> HttpErrorDisposition {
         match self {
             Self::ReplayStore(_) => HttpErrorDisposition::Retryable,
-            Self::MissingContentType
+            Self::LimitExceeded(_)
+            | Self::MissingContentType
             | Self::InvalidContentType
             | Self::SealFailed(_)
             | Self::OpenFailed(_)

@@ -42,6 +42,15 @@ pub const DEFAULT_CONTEXT_TTL_SECS: u64 = 300;
 /// Suggested default tolerance for clock skew between peers, in seconds.
 pub const DEFAULT_MAX_CLOCK_SKEW_SECS: u64 = 30;
 
+/// Maximum number of application-selected headers bound into one request.
+pub const MAX_BOUND_HEADERS: usize = 32;
+/// Maximum configured name length for one bound header.
+pub const MAX_BOUND_HEADER_NAME_BYTES: usize = 256;
+/// Maximum raw value length copied for one bound header.
+pub const MAX_BOUND_HEADER_VALUE_BYTES: usize = 16 * 1024;
+/// Maximum aggregate variable-length data in one protected context.
+pub const MAX_PROTECTED_CONTEXT_BYTES: usize = 64 * 1024;
+
 /// Direction discriminator bound into the associated data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextDirection {
@@ -175,6 +184,9 @@ impl ContextCarrier {
         insert_str(headers, TIMESTAMP_HEADER, &self.timestamp_secs.to_string())?;
         insert_str(headers, EXPIRY_HEADER, &self.expiry_secs.to_string())?;
         if let Some(idem) = &self.idempotency_key {
+            if idem.len() > MAX_PROTECTED_CONTEXT_BYTES {
+                return Err(HttpError::LimitExceeded("protected_context_len"));
+            }
             insert_str(headers, IDEMPOTENCY_HEADER, idem)?;
         }
         if let Some(req_id) = &self.request_message_id {
@@ -195,12 +207,17 @@ impl ContextCarrier {
             .map_err(|_| HttpError::InvalidContext("expiry"))?;
 
         let idempotency_key = match headers.get(IDEMPOTENCY_HEADER) {
-            Some(value) => Some(
-                value
-                    .to_str()
-                    .map_err(|_| HttpError::InvalidContext("idempotency key"))?
-                    .to_string(),
-            ),
+            Some(value) => {
+                if value.as_bytes().len() > MAX_PROTECTED_CONTEXT_BYTES {
+                    return Err(HttpError::LimitExceeded("protected_context_len"));
+                }
+                Some(
+                    value
+                        .to_str()
+                        .map_err(|_| HttpError::InvalidContext("idempotency key"))?
+                        .to_string(),
+                )
+            }
             None => None,
         };
 
@@ -242,11 +259,14 @@ pub struct ProtectedContext {
 
 impl ProtectedContext {
     /// Builds the request context from `http` request parts and a carrier.
+    ///
+    /// Returns [`HttpError::LimitExceeded`] before copying any individual
+    /// route or header field that exceeds the protected-context limits.
     pub fn for_request(
         parts: &http::request::Parts,
         carrier: ContextCarrier,
         binding: ContextBinding,
-    ) -> Self {
+    ) -> Result<Self, HttpError> {
         Self::for_request_with_header_binding(
             parts,
             carrier,
@@ -267,24 +287,36 @@ impl ProtectedContext {
         carrier: ContextCarrier,
         bind_authority: bool,
         bound_header_names: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> Self {
+    ) -> Result<Self, HttpError> {
+        let mut context_bytes = request_context_bytes(parts, &carrier, bind_authority)?;
         let authority = if bind_authority {
             request_authority(parts)
         } else {
             None
         };
-        let bound_headers = bound_header_names
-            .into_iter()
-            .map(|name| {
-                let name = name.as_ref().to_string();
-                let value = parts
-                    .headers
-                    .get(name.as_str())
-                    .map(|v| v.as_bytes().to_vec());
-                (name, value)
-            })
-            .collect();
-        Self {
+        let mut bound_headers = Vec::new();
+        for name in bound_header_names {
+            if bound_headers.len() >= MAX_BOUND_HEADERS {
+                return Err(HttpError::LimitExceeded("bound_header_count"));
+            }
+            let name = name.as_ref();
+            if name.len() > MAX_BOUND_HEADER_NAME_BYTES {
+                return Err(HttpError::LimitExceeded("bound_header_name_len"));
+            }
+            let value = parts.headers.get(name).map(|value| value.as_bytes());
+            if value.is_some_and(|value| value.len() > MAX_BOUND_HEADER_VALUE_BYTES) {
+                return Err(HttpError::LimitExceeded("bound_header_value_len"));
+            }
+            context_bytes = context_bytes
+                .checked_add(name.len())
+                .and_then(|len| len.checked_add(value.map_or(0, |value| value.len())))
+                .ok_or(HttpError::LimitExceeded("protected_context_len"))?;
+            if context_bytes > MAX_PROTECTED_CONTEXT_BYTES {
+                return Err(HttpError::LimitExceeded("protected_context_len"));
+            }
+            bound_headers.push((name.to_string(), value.map(|value| value.to_vec())));
+        }
+        Ok(Self {
             direction: ContextDirection::Request,
             method: Some(parts.method.as_str().to_ascii_uppercase()),
             authority,
@@ -293,7 +325,7 @@ impl ProtectedContext {
             status: None,
             carrier,
             bound_headers,
-        }
+        })
     }
 
     /// Builds the response context from `http` response parts and a carrier.
@@ -302,8 +334,12 @@ impl ProtectedContext {
     /// response side, so response binding authenticates direction, status,
     /// timestamp/expiry, the response message ID, and (when set) the request
     /// message ID being answered.
-    pub fn for_response(parts: &http::response::Parts, carrier: ContextCarrier) -> Self {
-        Self {
+    pub fn for_response(
+        parts: &http::response::Parts,
+        carrier: ContextCarrier,
+    ) -> Result<Self, HttpError> {
+        carrier_context_bytes(&carrier)?;
+        Ok(Self {
             direction: ContextDirection::Response,
             method: None,
             authority: None,
@@ -312,7 +348,7 @@ impl ProtectedContext {
             status: Some(parts.status.as_u16()),
             carrier,
             bound_headers: Vec::new(),
-        }
+        })
     }
 
     /// Returns the carrier values for this context.
@@ -409,6 +445,47 @@ fn request_authority(parts: &http::request::Parts) -> Option<String> {
         .map(|value| value.to_ascii_lowercase())
 }
 
+fn carrier_context_bytes(carrier: &ContextCarrier) -> Result<usize, HttpError> {
+    let len = carrier.idempotency_key.as_ref().map_or(0, |key| key.len());
+    if len > MAX_PROTECTED_CONTEXT_BYTES {
+        return Err(HttpError::LimitExceeded("protected_context_len"));
+    }
+    Ok(len)
+}
+
+fn request_context_bytes(
+    parts: &http::request::Parts,
+    carrier: &ContextCarrier,
+    bind_authority: bool,
+) -> Result<usize, HttpError> {
+    let authority_len = if bind_authority {
+        parts
+            .uri
+            .authority()
+            .map(|authority| authority.as_str().len())
+            .or_else(|| {
+                parts
+                    .headers
+                    .get(http::header::HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::len)
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let len = carrier_context_bytes(carrier)?
+        .checked_add(parts.method.as_str().len())
+        .and_then(|len| len.checked_add(authority_len))
+        .and_then(|len| len.checked_add(parts.uri.path().len()))
+        .and_then(|len| len.checked_add(parts.uri.query().map_or(0, str::len)))
+        .ok_or(HttpError::LimitExceeded("protected_context_len"))?;
+    if len > MAX_PROTECTED_CONTEXT_BYTES {
+        return Err(HttpError::LimitExceeded("protected_context_len"));
+    }
+    Ok(len)
+}
+
 fn push_field(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
     out.push(tag);
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -503,10 +580,12 @@ mod tests {
         let (pay_parts, _) = pay.into_parts();
         let (refund_parts, _) = refund.into_parts();
         let binding = ContextBinding::default();
-        let pay_aad =
-            ProtectedContext::for_request(&pay_parts, carrier.clone(), binding).to_aad_bytes();
-        let refund_aad =
-            ProtectedContext::for_request(&refund_parts, carrier, binding).to_aad_bytes();
+        let pay_aad = ProtectedContext::for_request(&pay_parts, carrier.clone(), binding)
+            .expect("context within limits")
+            .to_aad_bytes();
+        let refund_aad = ProtectedContext::for_request(&refund_parts, carrier, binding)
+            .expect("context within limits")
+            .to_aad_bytes();
         assert_ne!(pay_aad, refund_aad);
     }
 
@@ -515,7 +594,8 @@ mod tests {
         let carrier = ContextCarrier::generate(1000, 60);
         let req = Request::builder().uri("/x").body(()).expect("request");
         let (parts, _) = req.into_parts();
-        let ctx = ProtectedContext::for_request(&parts, carrier, ContextBinding::default());
+        let ctx = ProtectedContext::for_request(&parts, carrier, ContextBinding::default())
+            .expect("context within limits");
 
         ctx.validate_freshness(1030, 5).expect("within window");
         assert!(matches!(
@@ -549,11 +629,15 @@ mod tests {
         let (b_parts, _) = tenant_b.into_parts();
         let (none_parts, _) = no_header.into_parts();
 
-        let a_aad =
-            ProtectedContext::for_request(&a_parts, carrier.clone(), binding).to_aad_bytes();
-        let b_aad =
-            ProtectedContext::for_request(&b_parts, carrier.clone(), binding).to_aad_bytes();
-        let none_aad = ProtectedContext::for_request(&none_parts, carrier, binding).to_aad_bytes();
+        let a_aad = ProtectedContext::for_request(&a_parts, carrier.clone(), binding)
+            .expect("context within limits")
+            .to_aad_bytes();
+        let b_aad = ProtectedContext::for_request(&b_parts, carrier.clone(), binding)
+            .expect("context within limits")
+            .to_aad_bytes();
+        let none_aad = ProtectedContext::for_request(&none_parts, carrier, binding)
+            .expect("context within limits")
+            .to_aad_bytes();
 
         assert_ne!(a_aad, b_aad, "different header values must diverge");
         assert_ne!(a_aad, none_aad, "missing the bound header must diverge");
@@ -574,12 +658,14 @@ mod tests {
             carrier.clone(),
             ContextBinding::default().with_bound_headers(&["x-tenant-id"]),
         )
+        .expect("context within limits")
         .to_aad_bytes();
         let mixed = ProtectedContext::for_request(
             &parts,
             carrier,
             ContextBinding::default().with_bound_headers(&["X-Tenant-Id"]),
         )
+        .expect("context within limits")
         .to_aad_bytes();
 
         assert_ne!(lower, mixed);
@@ -602,10 +688,12 @@ mod tests {
         let (with_parts, _) = with_header.into_parts();
         let (without_parts, _) = without_header.into_parts();
 
-        let with_aad =
-            ProtectedContext::for_request(&with_parts, carrier.clone(), binding).to_aad_bytes();
-        let without_aad =
-            ProtectedContext::for_request(&without_parts, carrier, binding).to_aad_bytes();
+        let with_aad = ProtectedContext::for_request(&with_parts, carrier.clone(), binding)
+            .expect("context within limits")
+            .to_aad_bytes();
+        let without_aad = ProtectedContext::for_request(&without_parts, carrier, binding)
+            .expect("context within limits")
+            .to_aad_bytes();
         assert_eq!(with_aad, without_aad);
     }
 
@@ -622,8 +710,94 @@ mod tests {
             .expect("response");
         let (ok_parts, _) = ok.into_parts();
         let (created_parts, _) = created.into_parts();
-        let ok_aad = ProtectedContext::for_response(&ok_parts, carrier.clone()).to_aad_bytes();
-        let created_aad = ProtectedContext::for_response(&created_parts, carrier).to_aad_bytes();
+        let ok_aad = ProtectedContext::for_response(&ok_parts, carrier.clone())
+            .expect("context within limits")
+            .to_aad_bytes();
+        let created_aad = ProtectedContext::for_response(&created_parts, carrier)
+            .expect("context within limits")
+            .to_aad_bytes();
         assert_ne!(ok_aad, created_aad);
+    }
+
+    #[test]
+    fn request_context_rejects_excess_bound_headers() {
+        let request = Request::builder().uri("/x").body(()).expect("request");
+        let (parts, _) = request.into_parts();
+        let names = ["x-budget"; MAX_BOUND_HEADERS + 1];
+
+        let err = ProtectedContext::for_request_with_header_binding(
+            &parts,
+            ContextCarrier::generate(1000, 60),
+            false,
+            names,
+        )
+        .expect_err("bound-header count must be capped");
+        assert!(matches!(
+            err,
+            HttpError::LimitExceeded("bound_header_count")
+        ));
+    }
+
+    #[test]
+    fn request_context_rejects_huge_bound_header_before_copying_value() {
+        let oversized = vec![b'a'; MAX_BOUND_HEADER_VALUE_BYTES + 1];
+        let request = Request::builder()
+            .uri("/x")
+            .header(
+                "x-budget",
+                HeaderValue::from_bytes(&oversized).expect("valid header bytes"),
+            )
+            .body(())
+            .expect("request");
+        let (parts, _) = request.into_parts();
+
+        let err = ProtectedContext::for_request_with_header_binding(
+            &parts,
+            ContextCarrier::generate(1000, 60),
+            false,
+            ["x-budget"],
+        )
+        .expect_err("bound-header value must be capped");
+        assert!(matches!(
+            err,
+            HttpError::LimitExceeded("bound_header_value_len")
+        ));
+    }
+
+    #[test]
+    fn request_context_rejects_huge_route_before_copying_it() {
+        let uri = format!("/{}", "a".repeat(MAX_PROTECTED_CONTEXT_BYTES / 2));
+        let request = Request::builder().uri(uri).body(()).expect("request");
+        let (parts, _) = request.into_parts();
+        let carrier = ContextCarrier::generate(1000, 60)
+            .with_idempotency_key("i".repeat(MAX_PROTECTED_CONTEXT_BYTES / 2));
+
+        let err = ProtectedContext::for_request(&parts, carrier, ContextBinding::default())
+            .expect_err("aggregate protected context must be capped");
+        assert!(matches!(
+            err,
+            HttpError::LimitExceeded("protected_context_len")
+        ));
+    }
+
+    #[test]
+    fn carrier_rejects_huge_idempotency_value_before_copying_it() {
+        let mut headers = HeaderMap::new();
+        let carrier = ContextCarrier::generate(1000, 60);
+        carrier
+            .apply_to_headers(&mut headers)
+            .expect("base headers");
+        let oversized = vec![b'a'; MAX_PROTECTED_CONTEXT_BYTES + 1];
+        headers.insert(
+            IDEMPOTENCY_HEADER,
+            HeaderValue::from_bytes(&oversized).expect("valid header bytes"),
+        );
+
+        let err = ContextCarrier::from_headers(&headers)
+            .expect_err("idempotency value must be capped before String allocation");
+        assert!(matches!(
+            err,
+            HttpError::LimitExceeded("protected_context_len")
+        ));
     }
 }

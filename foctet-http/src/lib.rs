@@ -41,12 +41,15 @@ use http::{
     header::{self},
 };
 
-pub use config::{HttpConfig, HttpOpenOptions, HttpSealOptions};
+pub use config::{
+    HttpConfig, HttpOpenOptions, HttpOptionsError, HttpSealOptions, MAX_HTTP_RECIPIENT_KEYS,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use context::unix_now_secs;
 pub use context::{
     ContextBinding, ContextCarrier, ContextDirection, DEFAULT_CONTEXT_TTL_SECS,
-    DEFAULT_MAX_CLOCK_SKEW_SECS, MESSAGE_ID_LEN, ProtectedContext,
+    DEFAULT_MAX_CLOCK_SKEW_SECS, MAX_BOUND_HEADER_NAME_BYTES, MAX_BOUND_HEADER_VALUE_BYTES,
+    MAX_BOUND_HEADERS, MAX_PROTECTED_CONTEXT_BYTES, MESSAGE_ID_LEN, ProtectedContext,
 };
 pub use error::{HttpError, HttpErrorDisposition};
 // Re-exported because it appears in public signatures (`HttpSealOptions`,
@@ -157,7 +160,7 @@ impl HttpSealer {
         binding: ContextBinding,
     ) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
-        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding)?;
         let aad = context.to_aad_bytes();
         let sealed = self.seal_body_with_aad(&body, &aad)?;
         raw::set_foctet_content_type(&mut parts.headers);
@@ -176,7 +179,7 @@ impl HttpSealer {
         carrier: ContextCarrier,
     ) -> Result<Response<Vec<u8>>, HttpError> {
         let (mut parts, body) = response.into_parts();
-        let context = ProtectedContext::for_response(&parts, carrier.clone());
+        let context = ProtectedContext::for_response(&parts, carrier.clone())?;
         let aad = context.to_aad_bytes();
         let sealed = self.seal_body_with_aad(&body, &aad)?;
         raw::set_foctet_content_type(&mut parts.headers);
@@ -392,7 +395,7 @@ impl HttpOpener {
         let (parts, body) = request.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
-        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
         let aad = context.to_aad_bytes();
         let plain = self.open_body_with_aad(&body, &aad)?;
@@ -425,7 +428,7 @@ impl HttpOpener {
         let (mut parts, body) = response.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
-        let context = ProtectedContext::for_response(&parts, carrier);
+        let context = ProtectedContext::for_response(&parts, carrier)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
 
         let aad = context.to_aad_bytes();
@@ -799,7 +802,9 @@ mod tests {
         // During the overlap window the recipient accepts both the current
         // (v2) key and the retiring (v1) key.
         let opener = HttpOpener::new(
-            HttpOpenOptions::new(new_priv.to_bytes()).with_recipient_key(old_priv.to_bytes()),
+            HttpOpenOptions::new(new_priv.to_bytes())
+                .with_recipient_key(old_priv.to_bytes())
+                .expect("two keys fit"),
         );
         assert_eq!(opener.options().recipient_key_count(), 2);
 
@@ -866,7 +871,9 @@ mod tests {
         // The non-matching old key is tried FIRST and fails authentication
         // before the matching new key succeeds.
         let opener = HttpOpener::new(
-            HttpOpenOptions::new(old_priv.to_bytes()).with_recipient_key(new_priv.to_bytes()),
+            HttpOpenOptions::new(old_priv.to_bytes())
+                .with_recipient_key(new_priv.to_bytes())
+                .expect("two keys fit"),
         );
         let sealer = HttpSealer::new(HttpSealOptions::new(new_pub, b"server-v2"));
         let store = InMemoryReplayStore::new();

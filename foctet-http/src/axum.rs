@@ -299,6 +299,7 @@ impl ::axum::response::IntoResponse for AxumError {
             AxumError::Http(HttpError::MissingContentType | HttpError::InvalidContentType) => {
                 StatusCode::BAD_REQUEST
             }
+            AxumError::Http(HttpError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
             AxumError::Http(
                 HttpError::MissingContext(_)
                 | HttpError::InvalidContext(_)

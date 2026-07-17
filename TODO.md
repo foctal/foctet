@@ -52,9 +52,13 @@ the same work twice.
   explicitly cancel. Outbound commit is allocation-free, and deterministic
   tests cover buffer rejection, allocation failure, partial/failed delivery,
   dropped and duplicate controls, and overlapping send/rekey attempts.
-- **P1-2 — In progress.** Archive builders now cap in-memory plaintext at 512 MiB and
-  use checked `u32` conversions for chunk counts, indices, lengths, and nonce
-  inputs, preventing chunk-nonce repetition through truncation. The remaining
+- **P1-2 — In progress.** Archive builders now cap in-memory plaintext at 512 MiB
+  and use checked `u32` conversions for chunk counts, indices, lengths, and
+  nonce inputs, preventing chunk-nonce repetition through truncation. HTTP
+  opener keyrings are capped at 16 keys before trial cryptography, and protected
+  contexts cap aggregate route/carrier data, bound-header count, names, and
+  values before copying them into AAD state. Boundary tests cover deep keyrings,
+  huge routes, huge context headers, and excessive header lists. The remaining
   cross-surface CPU/allocation limits and adversarial budget tests are open.
 - **P1-1 — Complete.** Message and datagram endpoints are now terminal after inbound
   authentication, parser, replay, key, or sequence failures, and reject all

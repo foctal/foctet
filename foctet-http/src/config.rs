@@ -1,5 +1,22 @@
 use foctet_core::BodyEnvelopeLimits;
+use thiserror::Error;
 use zeroize::Zeroizing;
+
+/// Maximum recipient secret keys accepted by an HTTP opener.
+///
+/// This bounds trial X25519, HKDF, and AEAD work for one envelope.
+pub const MAX_HTTP_RECIPIENT_KEYS: usize = 16;
+
+/// Invalid high-level HTTP option construction.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum HttpOptionsError {
+    /// At least one recipient key is required.
+    #[error("recipient keyring must not be empty")]
+    EmptyRecipientKeyring,
+    /// The recipient keyring exceeded [`MAX_HTTP_RECIPIENT_KEYS`].
+    #[error("recipient keyring exceeds the maximum of {MAX_HTTP_RECIPIENT_KEYS} keys")]
+    TooManyRecipientKeys,
+}
 
 /// Shared HTTP behavior configuration for high-level opener/sealer helpers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,15 +144,23 @@ impl HttpOpenOptions {
 
     /// Builds opening options from an ordered set of recipient secret keys.
     ///
-    /// Keys are tried in iteration order. Returns `None` if the iterator is
-    /// empty, since an opener with no key can never authenticate anything.
-    pub fn from_recipient_keys(keys: impl IntoIterator<Item = [u8; 32]>) -> Option<Self> {
-        let recipient_secret_keys: Vec<Zeroizing<[u8; 32]>> =
-            keys.into_iter().map(Zeroizing::new).collect();
-        if recipient_secret_keys.is_empty() {
-            return None;
+    /// Keys are tried in iteration order. Construction rejects an empty
+    /// iterator and stops before copying a key beyond
+    /// [`MAX_HTTP_RECIPIENT_KEYS`].
+    pub fn from_recipient_keys(
+        keys: impl IntoIterator<Item = [u8; 32]>,
+    ) -> Result<Self, HttpOptionsError> {
+        let mut recipient_secret_keys = Vec::new();
+        for key in keys {
+            if recipient_secret_keys.len() >= MAX_HTTP_RECIPIENT_KEYS {
+                return Err(HttpOptionsError::TooManyRecipientKeys);
+            }
+            recipient_secret_keys.push(Zeroizing::new(key));
         }
-        Some(Self {
+        if recipient_secret_keys.is_empty() {
+            return Err(HttpOptionsError::EmptyRecipientKeyring);
+        }
+        Ok(Self {
             recipient_secret_keys,
             limits: None,
         })
@@ -149,11 +174,16 @@ impl HttpOpenOptions {
     /// serves the most traffic first. Trial decryption is safe: a non-matching
     /// key fails authentication and, on the context-bound path, is rejected
     /// before the replay store is consulted, so it cannot consume a replay slot.
-    #[must_use]
-    pub fn with_recipient_key(mut self, recipient_secret_key: [u8; 32]) -> Self {
+    pub fn with_recipient_key(
+        mut self,
+        recipient_secret_key: [u8; 32],
+    ) -> Result<Self, HttpOptionsError> {
+        if self.recipient_secret_keys.len() >= MAX_HTTP_RECIPIENT_KEYS {
+            return Err(HttpOptionsError::TooManyRecipientKeys);
+        }
         self.recipient_secret_keys
             .push(Zeroizing::new(recipient_secret_key));
-        self
+        Ok(self)
     }
 
     /// Applies explicit body envelope limits.
@@ -215,7 +245,9 @@ mod tests {
 
     #[test]
     fn keyring_tracks_all_keys_in_insertion_order() {
-        let options = HttpOpenOptions::new([0x01; 32]).with_recipient_key([0x02; 32]);
+        let options = HttpOpenOptions::new([0x01; 32])
+            .with_recipient_key([0x02; 32])
+            .expect("two keys fit");
         assert_eq!(options.recipient_key_count(), 2);
         // The primary key is the first one; try order is insertion order.
         assert_eq!(*options.expose_recipient_secret_key(), [0x01; 32]);
@@ -226,15 +258,38 @@ mod tests {
 
     #[test]
     fn from_recipient_keys_rejects_empty_keyring() {
-        assert!(HttpOpenOptions::from_recipient_keys(Vec::<[u8; 32]>::new()).is_none());
+        assert!(matches!(
+            HttpOpenOptions::from_recipient_keys(Vec::<[u8; 32]>::new()),
+            Err(HttpOptionsError::EmptyRecipientKeyring)
+        ));
         let options =
             HttpOpenOptions::from_recipient_keys([[0x03; 32], [0x04; 32]]).expect("non-empty");
         assert_eq!(options.recipient_key_count(), 2);
     }
 
     #[test]
+    fn keyring_rejects_excess_keys_before_retaining_them() {
+        let err = HttpOpenOptions::from_recipient_keys([[0xA5; 32]; MAX_HTTP_RECIPIENT_KEYS + 1])
+            .expect_err("oversized keyring");
+        assert_eq!(err, HttpOptionsError::TooManyRecipientKeys);
+
+        let mut options = HttpOpenOptions::new([0x01; 32]);
+        for value in 1..MAX_HTTP_RECIPIENT_KEYS {
+            options = options
+                .with_recipient_key([value as u8; 32])
+                .expect("key within limit");
+        }
+        let err = options
+            .with_recipient_key([0xFF; 32])
+            .expect_err("key beyond limit");
+        assert_eq!(err, HttpOptionsError::TooManyRecipientKeys);
+    }
+
+    #[test]
     fn open_options_debug_redacts_every_key_but_shows_count() {
-        let options = HttpOpenOptions::new([0x4D; 32]).with_recipient_key([0x5E; 32]);
+        let options = HttpOpenOptions::new([0x4D; 32])
+            .with_recipient_key([0x5E; 32])
+            .expect("two keys fit");
         let rendered = format!("{options:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("recipient_key_count"));
