@@ -878,7 +878,8 @@ mod tests {
     };
 
     use super::{
-        DecodedFrame, FoctetFramed, FrameHeader, PROFILE_X25519_HKDF_XCHACHA20POLY1305, flags,
+        DecodedFrame, FoctetFramed, FoctetStream, FrameHeader,
+        PROFILE_X25519_HKDF_XCHACHA20POLY1305, flags,
     };
 
     #[derive(Default, Debug)]
@@ -1072,6 +1073,77 @@ mod tests {
             Pin::new(&mut framed).poll_ready(&mut cx),
             Poll::Ready(Err(CoreError::TransportTerminal))
         ));
+    }
+
+    #[test]
+    fn zero_byte_write_failure_makes_plain_stream_terminal() {
+        let keys = KeyHandle::new(crate::TrafficKeys {
+            key_id: 1,
+            c2s: [0x11; 32],
+            s2c: [0x22; 32],
+        });
+        let io = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: 0,
+            fail_flush: false,
+        };
+        let framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::C2S);
+        let mut stream = FoctetStream::new(framed);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut stream).poll_write_plain(&mut cx, b"first"),
+            Poll::Ready(Ok(5))
+        ));
+        assert!(matches!(
+            Pin::new(&mut stream).poll_flush_plain(&mut cx),
+            Poll::Ready(Err(CoreError::Io(_)))
+        ));
+        assert!(stream.framed_ref().is_terminal());
+        assert!(stream.framed_ref().get_ref().outbound.is_empty());
+
+        assert!(matches!(
+            Pin::new(&mut stream).poll_write_plain(&mut cx, b"different retry"),
+            Poll::Ready(Err(CoreError::TransportTerminal))
+        ));
+        assert!(stream.framed_ref().get_ref().outbound.is_empty());
+    }
+
+    #[test]
+    fn flush_failure_after_plain_stream_frame_is_terminal() {
+        let keys = KeyHandle::new(crate::TrafficKeys {
+            key_id: 1,
+            c2s: [0x11; 32],
+            s2c: [0x22; 32],
+        });
+        let io = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: usize::MAX,
+            fail_flush: true,
+        };
+        let framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::C2S);
+        let mut stream = FoctetStream::new(framed);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut stream).poll_write_plain(&mut cx, b"complete but ambiguous"),
+            Poll::Ready(Ok(22))
+        ));
+        assert!(matches!(
+            Pin::new(&mut stream).poll_flush_plain(&mut cx),
+            Poll::Ready(Err(CoreError::Io(_)))
+        ));
+        assert!(stream.framed_ref().is_terminal());
+        let emitted = stream.framed_ref().get_ref().outbound.clone();
+        assert!(!emitted.is_empty());
+
+        assert!(matches!(
+            Pin::new(&mut stream).poll_write_plain(&mut cx, b"different retry"),
+            Poll::Ready(Err(CoreError::TransportTerminal))
+        ));
+        assert_eq!(stream.framed_ref().get_ref().outbound, emitted);
     }
 
     #[test]

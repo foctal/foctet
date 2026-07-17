@@ -70,8 +70,13 @@ missing or reordered datagrams. An error from `send_datagram` or
 ## Ambiguous output and rekey
 
 After a partial write, write error, or flush error, `SyncIo` and
-`FoctetFramed` are terminal. Automatic-rekey control output also terminates its
-paired `Session` on failure, zeroizing live traffic keys. Delivery-sensitive
-applications must use authenticated message IDs and idempotent application
-operations; Foctet cannot determine whether an ambiguously failed encrypted
-send reached the peer.
+`FoctetFramed` (including `FoctetStream`) are terminal. Automatic-rekey control
+output also terminates its paired `Session` on failure, zeroizing live traffic
+keys. Native transport builders own the connection while handshaking and
+discard both the connection and uncommitted session after a partial write,
+write-zero, flush failure, peer close, timeout, or cancellation. They never
+return a half-completed handshake connection for retry.
+
+Delivery-sensitive applications must use authenticated message IDs and
+idempotent application operations; Foctet cannot determine whether an
+ambiguously failed encrypted send or handshake control reached the peer.

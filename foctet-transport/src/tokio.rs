@@ -317,8 +317,13 @@ where
 {
     let encoded = msg.encode();
     let len = u16::try_from(encoded.len()).map_err(|_| CoreError::InvalidControlMessage)?;
-    io.write_all(&len.to_be_bytes()).await?;
-    io.write_all(&encoded).await?;
+    let mut serialized = Vec::with_capacity(2 + encoded.len());
+    serialized.extend_from_slice(&len.to_be_bytes());
+    serialized.extend_from_slice(&encoded);
+    // Keep one immutable serialization alive until the complete handshake
+    // control has been written. The builder owns `io`, so any write or flush
+    // error drops the connection and the uncommitted session together.
+    io.write_all(&serialized).await?;
     io.flush().await?;
     Ok(())
 }
@@ -447,10 +452,129 @@ where
 
 #[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
+    use std::{
+        io,
+        pin::Pin,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll},
+    };
+
     use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     use super::TokioTransportBuilder;
     use crate::TransportConfig;
+
+    #[derive(Clone, Copy, Debug)]
+    enum HandshakeWriteFailure {
+        ErrorAfter(usize),
+        WriteZero,
+        Flush,
+        PeerClosed,
+    }
+
+    #[derive(Debug, Default)]
+    struct HandshakeWriteState {
+        outbound: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct FailingHandshakeIo {
+        failure: HandshakeWriteFailure,
+        state: Arc<Mutex<HandshakeWriteState>>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for FailingHandshakeIo {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl AsyncRead for FailingHandshakeIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            match self.failure {
+                HandshakeWriteFailure::PeerClosed => Poll::Ready(Ok(())),
+                _ => Poll::Pending,
+            }
+        }
+    }
+
+    impl AsyncWrite for FailingHandshakeIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut state = self.state.lock().expect("handshake state lock");
+            match self.failure {
+                HandshakeWriteFailure::ErrorAfter(limit) => {
+                    let remaining = limit.saturating_sub(state.outbound.len());
+                    if remaining == 0 {
+                        return Poll::Ready(Err(io::Error::other(
+                            "injected handshake write failure",
+                        )));
+                    }
+                    let written = remaining.min(buf.len());
+                    state.outbound.extend_from_slice(&buf[..written]);
+                    Poll::Ready(Ok(written))
+                }
+                HandshakeWriteFailure::WriteZero => Poll::Ready(Ok(0)),
+                HandshakeWriteFailure::Flush | HandshakeWriteFailure::PeerClosed => {
+                    state.outbound.extend_from_slice(buf);
+                    Poll::Ready(Ok(buf.len()))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match self.failure {
+                HandshakeWriteFailure::Flush => {
+                    Poll::Ready(Err(io::Error::other("injected handshake flush failure")))
+                }
+                _ => Poll::Ready(Ok(())),
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn assert_handshake_write_failure(
+        failure: HandshakeWriteFailure,
+        expected_emitted: Option<usize>,
+    ) {
+        let state = Arc::new(Mutex::new(HandshakeWriteState::default()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let io = FailingHandshakeIo {
+            failure,
+            state: state.clone(),
+            dropped: dropped.clone(),
+        };
+
+        let result = TokioTransportBuilder::new()
+            .establish_initiator(io, RekeyThresholds::default())
+            .await;
+        assert!(matches!(result, Err(foctet_core::CoreError::Io(_))));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "failed handshake must discard its owned connection"
+        );
+
+        let emitted = state.lock().expect("handshake state lock").outbound.len();
+        match expected_emitted {
+            Some(expected) => assert_eq!(emitted, expected),
+            None => assert!(emitted > 2, "complete handshake frame must be emitted"),
+        }
+    }
 
     fn make_session_pair() -> Result<(Session, Session), foctet_core::CoreError> {
         let thresholds = RekeyThresholds::default();
@@ -582,5 +706,14 @@ mod tests {
                 | Err(foctet_core::CoreError::Io(_))
                 | Err(foctet_core::CoreError::UnexpectedEof)
         ));
+    }
+
+    #[tokio::test]
+    async fn handshake_write_failures_discard_the_connection() {
+        assert_handshake_write_failure(HandshakeWriteFailure::ErrorAfter(0), Some(0)).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::ErrorAfter(7), Some(7)).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::WriteZero, Some(0)).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::Flush, None).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::PeerClosed, None).await;
     }
 }

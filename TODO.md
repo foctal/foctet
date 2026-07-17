@@ -25,18 +25,20 @@ public input, including apparently authenticated payloads.
 
 ## P0 — fix before any further production recommendation
 
-### Implementation tracking (updated 2026-07-13)
+### Implementation tracking (updated 2026-07-17)
 
 The checkboxes in the detailed sections below are the source of truth for
 progress. This summary deliberately uses status labels so it does not count
 the same work twice.
 
-- **P0-1 — In progress.** Synchronous `SyncIo` and async `FoctetFramed` now reserve
-  their sequence before output and permanently close after partial-write,
-  write, or flush failure, with regression coverage. A failed automatic-rekey
-  control write now also closes the paired `Session`. The equivalent failure
-  contract still needs to be completed for handshake writes and all
-  message/datagram transport adapters.
+- **P0-1 — Complete.** Synchronous `SyncIo`, async `FoctetFramed`/`FoctetStream`,
+  native handshake builders, and message/datagram transport channels now fail
+  closed after ambiguous output. Handshake controls retain one immutable
+  serialization through write and flush; any partial write, write-zero, flush
+  failure, peer close, timeout, or cancellation discards the owned connection
+  and uncommitted session. Regression coverage verifies terminal retry behavior
+  and connection disposal across the blocking, poll-based, Tokio, futures,
+  message, and datagram paths.
 - **P0-2 — Complete.** A shared zeroizing X25519 helper rejects all-zero shared
   secrets for handshake, body envelopes (including streaming bodies), and
   archive wrapping/unwrapping. Regression coverage includes all-zero and a
@@ -84,12 +86,12 @@ integrity.
 - [x] Apply the same failure contract to automatic-rekey control writes in
   `SyncIo` and `FoctetFramed`: an ambiguous write closes both the transport and
   its paired `Session`.
-- [ ] Apply the same failure contract to handshake writes, `FoctetStream`, and
+- [x] Apply the same failure contract to handshake writes, `FoctetStream`, and
   every message/datagram adapter built on blocking or async I/O.
 - [x] Add `SyncIo`/`FoctetFramed` fault-injection tests for partial writes,
   post-frame failures, flush failure, retry, and session closure. Assert
   byte-for-byte single emission or permanent closure and no nonce reuse.
-- [ ] Add equivalent fault-injection coverage for handshake and every
+- [x] Add equivalent fault-injection coverage for handshake and every
   transport adapter, including zero-byte failure and connection close.
 - [x] Document the delivery semantics precisely: encrypted transport cannot infer
   whether an ambiguous failed send was received, so applications must use
