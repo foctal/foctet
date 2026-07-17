@@ -221,6 +221,9 @@ pub enum CoreError {
     /// underlying I/O drained it; flush pending frames and retry.
     #[error("outbound buffer limit exceeded")]
     OutboundBufferLimitExceeded,
+    /// A fallible allocation was rejected before outbound delivery began.
+    #[error("resource allocation failed before delivery")]
+    ResourceExhausted,
     /// Unexpected EOF while reading/writing frame bytes.
     #[error("unexpected eof")]
     UnexpectedEof,
@@ -267,6 +270,7 @@ impl CoreError {
         match self {
             Self::FrameTooLarge
             | Self::OutboundBufferLimitExceeded
+            | Self::ResourceExhausted
             | Self::TlvTooLarge
             | Self::RekeyInProgress
             | Self::HandshakeRateLimited => CoreErrorDisposition::Recoverable,
@@ -315,6 +319,10 @@ mod error_disposition_tests {
         );
         assert_eq!(
             CoreError::RekeyInProgress.disposition(),
+            CoreErrorDisposition::Recoverable
+        );
+        assert_eq!(
+            CoreError::ResourceExhausted.disposition(),
             CoreErrorDisposition::Recoverable
         );
         assert_eq!(

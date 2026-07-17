@@ -30,7 +30,7 @@ otherwise conceal a diverged peer state, so it is terminal.
 
 | Errors | Disposition | Required action |
 | --- | --- | --- |
-| `FrameTooLarge`, `TlvTooLarge`, `OutboundBufferLimitExceeded`, `RekeyInProgress`, `HandshakeRateLimited` | Recoverable | Correct input, drain queued output, resume/cancel the prepared rekey, or wait before retrying. |
+| `FrameTooLarge`, `TlvTooLarge`, `OutboundBufferLimitExceeded`, `ResourceExhausted`, `RekeyInProgress`, `HandshakeRateLimited` | Recoverable | Correct input, drain queued output, resume/cancel the prepared rekey, or wait before retrying. |
 | All other `CoreError` variants, including parser/header errors, AEAD/HKDF/DH failures, replay errors, invalid control or session state, key/sequence exhaustion, I/O/EOF, and handshake authentication/timeout failures | Terminal | Discard the endpoint/session and establish a new authenticated session. |
 
 Stateless helpers may return `CoreError` without retaining a session. Their

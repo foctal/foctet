@@ -138,7 +138,9 @@ documented, and thoroughly tested:
    commit. Message/datagram workflows send the same transaction over a
    reliable encrypted control channel before adopting the new datagram key.
    An ambiguous output failure is terminal because Foctet has no
-   rekey-delivery acknowledgement.
+   rekey-delivery acknowledgement. Outbound rekey commit performs no fallible
+   allocation; retained-key storage is reserved during the pre-delivery prepare
+   phase.
 3. **Datagram support (near-complete).** A dedicated datagram API
    (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
    size cap, authenticate-before-replay, loss/reorder tolerant) ships with a

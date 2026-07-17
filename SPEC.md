@@ -247,6 +247,8 @@ session MUST close. Byte-stream channels flush before explicit rekey commit.
 Cancellation while an asynchronous flush is pending MUST retain the exact
 prepared control and allow only resumption of that transaction; it MUST NOT
 permit new application output or a different rekey.
+All fallible outbound rekey allocations, including retained-key storage, MUST
+complete during prepare and before control delivery. Commit MUST NOT allocate.
 Datagram sessions MUST use a reliable, ordered encrypted control channel; the
 control send/receive and datagram-key adoption form one fail-closed operation.
 

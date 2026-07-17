@@ -25,7 +25,7 @@ public input, including apparently authenticated payloads.
 
 ## P0 — fix before any further production recommendation
 
-### Implementation tracking (updated 2026-07-17)
+### Implementation tracking (updated 2026-07-18)
 
 The checkboxes in the detailed sections below are the source of truth for
 progress. This summary deliberately uses status labels so it does not count
@@ -44,13 +44,14 @@ the same work twice.
   archive wrapping/unwrapping. Regression coverage includes all-zero and a
   known low-order input on seal/open paths; documentation now specifies the
   non-oracle error behavior.
-- **P0-3 — In progress.** `Session` now supports an immutable prepare/commit rekey
+- **P0-3 — Complete.** `Session` now supports an immutable prepare/commit rekey
   transaction with one pending generation per session; synchronous/async
   byte-stream automatic and explicit rekey, native transport builders, WASM,
   and message/datagram reliable-control workflows use it. Ambiguous delivery
   closes every paired channel/session, while proven pre-delivery rejection may
-  explicitly cancel. Remaining work is deterministic allocation-failure and
-  broader concurrency/state-machine fault coverage.
+  explicitly cancel. Outbound commit is allocation-free, and deterministic
+  tests cover buffer rejection, allocation failure, partial/failed delivery,
+  dropped and duplicate controls, and overlapping send/rekey attempts.
 - **P1-2 — In progress.** Archive builders now cap in-memory plaintext at 512 MiB and
   use checked `u32` conversions for chunk counts, indices, lengths, and nonce
   inputs, preventing chunk-nonce repetition through truncation. The remaining
@@ -142,7 +143,7 @@ diverged ratchet.
 - [x] Ensure automatic threshold rekey, explicit `force_rekey`, native transport
   builders, WASM `FoctetSession`, and datagram-control workflows use the same
   transaction.
-- [ ] Add deterministic tests for full outbound buffers, allocation failure hooks,
+- [x] Add deterministic tests for full outbound buffers, allocation failure hooks,
   partial control writes, dropped rekey controls, duplicate controls, and
   concurrent send/rekey attempts. Test that no path silently continues with
   different roots or key IDs.

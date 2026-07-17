@@ -486,4 +486,89 @@ mod tests {
         assert_eq!(initiator.state(), foctet_core::SessionState::Closed);
         assert!(initiator.active_keys().is_none());
     }
+
+    #[tokio::test]
+    async fn dropped_rekey_control_fails_closed_on_receive() {
+        let (mut initiator, mut responder) = session_pair();
+        let (data_a, data_b) = linked_pair();
+        let mut datagrams_a =
+            SecureDatagramChannel::from_active_session(data_a, &initiator).expect("a datagrams");
+        let mut datagrams_b =
+            SecureDatagramChannel::from_active_session(data_b, &responder).expect("b datagrams");
+        let (control_a, control_b) = linked_pair();
+        let mut control_a =
+            SecureMessageChannel::from_active_session(control_a, &initiator).expect("a control");
+        let mut control_b =
+            SecureMessageChannel::from_active_session(control_b, &responder).expect("b control");
+
+        datagrams_a
+            .send_rekey(&mut control_a, &mut initiator)
+            .await
+            .expect("sender commits accepted control");
+        control_b
+            .transport()
+            .inbox
+            .borrow_mut()
+            .pop_front()
+            .expect("drop queued rekey control");
+
+        assert!(matches!(
+            datagrams_b.recv_rekey(&mut control_b, &mut responder).await,
+            Err(MessageChannelError::Transport(_))
+        ));
+        assert!(datagrams_b.is_terminal());
+        assert!(control_b.is_terminal());
+        assert_eq!(responder.state(), foctet_core::SessionState::Closed);
+        assert_eq!(
+            initiator.active_keys().expect("sender key").key_id,
+            1,
+            "sender committed only the accepted generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_rekey_control_closes_receiver_without_advancing_twice() {
+        let (mut initiator, mut responder) = session_pair();
+        let (data_a, data_b) = linked_pair();
+        let mut datagrams_a =
+            SecureDatagramChannel::from_active_session(data_a, &initiator).expect("a datagrams");
+        let mut datagrams_b =
+            SecureDatagramChannel::from_active_session(data_b, &responder).expect("b datagrams");
+        let (control_a, control_b) = linked_pair();
+        let mut control_a =
+            SecureMessageChannel::from_active_session(control_a, &initiator).expect("a control");
+        let mut control_b =
+            SecureMessageChannel::from_active_session(control_b, &responder).expect("b control");
+
+        datagrams_a
+            .send_rekey(&mut control_a, &mut initiator)
+            .await
+            .expect("send rekey");
+        let duplicate = control_b
+            .transport()
+            .inbox
+            .borrow()
+            .front()
+            .expect("queued rekey")
+            .clone();
+        datagrams_b
+            .recv_rekey(&mut control_b, &mut responder)
+            .await
+            .expect("apply first rekey");
+        assert_eq!(responder.active_keys().expect("receiver key").key_id, 1);
+
+        control_b
+            .transport()
+            .inbox
+            .borrow_mut()
+            .push_back(duplicate);
+        assert!(matches!(
+            datagrams_b.recv_rekey(&mut control_b, &mut responder).await,
+            Err(MessageChannelError::Core(CoreError::Replay))
+        ));
+        assert!(datagrams_b.is_terminal());
+        assert!(control_b.is_terminal());
+        assert_eq!(responder.state(), foctet_core::SessionState::Closed);
+        assert!(responder.active_keys().is_none());
+    }
 }

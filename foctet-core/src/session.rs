@@ -57,6 +57,40 @@ use crate::{
     observe::{ObserverHandle, SessionEvent, SessionObserver},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RekeyPrepareFault {
+    BeforeDerivation,
+    BeforeRetentionAllocation,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static REKEY_PREPARE_FAULT: std::cell::Cell<Option<RekeyPrepareFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn set_rekey_prepare_fault(fault: RekeyPrepareFault) {
+    REKEY_PREPARE_FAULT.with(|slot| slot.set(Some(fault)));
+}
+
+#[cfg(test)]
+fn rekey_prepare_fault(point: RekeyPrepareFault) -> Result<(), CoreError> {
+    REKEY_PREPARE_FAULT.with(|slot| {
+        if slot.get() == Some(point) {
+            slot.set(None);
+            Err(CoreError::ResourceExhausted)
+        } else {
+            Ok(())
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn rekey_prepare_fault(_point: RekeyPrepareFault) -> Result<(), CoreError> {
+    Ok(())
+}
+
 /// Role of this endpoint in the native handshake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandshakeRole {
@@ -107,6 +141,7 @@ pub struct PreparedRekey {
     local_eph: EphemeralKeyPair,
     ratchet_root: Zeroizing<[u8; 32]>,
     next_keys: KeyHandle,
+    previous_keys: Vec<KeyHandle>,
 }
 
 impl core::fmt::Debug for PreparedRekey {
@@ -118,6 +153,7 @@ impl core::fmt::Debug for PreparedRekey {
             .field("local_eph", &self.local_eph)
             .field("ratchet_root", &"<redacted>")
             .field("next_keys", &self.next_keys)
+            .field("previous_key_count", &self.previous_keys.len())
             .finish()
     }
 }
@@ -572,7 +608,8 @@ impl Session {
     /// `old_key_id` before calling [`Self::commit_rekey`]. Only one prepared
     /// transaction may exist at a time. If the transport proves that no bytes
     /// were accepted, call [`Self::cancel_prepared_rekey`] before preparing
-    /// another transaction.
+    /// another transaction. This phase reserves retained-key storage so commit
+    /// performs no fallible allocation after control delivery.
     pub fn prepare_rekey(&mut self) -> Result<PreparedRekey, CoreError> {
         if self.state == SessionState::Closed {
             return Err(CoreError::TransportTerminal);
@@ -591,6 +628,7 @@ impl Session {
             .active_keys
             .clone()
             .ok_or(CoreError::InvalidSessionState)?;
+        rekey_prepare_fault(RekeyPrepareFault::BeforeDerivation)?;
         let old_key_id = active.key_id;
         let new_key_id = old_key_id.checked_add(1).ok_or(CoreError::KeyIdExhausted)?;
         let peer_public = self
@@ -603,6 +641,19 @@ impl Session {
         let mut dh = new_eph.shared_secret(peer_public)?;
         let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, new_key_id)?;
         dh.zeroize();
+        rekey_prepare_fault(RekeyPrepareFault::BeforeRetentionAllocation)?;
+        let retained_count = self
+            .thresholds
+            .max_previous_keys
+            .min(self.previous_keys.len().saturating_add(1));
+        let mut previous_keys = Vec::new();
+        previous_keys
+            .try_reserve_exact(retained_count)
+            .map_err(|_| CoreError::ResourceExhausted)?;
+        if retained_count > 0 {
+            previous_keys.push(active.clone());
+            previous_keys.extend(self.previous_keys.iter().take(retained_count - 1).cloned());
+        }
         let ratchet_public = new_eph.public;
         let transcript_binding =
             rekey_binding(old_key_id, new_key_id, &ratchet_public, self.session_salt);
@@ -619,12 +670,14 @@ impl Session {
             local_eph: new_eph,
             ratchet_root: Zeroizing::new(new_root),
             next_keys: KeyHandle::new(next),
+            previous_keys,
         };
         self.pending_rekey = Some(prepared.transaction_id);
         Ok(prepared)
     }
 
-    /// Commits a rekey that was already accepted for outbound delivery.
+    /// Commits a rekey that was already accepted for outbound delivery without
+    /// performing a fallible allocation.
     pub fn commit_rekey(&mut self, prepared: PreparedRekey) -> Result<(), CoreError> {
         if self.state == SessionState::Closed {
             return Err(CoreError::TransportTerminal);
@@ -649,13 +702,15 @@ impl Session {
             local_eph,
             ratchet_root,
             next_keys,
+            previous_keys,
             ..
         } = prepared;
         self.pending_rekey = None;
         self.local_eph = local_eph;
         self.ratchet_root.zeroize();
         self.ratchet_root = *ratchet_root;
-        self.install_new_active_key(next_keys);
+        self.previous_keys = previous_keys;
+        self.active_keys = Some(next_keys);
         self.can_rekey = false;
         self.outbound_frames = 0;
         self.outbound_bytes = 0;
@@ -1342,6 +1397,34 @@ mod tests {
             client.active_keys().expect("new key").key_id,
             old.key_id + 1
         );
+    }
+
+    #[test]
+    fn rekey_prepare_allocation_failures_leave_both_peers_aligned() {
+        for fault in [
+            RekeyPrepareFault::BeforeDerivation,
+            RekeyPrepareFault::BeforeRetentionAllocation,
+        ] {
+            let (mut client, mut server) = active_pair();
+            let old = client.active_keys().expect("active key");
+            set_rekey_prepare_fault(fault);
+
+            assert!(matches!(
+                client.prepare_rekey(),
+                Err(CoreError::ResourceExhausted)
+            ));
+            assert_eq!(client.state(), SessionState::Active);
+            assert_eq!(client.active_keys().expect("old key retained"), old);
+            assert!(client.can_rekey());
+
+            let prepared = client
+                .prepare_rekey()
+                .expect("retry after pre-delivery failure");
+            let control = prepared.control_message().clone();
+            client.commit_rekey(prepared).expect("commit retry");
+            server.handle_control(&control).expect("peer applies retry");
+            assert_eq!(client.active_keys(), server.active_keys());
+        }
     }
 
     #[test]

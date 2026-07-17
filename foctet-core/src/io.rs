@@ -1006,6 +1006,43 @@ mod tests {
     }
 
     #[test]
+    fn partial_rekey_control_write_closes_the_session_with_sync_io() {
+        let mut session = active_initiator(1);
+        let keys = session.active_keys().expect("active keys");
+        let app_payload =
+            crate::payload::encode_tlvs(&[
+                crate::Tlv::application_data(b"trigger rekey").expect("application TLV")
+            ])
+            .expect("application payload");
+        let app_frame_len =
+            encrypt_frame(&keys, session.outbound_direction(), 0, 0, 0, &app_payload)
+                .expect("application frame")
+                .to_bytes()
+                .len();
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: app_frame_len + 7,
+            fail_on_flush: None,
+            flushes: 0,
+        };
+        let mut io = SyncIo::new(
+            transport,
+            keys,
+            session.inbound_direction(),
+            session.outbound_direction(),
+        );
+
+        assert!(matches!(
+            io.send_data_with_session(&mut session, 0, 0, b"trigger rekey"),
+            Err(CoreError::Io(_))
+        ));
+        assert_eq!(io.io.outbound.len(), app_frame_len + 7);
+        assert!(io.is_terminal());
+        assert_eq!(session.state(), SessionState::Closed);
+        assert!(session.active_keys().is_none());
+    }
+
+    #[test]
     fn authentication_failure_makes_sync_io_terminal() {
         let keys = test_keys();
 
