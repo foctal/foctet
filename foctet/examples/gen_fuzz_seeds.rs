@@ -109,18 +109,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The fuzz target opens with inbound = S2C, so seal with outbound = S2C.
     let dgram_keys =
         core::KeyHandle::new(core::derive_traffic_keys(&traffic_ikm, &traffic_salt, 0)?);
-    let mut datagram_sealer = core::DatagramEndpoint::new(
-        dgram_keys.clone(),
-        core::Direction::C2S,
-        core::Direction::S2C,
-    );
+    let mut datagram_sealer =
+        core::DatagramEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+            dgram_keys.clone(),
+            core::Direction::C2S,
+            core::Direction::S2C,
+        );
     write_seed(
         "datagram_message",
         "sealed_datagram",
         &datagram_sealer.seal(0, 0, b"fuzz seed datagram payload")?,
     )?;
     let mut message_sealer =
-        core::MessageEndpoint::new(dgram_keys, core::Direction::C2S, core::Direction::S2C);
+        core::MessageEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+            dgram_keys,
+            core::Direction::C2S,
+            core::Direction::S2C,
+        );
     write_seed(
         "datagram_message",
         "sealed_message",

@@ -177,9 +177,13 @@ fn handshake_vector_matches() {
     assert_eq!(shared, expected_shared);
 
     let keys = core::derive_traffic_keys(&shared, &session_salt, 1).expect("derive traffic keys");
-    assert_eq!(keys.c2s, expected_c2s);
-    assert_eq!(keys.s2c, expected_s2c);
-    assert_ne!(keys.c2s, keys.s2c, "directional keys must be different");
+    assert_eq!(keys.key_for(core::Direction::C2S), expected_c2s);
+    assert_eq!(keys.key_for(core::Direction::S2C), expected_s2c);
+    assert_ne!(
+        keys.key_for(core::Direction::C2S),
+        keys.key_for(core::Direction::S2C),
+        "directional keys must be different"
+    );
 
     let client_identity = SigningKey::from_bytes(&client_identity_priv);
     let server_identity = SigningKey::from_bytes(&server_identity_priv);
@@ -289,6 +293,78 @@ fn archive_vectors_match() {
 }
 
 #[test]
+fn shared_negative_corpus_rejects_body_stream_control_and_archive_failures() {
+    let negative = load_json("negative-v0.json");
+    let literals = negative["literals"].as_array().expect("literals");
+    let literal = |id: &str| {
+        literals
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap_or_else(|| panic!("missing literal {id}"))
+    };
+
+    let low_order = hex32(literal("low_order_x25519")["hex"].as_str().expect("hex"));
+    assert!(core::x25519_shared_secret(&StaticSecret::from([1u8; 32]), low_order).is_err());
+
+    let body = hex_decode(
+        literal("truncated_body_header")["hex"]
+            .as_str()
+            .expect("hex"),
+    );
+    assert!(matches!(
+        core::open_body(&body, [1u8; 32]),
+        Err(core::BodyEnvelopeError::Truncated)
+    ));
+
+    let stream = hex_decode(
+        literal("truncated_stream_header")["hex"]
+            .as_str()
+            .expect("hex"),
+    );
+    assert!(matches!(
+        core::StreamOpener::new(
+            [1u8; 32],
+            &stream,
+            b"",
+            &core::BodyEnvelopeLimits::default()
+        ),
+        Err(core::BodyEnvelopeError::Truncated)
+    ));
+
+    let control = hex_decode(literal("malformed_control")["hex"].as_str().expect("hex"));
+    assert!(matches!(
+        core::ControlMessage::decode(&control),
+        Err(core::CoreError::InvalidControlMessage)
+    ));
+
+    let archive_vector = load_json("archive-v0.json");
+    let recipient_private = hex32(
+        archive_vector["recipient_private_hex"]
+            .as_str()
+            .expect("recipient"),
+    );
+    let parts = archive_vector["parts_hex"]
+        .as_array()
+        .expect("parts")
+        .iter()
+        .map(|value| hex_decode(value.as_str().expect("part")))
+        .collect::<Vec<_>>();
+    let part_refs = parts.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let mut manifest = hex_decode(archive_vector["manifest_hex"].as_str().expect("manifest"));
+    let mutation = negative["mutations"]
+        .as_array()
+        .expect("mutations")
+        .iter()
+        .find(|entry| entry["id"] == "archive_manifest_corruption")
+        .expect("archive mutation");
+    let from_end = mutation["offset_from_end"].as_u64().expect("offset") as usize;
+    let offset = manifest.len() - from_end;
+    manifest[offset] ^= mutation["xor"].as_u64().expect("xor") as u8;
+    archive::decrypt_split_archive_to_bytes(&manifest, &part_refs, recipient_private)
+        .expect_err("shared corrupt archive vector must fail");
+}
+
+#[test]
 fn rekey_ratchet_vector_matches() {
     // Locks in the DH-ratchet key schedule: `derive_ratchet_root` then
     // `dh_ratchet_step`. A change to either HKDF label or the wiring breaks this.
@@ -330,6 +406,14 @@ fn rekey_ratchet_vector_matches() {
     // 3. One ratchet step → new root and traffic keys.
     let (new_root, keys) = core::dh_ratchet_step(&root, &dh, new_key_id).expect("dh ratchet step");
     assert_eq!(new_root, expected_new_root, "ratcheted root mismatch");
-    assert_eq!(keys.c2s, expected_c2s, "rekey c2s mismatch");
-    assert_eq!(keys.s2c, expected_s2c, "rekey s2c mismatch");
+    assert_eq!(
+        keys.key_for(core::Direction::C2S),
+        expected_c2s,
+        "rekey c2s mismatch"
+    );
+    assert_eq!(
+        keys.key_for(core::Direction::S2C),
+        expected_s2c,
+        "rekey s2c mismatch"
+    );
 }

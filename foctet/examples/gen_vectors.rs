@@ -162,8 +162,16 @@ fn main() {
     ));
     hs_json.push_str(&json_line("session_salt_hex", &hex(&hs_salt), true));
     hs_json.push_str(&json_line("shared_secret_hex", &hex(&shared), true));
-    hs_json.push_str(&json_line("key_c2s_hex", &hex(&hs_keys.c2s), true));
-    hs_json.push_str(&json_line("key_s2c_hex", &hex(&hs_keys.s2c), true));
+    hs_json.push_str(&json_line(
+        "key_c2s_hex",
+        &hex(&hs_keys.key_for(core::Direction::C2S)),
+        true,
+    ));
+    hs_json.push_str(&json_line(
+        "key_s2c_hex",
+        &hex(&hs_keys.key_for(core::Direction::S2C)),
+        true,
+    ));
     hs_json.push_str(&json_line(
         "client_hello_hex",
         &hex(&client_hello.encode()),
@@ -285,8 +293,16 @@ fn main() {
     rk_json.push_str(&json_line("rekey_dh_hex", &hex(&rk_dh), true));
     rk_json.push_str(&format!("  \"new_key_id\": {new_key_id},\n"));
     rk_json.push_str(&json_line("new_ratchet_root_hex", &hex(&rk_new_root), true));
-    rk_json.push_str(&json_line("rekey_key_c2s_hex", &hex(&rk_keys.c2s), true));
-    rk_json.push_str(&json_line("rekey_key_s2c_hex", &hex(&rk_keys.s2c), false));
+    rk_json.push_str(&json_line(
+        "rekey_key_c2s_hex",
+        &hex(&rk_keys.key_for(core::Direction::C2S)),
+        true,
+    ));
+    rk_json.push_str(&json_line(
+        "rekey_key_s2c_hex",
+        &hex(&rk_keys.key_for(core::Direction::S2C)),
+        false,
+    ));
     rk_json.push_str("}\n");
     fs::write(out_dir.join("rekey-v0.json"), rk_json).expect("write rekey vector");
 

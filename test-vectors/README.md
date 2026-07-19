@@ -41,6 +41,10 @@ This directory contains deterministic vectors for interoperability and regressio
   - `new_key_id`: integer
   - `new_ratchet_root_hex`, `rekey_key_c2s_hex`, `rekey_key_s2c_hex`: 32-byte hex
     (`dh_ratchet_step` outputs)
+- `negative-v0.json` — independently consumed mutation/literal cases for
+  unsupported versions/profiles, AEAD and signature corruption, low-order DH,
+  malformed control, body/stream truncation, archive corruption, key-id
+  exhaustion, and replay-window boundaries
 
 The archive vector is generated with fixed `ArchiveBuildSecrets` so repeated regeneration is byte-for-byte stable across runs.
 
