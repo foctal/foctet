@@ -47,6 +47,9 @@ for the production rotation procedure.
 Notes:
 
 - Demo keys are hardcoded and are not production-safe.
-- The example protects request and response bodies only; method, path, and headers remain outer HTTP metadata.
+- Requests bind method, path, query, freshness, and message ID. Responses bind
+  status and the initiating request message ID.
+- Replay decisions use a per-message Durable Object. Cloudflare KV is not a
+  substitute because it cannot perform the required atomic check-and-insert.
 - In production, combine this with HTTPS and your normal Worker authentication / authorization checks.
 - The example shows only body-complete encryption/decryption flow.

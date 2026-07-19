@@ -81,6 +81,31 @@ jobs:
       run: |
         export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
         wasm-pack test --headless --chrome foctet-wasm
+    - name: Install browser E2E driver
+      working-directory: foctet-wasm/examples/browser
+      run: npm ci
+    - name: Run real browser WebTransport E2E
+      env:
+        CHROME_PATH: /usr/bin/google-chrome
+      working-directory: foctet-wasm/examples/browser
+      run: npm run test:webtransport
+
+  workers-integration:
+    name: Cloudflare Workers + Durable Object integration
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    - name: Setup stable toolchain
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+        rustup target add wasm32-unknown-unknown
+    - name: Install Wrangler dependencies
+      working-directory: foctet-http/examples/workers-echo
+      run: npm ci
+    - name: Race and persistence tests against Wrangler
+      working-directory: foctet-http/examples/workers-echo
+      run: npm test
 
   interop-verify:
     name: Independent vector verification (Node)

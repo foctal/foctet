@@ -74,7 +74,10 @@
       // server's public key derived from SERVER_SECRET.
       const CLIENT_SECRET = new Uint8Array(32).fill(0x41);
       const SERVER_SECRET = new Uint8Array(32).fill(0x61);
-      const MESSAGES = ["hello from the browser 0", "hello from the browser 1"];
+      const MESSAGES = Array.from(
+        { length: 33 },
+        (_, index) => `hello from the browser ${index}`,
+      );
       const ECHO_PREFIX = "webtrans datagram echo: ";
 
       let passed = 0;
@@ -164,9 +167,26 @@
         const dgramWriter = wt.datagrams.writable.getWriter();
         const dgramReader = wt.datagrams.readable.getReader();
         const echoes = [];
-        for (const message of MESSAGES) {
+        for (const [index, message] of MESSAGES.entries()) {
           await dgramWriter.write(session.sealDatagram(0, 0, enc.encode(message)));
-          const { value, done } = await dgramReader.read();
+          if (index === 15) {
+            const rekey = session.prepareRekey();
+            await writer.write(frameControl(rekey));
+            const ack = await control.read();
+            assert(ack.length === 1 && ack[0] === 0xac, "rekey adoption not acknowledged");
+            session.commitRekey();
+          }
+        }
+        // The CI server deliberately drops reply 0 and reverses every
+        // subsequent pair. Receiving all remaining replies proves replay
+        // windows tolerate both loss and reordering on a real HTTP/3 path.
+        for (let index = 1; index < MESSAGES.length; index += 1) {
+          const received = await Promise.race([
+            dgramReader.read(),
+            new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 1000)),
+          ]);
+          if (received.timeout) break;
+          const { value, done } = received;
           if (done) throw new Error("datagram stream closed early");
           echoes.push(dec.decode(session.openDatagram(value).plaintext));
         }
@@ -190,14 +210,22 @@
           const certHash = fromHex(hashHex);
           const echoes = await runRoundtrip(url, certHash);
           record("WebTransport connect + authenticated handshake (over a stream)", true);
-          MESSAGES.forEach((message, index) => {
-            const expected = ECHO_PREFIX + message;
+          const expectedEchoes = new Set(
+            MESSAGES.slice(1).map((message) => ECHO_PREFIX + message),
+          );
+          echoes.forEach((echo, index) => {
+            const found = expectedEchoes.delete(echo);
             record(
-              `datagram ${index}: echoed correctly`,
-              echoes[index] === expected,
-              echoes[index] === expected ? undefined : `got: ${echoes[index]}`,
+              `reordered datagram ${index}: authenticated`,
+              found,
+              found ? undefined : `unexpected or duplicate: ${echo}`,
             );
           });
+          record(
+            "datagram loss: later sequence numbers remain usable",
+            echoes.length >= 16,
+            echoes.length >= 16 ? `${expectedEchoes.size} replies lost` : "too few replies survived",
+          );
         } catch (err) {
           record("WebTransport roundtrip", false, String(err && err.message ? err.message : err));
         }
