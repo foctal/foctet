@@ -1,8 +1,10 @@
-# Local test & hardening checks
+# Test and hardening gates
 
-Most tests run in CI (`.github/workflows/rust.yml`). A few heavier checks need a
-nightly toolchain or extra tooling and are run locally instead — typically
-before cutting a release.
+All required checks run in CI. `rust.yml` covers normal Rust, WASM/browser,
+Workers, and interoperability tests; `security.yml` covers Miri, dependency
+policy, SBOMs, and reproducibility; `fuzz.yml` runs retained corpora daily; and
+`release-rehearsal.yml` performs the maintainer-dispatched compatibility and
+artifact rehearsal. The commands below remain useful for reproducing failures.
 
 ## Miri
 
@@ -20,8 +22,9 @@ Run the filtered set covering the modules where memory-safety subtleties live
 framing). The full suite (handshakes, Ed25519) is impractically slow under Miri:
 
 ```bash
-cargo +nightly miri test -p foctet-core --no-default-features --locked -- \
-  replay:: payload:: limits:: control:: sequence:: crypto:: frame::
+for filter in replay:: payload:: limits:: control:: sequence:: crypto:: frame::; do
+  cargo +nightly miri test -p foctet-core --no-default-features --locked -- "$filter"
+done
 ```
 
 ## Fuzzing

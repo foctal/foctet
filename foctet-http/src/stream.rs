@@ -199,18 +199,30 @@ impl HttpStreamOpener {
 /// [`HttpError::StreamIncomplete`] unless the authenticated final chunk was seen,
 /// so a truncated or cancelled upload is rejected rather than silently accepted.
 ///
-/// ```rust,ignore
-/// // axum handler sketch
-/// let (parts, body) = request.into_parts();
-/// let mut reader = HttpRequestStreamReader::new(
-///     parts, recipient_secret_key, &store, now, skew, ContextBinding::default(), &limits);
-/// let mut stream = body.into_data_stream();
-/// while let Some(frame) = stream.next().await {
-///     for plaintext in reader.push(&frame?)? {
-///         sink.write_all(&plaintext).await?; // process without buffering the whole body
-///     }
+/// ```rust,no_run
+/// use foctet_http::{
+///     BodyEnvelopeLimits, ContextBinding, HttpRequestStreamReader, ReplayStore, http,
+/// };
+///
+/// // In a multi-instance deployment, `store` must be a shared durable atomic
+/// // implementation, not a per-process in-memory store.
+/// fn reader_for_request<'a, S: ReplayStore>(
+///     request: http::Request<()>,
+///     recipient_secret_key: [u8; 32],
+///     store: &'a S,
+///     limits: &BodyEnvelopeLimits,
+/// ) -> HttpRequestStreamReader<'a, S> {
+///     let (parts, _) = request.into_parts();
+///     HttpRequestStreamReader::new(
+///         parts,
+///         recipient_secret_key,
+///         store,
+///         1_700_000_000,
+///         30,
+///         ContextBinding::default(),
+///         limits,
+///     )
 /// }
-/// reader.finish()?; // rejects a truncated upload
 /// ```
 pub struct HttpRequestStreamReader<'s, S: ?Sized> {
     decoder: StreamFrameDecoder,

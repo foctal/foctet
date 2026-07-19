@@ -371,10 +371,13 @@ pub trait ProtectedHttpState: Send + Sync {
 ///
 /// Requires the application's `State` to implement [`ProtectedHttpState`]:
 ///
-/// ```ignore
+/// ```rust,no_run
+/// use axum::response::IntoResponse;
+/// use foctet_http::axum::ProtectedRequest;
+///
 /// async fn handler(ProtectedRequest(request): ProtectedRequest) -> impl IntoResponse {
 ///     let plaintext = request.body();
-///     // ...
+///     plaintext.len().to_string()
 /// }
 /// ```
 #[derive(Debug)]

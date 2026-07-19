@@ -16,21 +16,26 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
-//! use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
+//! ```rust
+//! use foctet_core::{ChannelBinding, ProductionSessionAuth, RekeyThresholds};
 //! use foctet_transport::TokioTransportBuilder;
 //!
-//! let auth = SessionAuthConfig::new()
-//!     .with_local_identity(IdentityKeyPair::generate())
-//!     .with_peer_identity(PeerIdentity::new(peer_identity_public_key))
-//!     .require_peer_authentication(true);
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), foctet_core::CoreError> {
+//! let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+//! let binding = ChannelBinding::new(b"authenticated outer channel exporter")?;
+//! let client_auth = ProductionSessionAuth::authenticated_channel(binding.clone());
+//! let server_auth = ProductionSessionAuth::authenticated_channel(binding);
 //!
-//! let builder = TokioTransportBuilder::new();
-//! let channel = builder
-//!     .establish_initiator_with_auth(stream, RekeyThresholds::default(), auth)
-//!     .await?;
-//! # let _ = channel;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! let (client, server) = tokio::join!(
+//!     TokioTransportBuilder::new().establish_production_initiator(
+//!         client_io, RekeyThresholds::default(), client_auth),
+//!     TokioTransportBuilder::new().establish_production_responder(
+//!         server_io, RekeyThresholds::default(), server_auth),
+//! );
+//! assert!(client.is_ok() && server.is_ok());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Transport-specific helpers follow the same authentication model; the main

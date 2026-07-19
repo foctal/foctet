@@ -254,17 +254,18 @@ diverged ratchet.
 
 ### P2-1: Verification and assurance pipeline
 
-- [ ] Add `cargo deny check --all-features` and a RustSec advisory check to CI;
+- [x] Add the cargo-deny all-features check (`cargo deny --all-features check`;
+  cargo-deny requires graph flags before the subcommand) and a RustSec advisory check to CI;
   this review could not run `cargo audit` locally because the subcommand is not
   installed. Revisit every temporary advisory exception on a fixed cadence.
-- [ ] Run fuzz targets continuously with corpus retention, sanitizers where
+- [x] Run fuzz targets continuously with corpus retention, sanitizers where
   applicable, OSS-Fuzz or equivalent long-running coverage, and a documented
   triage/SLA path. Add fuzz targets for handshake state, rekey transactions,
   HTTP context/header parsing, Workers adapters, and all archive encoders.
-- [ ] Add model/property/state-machine tests for concurrent operations, error
+- [x] Add model/property/state-machine tests for concurrent operations, error
   injection, retry, restart, replay, and ratchet ordering. Use differential
   testing between synchronous, async, message, datagram, and WASM paths.
-- [ ] Make Miri, feature/target matrices, WASM browser tests, interop tests,
+- [x] Make Miri, feature/target matrices, WASM browser tests, interop tests,
   reproducible-build checks, SBOM generation, and dependency/license review
   release gates rather than best-effort local commands.
 
@@ -273,20 +274,24 @@ diverged ratchet.
 - [ ] Commission an independent audit covering the protocol design, X25519/KDF/AEAD
   composition, nonce domains, ratchet, transcript authentication, replay,
   parsing/DoS, Rust/WASM FFI, HTTP, archive, and Cloudflare Workers adapters.
-- [ ] Publish a threat-model-to-test traceability matrix and audit remediation log.
+- [x] Publish a threat-model-to-test traceability matrix and audit remediation log.
   Do not mark a finding fixed solely because a unit test passes; include code
   review, regression proof, and cross-implementation evidence.
 - [ ] Define a security-contact key, supported-version window, advisory process,
   CVE/RustSec policy, and incident runbooks that take effect on v1.
+  The version, advisory, and incident policies are defined; completion remains
+  blocked on the maintainer generating and independently publishing the real
+  offline contact-key fingerprint. Repository automation must not fabricate or
+  retain that private key.
 
 ### P2-3: Availability, observability, and performance
 
-- [ ] Publish safe default limits and sizing guidance per runtime/transport, with
+- [x] Publish safe default limits and sizing guidance per runtime/transport, with
   benchmarked throughput/latency/memory ceilings and backpressure behavior.
-- [ ] Provide structured, secret-free metrics for handshakes, AEAD failures,
+- [x] Provide structured, secret-free metrics for handshakes, AEAD failures,
   replays, limit hits, rekeys, ambiguous sends, and Workers replay-store
   failures. Include rate-limiting guidance for pre-authentication work.
-- [ ] Test graceful shutdown, cancellation, partial reads/writes, task aborts,
+- [x] Test graceful shutdown, cancellation, partial reads/writes, task aborts,
   reconnect policy, and process restarts. State clearly which guarantees are
   unavailable without application-level persistence/idempotency.
 
@@ -296,14 +301,19 @@ diverged ratchet.
   semver compatibility tests, browser/Node/bundler smoke tests, and a clear
   key-extractability posture. Do not claim HSM/WebCrypto non-extractable key
   support until it exists and is tested.
-- [ ] Replace ignored security-critical doctests with compiled, runnable examples
+  Node/browser/bundler builds, generated-declaration checks, and smoke tests are
+  release gates; actual registry publication remains a manual maintainer action.
+- [x] Replace ignored security-critical doctests with compiled, runnable examples
   where feasible; ensure every example uses authenticated configuration and a
   durable replay store when applicable.
-- [ ] Add an API stability test suite and explicit deprecation/removal plan. Freeze
+- [x] Add an API stability test suite and explicit deprecation/removal plan. Freeze
   the public Rust, WASM/TypeScript, wire, archive, and HTTP surfaces together.
 - [ ] Perform a clean-room release rehearsal: fresh checkout, locked builds,
   target matrix, vector verification, artifact checksum/signing process, and
   rollback/incident procedure. Publishing and release execution remain manual.
+  The manually dispatched clean-room workflow and procedure are implemented;
+  this checkbox requires the maintainer to run it successfully for the actual
+  release candidate and retain the resulting evidence.
 
 ## Reference deployment acceptance scenarios
 

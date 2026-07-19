@@ -8,18 +8,14 @@
 //! sustained rate and a burst capacity, shared across connections by cloning
 //! the limiter (clones share one bucket).
 //!
-//! ```rust,ignore
+//! ```rust
 //! use foctet_transport::HandshakeRateLimiter;
 //!
 //! // Sustained 100 handshakes/second, bursts up to 200.
 //! let limiter = HandshakeRateLimiter::new(100.0, 200);
-//! loop {
-//!     let (stream, _addr) = listener.accept().await?;
-//!     limiter.admit()?; // fails fast with HandshakeRateLimited when saturated
-//!     let limiter_task = builder.establish_responder_with_auth_and_timeout(
-//!         stream, thresholds, auth.clone(), timeout);
-//!     // ...
-//! }
+//! limiter.admit().expect("first handshake admitted");
+//! // A listener calls `admit` before starting each authenticated handshake;
+//! // saturation fails fast with `HandshakeRateLimited`.
 //! ```
 //!
 //! # Cancellation

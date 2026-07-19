@@ -64,10 +64,20 @@ use websock_tungstenite_mux as websock_mux;
 /// Negotiate a [`foctet_core::Session`] first (for example over a Foctet control
 /// stream or an out-of-band handshake), then wrap the connection:
 ///
-/// ```rust,ignore
-/// let transport = WebsockMessageTransport::new(connection);
-/// let mut channel = SecureMessageChannel::from_active_session(transport, &session)?;
-/// channel.send_message(0, 0, b"hello").await?;
+/// ```rust,no_run
+/// use foctet_core::Session;
+/// use foctet_transport::{MessageChannelError, SecureMessageChannel};
+/// use foctet_transport::websock::WebsockMessageTransport;
+/// use websock::{Error, WebSocketConnection};
+///
+/// async fn send<C: WebSocketConnection>(
+///     connection: C,
+///     session: &Session,
+/// ) -> Result<(), MessageChannelError<Error>> {
+///     let transport = WebsockMessageTransport::new(connection);
+///     let mut channel = SecureMessageChannel::from_active_session(transport, session)?;
+///     channel.send_message(0, 0, b"hello").await
+/// }
 /// ```
 ///
 /// Sends and receives are serialized through an internal async lock, matching

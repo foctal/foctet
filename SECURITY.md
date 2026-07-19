@@ -30,6 +30,12 @@ or pull request for security problems.
 2. If you cannot use GitHub, email the maintainer at the address listed on the
    repository/crates.io profile, with `[foctet security]` in the subject.
 
+GitHub private vulnerability reporting is the encrypted security-contact
+channel until the maintainer publishes an offline contact-encryption public key
+and fingerprint under `security-keys/`. A v1 release is blocked until that key
+is present, independently fingerprint-verified, and its rotation/revocation
+procedure has been rehearsed. Never add a private key to this repository.
+
 Include a description, the affected crate(s) and version(s), impact as you
 understand it, and a reproduction if possible.
 
@@ -55,8 +61,12 @@ compromised endpoint (see `docs/THREAT_MODEL.md` for the trust boundary).
 ## Supported versions
 
 While the project is in the `0.x` Draft v0 line, only the latest published `0.x`
-release receives security fixes. There is no long-term-support branch yet. A
-supported-version policy will accompany the first `v1` release.
+release receives security fixes. Starting with v1, the current minor release
+and the immediately preceding minor release receive security fixes for at
+least 12 months after the newer minor is published. A major release receives
+critical security fixes for at least 24 months after its successor is
+published. The supported-version table in each advisory is authoritative when
+a protocol/profile must be disabled sooner for safety.
 
 ## What is protected today
 
