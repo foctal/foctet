@@ -11,9 +11,8 @@
 //! `quinn`, `webtrans`, `websock`, or `muxtls` when you want convenience
 //! wrappers around those transports.
 //!
-//! For production use, prefer `*_with_auth` methods together with
-//! `foctet_core::SessionAuthConfig` and pinned `foctet_core::PeerIdentity`
-//! values.
+//! For production use, prefer `establish_production_*` methods together with
+//! `foctet_core::ProductionSessionAuth`.
 //!
 //! # Quick Start
 //!
@@ -73,7 +72,9 @@ pub use error::{TransportChannelError, TransportErrorDisposition};
 pub use futures::{FuturesTransportBuilder, FuturesTransportChannel};
 pub use message::{MessageChannelError, MessageTransport, SecureMessageChannel};
 #[cfg(not(target_arch = "wasm32"))]
-pub use rate_limit::HandshakeRateLimiter;
+pub use rate_limit::{
+    HandshakeConcurrencyLimiter, HandshakePermit, HandshakeRateLimiter, MAX_CONCURRENT_HANDSHAKES,
+};
 #[cfg(feature = "runtime-futures")]
 pub use shape::ByteStreamTransport;
 pub use shape::SecureChannel;

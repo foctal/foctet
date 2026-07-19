@@ -35,6 +35,11 @@ fn to_key32_js(bytes: &[u8]) -> Result<[u8; KEY_LEN], JsError> {
     <[u8; KEY_LEN]>::try_from(bytes).map_err(|_| JsError::new("expected a 32-byte key"))
 }
 
+fn validated_channel_binding_bytes(bytes: &[u8]) -> Result<Vec<u8>, CoreError> {
+    ChannelBinding::new(bytes)?;
+    Ok(bytes.to_vec())
+}
+
 /// An Ed25519 long-term identity key pair used to authenticate a handshake.
 #[wasm_bindgen(js_name = IdentityKeyPair)]
 pub struct WasmIdentityKeyPair {
@@ -125,11 +130,13 @@ impl WasmAuthConfig {
     /// different outer channel fails closed. This is the production-oriented
     /// alternative to [`WasmAuthConfig::unauthenticated_for_testing`].
     #[wasm_bindgen(js_name = boundToChannel)]
-    pub fn bound_to_channel(channel_binding: &[u8]) -> WasmAuthConfig {
-        WasmAuthConfig {
+    pub fn bound_to_channel(channel_binding: &[u8]) -> Result<WasmAuthConfig, JsError> {
+        let channel_binding =
+            validated_channel_binding_bytes(channel_binding).map_err(core_to_js)?;
+        Ok(WasmAuthConfig {
             mode: AuthMode::UnauthenticatedForTesting,
-            channel_binding: Some(channel_binding.to_vec()),
-        }
+            channel_binding: Some(channel_binding),
+        })
     }
 
     /// Builds an unauthenticated config. Use only for tests or inside an
@@ -145,13 +152,15 @@ impl WasmAuthConfig {
     /// Returns a copy of this config additionally bound to `channel_binding`.
     ///
     /// Additive to any mode: both peers must supply the same binding or the
-    /// handshake fails. An empty binding leaves the transcript unchanged.
+    /// handshake fails.
     #[wasm_bindgen(js_name = withChannelBinding)]
-    pub fn with_channel_binding(&self, channel_binding: &[u8]) -> WasmAuthConfig {
-        WasmAuthConfig {
+    pub fn with_channel_binding(&self, channel_binding: &[u8]) -> Result<WasmAuthConfig, JsError> {
+        let channel_binding =
+            validated_channel_binding_bytes(channel_binding).map_err(core_to_js)?;
+        Ok(WasmAuthConfig {
             mode: self.mode.clone(),
-            channel_binding: Some(channel_binding.to_vec()),
-        }
+            channel_binding: Some(channel_binding),
+        })
     }
 }
 
@@ -168,7 +177,8 @@ impl WasmAuthConfig {
                 .require_peer_authentication(true),
         };
         if let Some(binding) = &self.channel_binding {
-            config = config.with_channel_binding(ChannelBinding::new(binding.clone()));
+            let binding = ChannelBinding::new(binding).expect("WASM auth validates binding length");
+            config = config.with_channel_binding(binding);
         }
         config
     }
@@ -506,7 +516,7 @@ impl FoctetSession {
                 return Err(error);
             }
         };
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         // A rekey control message rotates the session's active key; adopt it
         // on the framing endpoint so subsequent seals use the new key while
         // retained previous keys still open in-flight frames.
@@ -571,28 +581,25 @@ impl FoctetSession {
 
     /// Builds the framing endpoint (matching the session's mode) once the
     /// handshake reaches `Active`.
-    fn ensure_endpoint(&mut self) {
-        if self.endpoint.is_none()
-            && self.session.state() == SessionState::Active
-            && let Some(keys) = self.session.active_keys()
-        {
-            let inbound = self.session.inbound_direction();
-            let outbound = self.session.outbound_direction();
+    fn ensure_endpoint(&mut self) -> Result<(), CoreError> {
+        if self.endpoint.is_none() && self.session.state() == SessionState::Active {
             self.endpoint = Some(match self.kind {
-                TransportKind::Message => {
-                    SessionEndpoint::Message(MessageEndpoint::new(keys, inbound, outbound))
-                }
+                TransportKind::Message => SessionEndpoint::Message(
+                    MessageEndpoint::from_session_lease(self.session.claim_message_endpoint()?),
+                ),
                 TransportKind::Datagram { max_datagram_size } => {
                     let mut config = DatagramConfig::default();
                     if max_datagram_size > 0 {
                         config.max_datagram_size = max_datagram_size;
                     }
-                    SessionEndpoint::Datagram(DatagramEndpoint::with_config(
-                        keys, inbound, outbound, config,
+                    SessionEndpoint::Datagram(DatagramEndpoint::from_session_lease_with_config(
+                        self.session.claim_datagram_endpoint()?,
+                        config,
                     ))
                 }
             });
         }
+        Ok(())
     }
 
     fn seal_message_inner(
@@ -601,7 +608,7 @@ impl FoctetSession {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Message(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
             _ => Err(CoreError::InvalidSessionState),
@@ -609,7 +616,7 @@ impl FoctetSession {
     }
 
     fn open_message_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Message(endpoint)) => endpoint.open(message),
             _ => Err(CoreError::InvalidSessionState),
@@ -622,7 +629,7 @@ impl FoctetSession {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Datagram(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
             _ => Err(CoreError::InvalidSessionState),
@@ -630,7 +637,7 @@ impl FoctetSession {
     }
 
     fn open_datagram_inner(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Datagram(endpoint)) => endpoint.open(datagram),
             _ => Err(CoreError::InvalidSessionState),
@@ -733,8 +740,10 @@ mod tests {
     fn channel_bound_auth_config_completes_handshake() {
         // No Foctet identity: MITM resistance comes from a shared channel binding.
         let binding = b"tls-exporter:wasm-channel".to_vec();
-        let initiator_auth = WasmAuthConfig::bound_to_channel(&binding);
-        let responder_auth = WasmAuthConfig::bound_to_channel(&binding);
+        let initiator_auth =
+            WasmAuthConfig::bound_to_channel(&binding).expect("valid channel binding");
+        let responder_auth =
+            WasmAuthConfig::bound_to_channel(&binding).expect("valid channel binding");
 
         let mut initiator = FoctetSession::initiator(initiator_auth.build());
         let mut responder = FoctetSession::responder(responder_auth.build());
@@ -754,13 +763,24 @@ mod tests {
 
     #[test]
     fn mismatched_channel_binding_fails_wasm_handshake() {
-        let initiator_auth = WasmAuthConfig::bound_to_channel(b"channel-A");
-        let responder_auth = WasmAuthConfig::bound_to_channel(b"channel-B");
+        let initiator_auth =
+            WasmAuthConfig::bound_to_channel(b"channel-A").expect("valid channel binding");
+        let responder_auth =
+            WasmAuthConfig::bound_to_channel(b"channel-B").expect("valid channel binding");
         let mut initiator = FoctetSession::initiator(initiator_auth.build());
         let mut responder = FoctetSession::responder(responder_auth.build());
 
         let client_hello = initiator.initial_handshake_message().expect("client hello");
         assert!(responder.handle_handshake_inner(&client_hello).is_err());
+    }
+
+    #[test]
+    fn wasm_channel_binding_rejects_empty_and_oversized_values() {
+        assert!(validated_channel_binding_bytes(&[]).is_err());
+        assert!(
+            validated_channel_binding_bytes(&vec![0u8; foctet_core::MAX_CHANNEL_BINDING_LEN + 1])
+                .is_err()
+        );
     }
 
     #[test]
@@ -777,7 +797,8 @@ mod tests {
             &server_id.public_key(),
         )
         .expect("client auth")
-        .with_channel_binding(&binding);
+        .with_channel_binding(&binding)
+        .expect("valid channel binding");
         let server_auth = WasmAuthConfig::authenticated(
             &WasmIdentityKeyPair {
                 inner: IdentityKeyPair::from_secret_key_bytes(*server_id.expose_secret_key_bytes()),
@@ -785,7 +806,8 @@ mod tests {
             &client_id.public_key(),
         )
         .expect("server auth")
-        .with_channel_binding(&binding);
+        .with_channel_binding(&binding)
+        .expect("valid channel binding");
 
         let mut initiator = FoctetSession::initiator(client_auth.build());
         let mut responder = FoctetSession::responder(server_auth.build());

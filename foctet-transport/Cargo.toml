@@ -15,6 +15,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+# Explicit escape hatch for unauthenticated handshake convenience APIs. Never
+# enable in production; authenticated outer channels must use ChannelBinding.
+dangerous-unauthenticated = []
 runtime-tokio = ["dep:tokio", "foctet-core/runtime-tokio", "dep:futures-sink"]
 runtime-futures = ["dep:futures-io", "dep:futures-sink", "dep:futures-util", "foctet-core/runtime-futures"]
 transport-muxtls = ["dep:muxtls"]

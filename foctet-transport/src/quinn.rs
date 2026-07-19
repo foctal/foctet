@@ -124,15 +124,8 @@ impl QuinnDatagramChannel {
         session: &Session,
         config: DatagramConfig,
     ) -> Result<Self, CoreError> {
-        let keys = session
-            .active_keys()
-            .ok_or(CoreError::InvalidSessionState)?;
-        let endpoint = DatagramEndpoint::with_config(
-            keys,
-            session.inbound_direction(),
-            session.outbound_direction(),
-            config,
-        );
+        let lease = session.claim_datagram_endpoint()?;
+        let endpoint = DatagramEndpoint::from_session_lease_with_config(lease, config);
         Ok(Self {
             connection,
             endpoint,
@@ -175,6 +168,7 @@ impl QuinnDatagramChannel {
 }
 
 /// Opens a bidirectional Quinn stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel(
     connection: &quinn::Connection,
     session: Session,
@@ -186,6 +180,7 @@ pub async fn open_secure_channel(
 }
 
 /// Opens a bidirectional Quinn stream and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with(
     connection: &quinn::Connection,
     session: Session,
@@ -205,6 +200,7 @@ pub async fn open_secure_channel_with(
 }
 
 /// Opens a bidirectional Quinn stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake(
     connection: &quinn::Connection,
     thresholds: RekeyThresholds,
@@ -222,6 +218,7 @@ pub async fn open_secure_channel_with_handshake(
 }
 
 /// Opens a bidirectional Quinn stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake_and_config(
     connection: &quinn::Connection,
     thresholds: RekeyThresholds,
@@ -261,6 +258,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
 }
 
 /// Accepts a bidirectional Quinn stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel(
     connection: &quinn::Connection,
     session: Session,
@@ -272,6 +270,7 @@ pub async fn accept_secure_channel(
 }
 
 /// Accepts a bidirectional Quinn stream and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with(
     connection: &quinn::Connection,
     session: Session,
@@ -291,6 +290,7 @@ pub async fn accept_secure_channel_with(
 }
 
 /// Accepts a bidirectional Quinn stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake(
     connection: &quinn::Connection,
     thresholds: RekeyThresholds,
@@ -308,6 +308,7 @@ pub async fn accept_secure_channel_with_handshake(
 }
 
 /// Accepts a bidirectional Quinn stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake_and_config(
     connection: &quinn::Connection,
     thresholds: RekeyThresholds,

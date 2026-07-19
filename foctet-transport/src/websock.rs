@@ -119,6 +119,7 @@ where
 
 /// Opens a bidirectional WebSocket-mux stream and wraps it as a Foctet secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -131,6 +132,7 @@ pub async fn open_secure_channel(
 
 /// Opens a bidirectional WebSocket-mux stream and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -151,6 +153,7 @@ pub async fn open_secure_channel_with(
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and wraps it as a secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -169,6 +172,7 @@ pub async fn open_secure_channel_with_handshake(
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake_and_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -210,6 +214,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
 
 /// Accepts a bidirectional WebSocket-mux stream and wraps it as a Foctet secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -222,6 +227,7 @@ pub async fn accept_secure_channel(
 
 /// Accepts a bidirectional WebSocket-mux stream and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -242,6 +248,7 @@ pub async fn accept_secure_channel_with(
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and wraps it as a secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -260,6 +267,7 @@ pub async fn accept_secure_channel_with_handshake(
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake_and_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,

@@ -110,15 +110,8 @@ where
         session: &Session,
         config: MessageConfig,
     ) -> Result<Self, CoreError> {
-        let keys = session
-            .active_keys()
-            .ok_or(CoreError::InvalidSessionState)?;
-        let endpoint = MessageEndpoint::with_config(
-            keys,
-            session.inbound_direction(),
-            session.outbound_direction(),
-            config,
-        );
+        let lease = session.claim_message_endpoint()?;
+        let endpoint = MessageEndpoint::from_session_lease_with_config(lease, config);
         Ok(Self {
             transport,
             endpoint,
@@ -447,12 +440,20 @@ mod tests {
         let (client_io, server_io) = linked_pair();
         let mut client = SecureMessageChannel {
             transport: client_io,
-            endpoint: MessageEndpoint::new(k1.clone(), Direction::S2C, Direction::C2S),
+            endpoint: MessageEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+                k1.clone(),
+                Direction::S2C,
+                Direction::C2S,
+            ),
             terminal: false,
         };
         let mut server = SecureMessageChannel {
             transport: server_io,
-            endpoint: MessageEndpoint::new(k1, Direction::C2S, Direction::S2C),
+            endpoint: MessageEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+                k1,
+                Direction::C2S,
+                Direction::S2C,
+            ),
             terminal: false,
         };
 

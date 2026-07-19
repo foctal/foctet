@@ -33,11 +33,76 @@
 //! already taken.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
 use foctet_core::CoreError;
+
+/// Hard maximum concurrent admissions accepted by one limiter.
+pub const MAX_CONCURRENT_HANDSHAKES: usize = 65_536;
+
+/// Shared cap for concurrent handshakes or sessions.
+#[derive(Clone, Debug)]
+pub struct HandshakeConcurrencyLimiter {
+    inner: Arc<ConcurrencyState>,
+}
+
+#[derive(Debug)]
+struct ConcurrencyState {
+    active: AtomicUsize,
+    max: usize,
+}
+
+/// RAII admission permit. Dropping it releases one concurrent slot.
+#[derive(Debug)]
+pub struct HandshakePermit {
+    inner: Arc<ConcurrencyState>,
+}
+
+impl Drop for HandshakePermit {
+    fn drop(&mut self) {
+        self.inner.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl HandshakeConcurrencyLimiter {
+    /// Creates a shared limiter, clamped to `1..=MAX_CONCURRENT_HANDSHAKES`.
+    pub fn new(max_concurrent: usize) -> Self {
+        Self {
+            inner: Arc::new(ConcurrencyState {
+                active: AtomicUsize::new(0),
+                max: max_concurrent.clamp(1, MAX_CONCURRENT_HANDSHAKES),
+            }),
+        }
+    }
+
+    /// Acquires one slot or fails before handshake allocation and cryptography.
+    pub fn acquire(&self) -> Result<HandshakePermit, CoreError> {
+        self.inner
+            .active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.inner.max).then_some(active + 1)
+            })
+            .map_err(|_| CoreError::HandshakeConcurrencyLimited)?;
+        Ok(HandshakePermit {
+            inner: self.inner.clone(),
+        })
+    }
+
+    /// Returns the number of currently held permits.
+    pub fn active(&self) -> usize {
+        self.inner.active.load(Ordering::Acquire)
+    }
+
+    /// Returns the effective concurrent admission cap.
+    pub fn max_concurrent(&self) -> usize {
+        self.inner.max
+    }
+}
 
 /// Token-bucket admission control for inbound (or outbound) handshakes.
 ///
@@ -160,5 +225,28 @@ mod tests {
         let limiter = HandshakeRateLimiter::new(f64::NAN, 0);
         assert!(limiter.try_admit(), "burst clamps to 1");
         assert!(!limiter.try_admit());
+    }
+
+    #[test]
+    fn concurrency_permits_bound_and_release_active_work() {
+        let limiter = HandshakeConcurrencyLimiter::new(2);
+        let first = limiter.acquire().expect("first");
+        let second = limiter.acquire().expect("second");
+        assert_eq!(limiter.active(), 2);
+        assert!(matches!(
+            limiter.acquire(),
+            Err(CoreError::HandshakeConcurrencyLimited)
+        ));
+        drop(first);
+        let replacement = limiter.acquire().expect("released slot");
+        assert_eq!(limiter.active(), 2);
+        drop((second, replacement));
+        assert_eq!(limiter.active(), 0);
+    }
+
+    #[test]
+    fn concurrency_limit_clamps_hostile_configuration() {
+        let limiter = HandshakeConcurrencyLimiter::new(usize::MAX);
+        assert_eq!(limiter.max_concurrent(), MAX_CONCURRENT_HANDSHAKES);
     }
 }

@@ -101,7 +101,7 @@ async fn serve(
     let datagrams: usize = String::from_utf8(channel.recv_application().await?)?.parse()?;
     udp.connect(peer_udp).await?;
 
-    let transport = UdpDatagramTransport::new(udp).with_anti_amplification(factor);
+    let transport = UdpDatagramTransport::new(udp)?.with_anti_amplification(factor);
     let mut datagram = SecureDatagramChannel::from_active_session(transport, channel.session())?;
 
     // Anti-amplification: with zero bytes received the budget is zero, so an
@@ -156,7 +156,7 @@ async fn run_client(
         .send_application(datagrams.to_string().as_bytes())
         .await?;
 
-    let transport = UdpDatagramTransport::new(udp);
+    let transport = UdpDatagramTransport::new(udp)?;
     let mut datagram = SecureDatagramChannel::from_active_session(transport, channel.session())?;
 
     for idx in 0..datagrams {

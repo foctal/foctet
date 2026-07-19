@@ -123,15 +123,8 @@ where
         session: &Session,
         config: DatagramConfig,
     ) -> Result<Self, CoreError> {
-        let keys = session
-            .active_keys()
-            .ok_or(CoreError::InvalidSessionState)?;
-        let endpoint = DatagramEndpoint::with_config(
-            keys,
-            session.inbound_direction(),
-            session.outbound_direction(),
-            config,
-        );
+        let lease = session.claim_datagram_endpoint()?;
+        let endpoint = DatagramEndpoint::from_session_lease_with_config(lease, config);
         Ok(Self {
             transport,
             endpoint,

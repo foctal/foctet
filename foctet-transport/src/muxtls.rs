@@ -8,6 +8,7 @@ use crate::{
 };
 
 /// Opens a bidirectional muxtls stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel(
     connection: &muxtls::Connection,
     session: Session,
@@ -19,6 +20,7 @@ pub async fn open_secure_channel(
 }
 
 /// Opens a bidirectional muxtls stream and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with(
     connection: &muxtls::Connection,
     session: Session,
@@ -38,6 +40,7 @@ pub async fn open_secure_channel_with(
 }
 
 /// Opens a bidirectional muxtls stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake(
     connection: &muxtls::Connection,
     thresholds: RekeyThresholds,
@@ -55,6 +58,7 @@ pub async fn open_secure_channel_with_handshake(
 }
 
 /// Opens a bidirectional muxtls stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake_and_config(
     connection: &muxtls::Connection,
     thresholds: RekeyThresholds,
@@ -94,6 +98,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
 }
 
 /// Accepts a bidirectional muxtls stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel(
     connection: &muxtls::Connection,
     session: Session,
@@ -105,6 +110,7 @@ pub async fn accept_secure_channel(
 }
 
 /// Accepts a bidirectional muxtls stream and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with(
     connection: &muxtls::Connection,
     session: Session,
@@ -124,6 +130,7 @@ pub async fn accept_secure_channel_with(
 }
 
 /// Accepts a bidirectional muxtls stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake(
     connection: &muxtls::Connection,
     thresholds: RekeyThresholds,
@@ -141,6 +148,7 @@ pub async fn accept_secure_channel_with_handshake(
 }
 
 /// Accepts a bidirectional muxtls stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake_and_config(
     connection: &muxtls::Connection,
     thresholds: RekeyThresholds,

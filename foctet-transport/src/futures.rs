@@ -14,7 +14,7 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{TransportConfig, adapter::SplitIo};
 
-const HANDSHAKE_CONTROL_MAX_LEN: usize = 1024;
+const HANDSHAKE_CONTROL_MAX_LEN: usize = foctet_core::MAX_CONTROL_MESSAGE_LEN;
 
 /// Builder for the futures-io integration path.
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,6 +81,7 @@ impl FuturesTransportBuilder {
     }
 
     /// Runs the native Foctet handshake as initiator on the transport, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_initiator<T>(
         self,
         mut io: T,
@@ -112,7 +113,22 @@ impl FuturesTransportBuilder {
         self.build(io, session)
     }
 
+    /// Runs a production initiator handshake with typed authenticated config.
+    pub async fn establish_production_initiator<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        auth: foctet_core::ProductionSessionAuth,
+    ) -> Result<FuturesTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_initiator_with_auth(io, thresholds, auth.into_session_auth())
+            .await
+    }
+
     /// Runs the native Foctet handshake as responder on the transport, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_responder<T>(
         self,
         mut io: T,
@@ -142,6 +158,20 @@ impl FuturesTransportBuilder {
     {
         let session = run_responder_handshake(&mut io, thresholds, auth).await?;
         self.build(io, session)
+    }
+
+    /// Runs a production responder handshake with typed authenticated config.
+    pub async fn establish_production_responder<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        auth: foctet_core::ProductionSessionAuth,
+    ) -> Result<FuturesTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_responder_with_auth(io, thresholds, auth.into_session_auth())
+            .await
     }
 
     /// Runs the native Foctet handshake as initiator with explicit authentication
@@ -191,6 +221,7 @@ impl FuturesTransportBuilder {
     }
 
     /// Runs the native Foctet handshake as initiator on split transport halves, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_initiator_from_split<R, W>(
         self,
         recv: R,
@@ -206,6 +237,7 @@ impl FuturesTransportBuilder {
     }
 
     /// Runs the native Foctet handshake as responder on split transport halves, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_responder_from_split<R, W>(
         self,
         recv: R,
