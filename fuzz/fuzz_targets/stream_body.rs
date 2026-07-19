@@ -14,6 +14,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Incremental frame reassembly over the same bytes.
     let mut decoder = StreamFrameDecoder::new(&limits);
-    decoder.push(data);
+    if decoder.push(data).is_err() {
+        return;
+    }
     while let Ok(Some(_)) = decoder.decode_next() {}
 });
