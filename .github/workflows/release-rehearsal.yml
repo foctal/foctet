@@ -1,0 +1,93 @@
+name: Clean-room release rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "Previously released tag used for SemVer comparison"
+        required: true
+        default: "v0.3.0"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  api-and-package:
+    name: API and npm compatibility rehearsal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: Install stable Rust and WASM target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+      - name: Install pinned release tools
+        run: |
+          cargo install cargo-semver-checks --version 0.49.0 --locked
+          cargo install wasm-pack --version 0.14.0 --locked
+      - name: Verify baseline exists
+        run: git rev-parse --verify "${{ inputs.baseline }}^{commit}"
+      - name: Check Rust SemVer compatibility
+        run: cargo semver-checks check-release --workspace --baseline-rev "${{ inputs.baseline }}"
+      - name: Check WASM release target
+        run: |
+          cargo check -p foctet-http --features workers --locked --target wasm32-unknown-unknown
+          cargo check -p foctet-wasm --locked --target wasm32-unknown-unknown
+          cargo check -p foctet-transport --no-default-features --features transport-websock,transport-webtrans-browser --locked --target wasm32-unknown-unknown
+      - name: Build and smoke-test Node, browser, and bundler packages
+        working-directory: foctet-wasm
+        run: npm run test:package
+      - name: Run independent vectors
+        working-directory: interop
+        run: npm ci && npm test
+
+  target-matrix:
+    name: Locked release build (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build locked release artifacts
+        run: cargo build --workspace --all-features --release --locked --target ${{ matrix.target }}
+      - name: Test host target
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --workspace --all-features --release --locked --target ${{ matrix.target }}
+      - name: Retain unsigned rehearsal artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release
+          retention-days: 14
+
+  checksums:
+    name: Artifact checksums (unsigned rehearsal only)
+    needs: target-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: unsigned-*
+          path: artifacts
+      - name: Generate SHA-256 manifest
+        run: find artifacts -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-checksums
+          path: SHA256SUMS
+          retention-days: 14

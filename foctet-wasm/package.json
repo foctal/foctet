@@ -4,10 +4,12 @@
   "version": "0.3.0",
   "description": "Development harness for building and testing the Foctet WASM SDK",
   "scripts": {
-    "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
-    "build:web": "wasm-pack build --target web --out-dir pkg-web",
-    "build:bundler": "wasm-pack build --target bundler --out-dir pkg",
+    "build:node": "wasm-pack build --scope foctet --target nodejs --out-dir pkg-node",
+    "build:web": "wasm-pack build --scope foctet --target web --out-dir pkg-web",
+    "build:bundler": "wasm-pack build --scope foctet --target bundler --out-dir pkg",
+    "build:all": "npm run build:node && npm run build:web && npm run build:bundler",
     "test": "npm run build:node && node tests/node_interop.cjs",
+    "test:package": "npm run build:all && node ../scripts/check-wasm-package.mjs",
     "browser": "npm run build:web && node examples/browser/serve.mjs"
   }
 }
