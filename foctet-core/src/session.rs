@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -182,7 +188,7 @@ impl Default for RekeyThresholds {
 }
 
 /// Handshake + rekey state machine for Foctet Core.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Session {
     role: HandshakeRole,
     state: SessionState,
@@ -205,6 +211,24 @@ pub struct Session {
     outbound_bytes: u64,
     last_rekey_at: MonoInstant,
     observer: ObserverHandle,
+    message_endpoint_claimed: AtomicBool,
+    datagram_endpoint_claimed: AtomicBool,
+}
+
+/// Single-use ownership token for one message endpoint nonce domain.
+#[derive(Debug)]
+pub struct MessageEndpointKeyLease {
+    pub(crate) keys: KeyHandle,
+    pub(crate) inbound_direction: Direction,
+    pub(crate) outbound_direction: Direction,
+}
+
+/// Single-use ownership token for one datagram endpoint nonce domain.
+#[derive(Debug)]
+pub struct DatagramEndpointKeyLease {
+    pub(crate) keys: KeyHandle,
+    pub(crate) inbound_direction: Direction,
+    pub(crate) outbound_direction: Direction,
 }
 
 impl Drop for Session {
@@ -215,6 +239,14 @@ impl Drop for Session {
 }
 
 impl Session {
+    /// Creates a production initiator requiring typed authenticated configuration.
+    pub fn new_production_initiator(
+        thresholds: RekeyThresholds,
+        auth: crate::ProductionSessionAuth,
+    ) -> (Self, ControlMessage) {
+        Self::new_initiator_with_auth(thresholds, auth.into_session_auth())
+    }
+
     /// Creates an initiator session and returns the initial `ClientHello`.
     pub fn new_initiator(thresholds: RekeyThresholds) -> (Self, ControlMessage) {
         Self::new_initiator_with_auth(thresholds, SessionAuthConfig::default())
@@ -263,6 +295,8 @@ impl Session {
                 outbound_bytes: 0,
                 last_rekey_at: MonoInstant::now(),
                 observer: ObserverHandle::default(),
+                message_endpoint_claimed: AtomicBool::new(false),
+                datagram_endpoint_claimed: AtomicBool::new(false),
             },
             msg,
         )
@@ -271,6 +305,14 @@ impl Session {
     /// Creates a responder session waiting for a peer `ClientHello`.
     pub fn new_responder(thresholds: RekeyThresholds) -> Self {
         Self::new_responder_with_auth(thresholds, SessionAuthConfig::default())
+    }
+
+    /// Creates a production responder requiring typed authenticated configuration.
+    pub fn new_production_responder(
+        thresholds: RekeyThresholds,
+        auth: crate::ProductionSessionAuth,
+    ) -> Self {
+        Self::new_responder_with_auth(thresholds, auth.into_session_auth())
     }
 
     /// Creates a responder session with explicit authentication configuration.
@@ -294,6 +336,8 @@ impl Session {
             outbound_bytes: 0,
             last_rekey_at: MonoInstant::now(),
             observer: ObserverHandle::default(),
+            message_endpoint_claimed: AtomicBool::new(false),
+            datagram_endpoint_claimed: AtomicBool::new(false),
         }
     }
 
@@ -337,6 +381,32 @@ impl Session {
             HandshakeRole::Initiator => Direction::S2C,
             HandshakeRole::Responder => Direction::C2S,
         }
+    }
+
+    /// Claims the session's single message-endpoint outbound nonce domain.
+    pub fn claim_message_endpoint(&self) -> Result<MessageEndpointKeyLease, CoreError> {
+        let keys = self.active_keys().ok_or(CoreError::MissingSessionSecret)?;
+        self.message_endpoint_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CoreError::EndpointAlreadyClaimed)?;
+        Ok(MessageEndpointKeyLease {
+            keys,
+            inbound_direction: self.inbound_direction(),
+            outbound_direction: self.outbound_direction(),
+        })
+    }
+
+    /// Claims the session's single datagram-endpoint outbound nonce domain.
+    pub fn claim_datagram_endpoint(&self) -> Result<DatagramEndpointKeyLease, CoreError> {
+        let keys = self.active_keys().ok_or(CoreError::MissingSessionSecret)?;
+        self.datagram_endpoint_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CoreError::EndpointAlreadyClaimed)?;
+        Ok(DatagramEndpointKeyLease {
+            keys,
+            inbound_direction: self.inbound_direction(),
+            outbound_direction: self.outbound_direction(),
+        })
     }
 
     /// Installs an observer notified of session lifecycle events
@@ -961,6 +1031,38 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_nonce_domains_can_only_be_claimed_once_per_shape() {
+        let (mut client, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let reply = server
+            .handle_control(&hello)
+            .expect("server handshake")
+            .expect("server reply");
+        client.handle_control(&reply).expect("client handshake");
+
+        client
+            .claim_message_endpoint()
+            .expect("first message lease");
+        assert!(matches!(
+            client.claim_message_endpoint(),
+            Err(CoreError::EndpointAlreadyClaimed)
+        ));
+        client
+            .claim_datagram_endpoint()
+            .expect("message and datagram have separate nonce domains");
+        assert!(matches!(
+            client.claim_datagram_endpoint(),
+            Err(CoreError::EndpointAlreadyClaimed)
+        ));
+    }
+
+    #[test]
     fn dh_ratchet_alternates_and_rotates_both_sides_keys() {
         let (mut client, mut server) = active_pair();
 
@@ -1123,7 +1225,8 @@ mod tests {
     #[test]
     fn channel_binding_only_handshake_has_no_authenticated_peer() {
         use crate::ChannelBinding;
-        let binding = ChannelBinding::new(b"tls-exporter:no-identity".to_vec());
+        let binding =
+            ChannelBinding::new(b"tls-exporter:no-identity").expect("valid channel binding");
         let (mut client, hello) = Session::new_initiator_with_auth(
             RekeyThresholds::default(),
             SessionAuthConfig::bound_to_channel(binding.clone()),
@@ -1149,7 +1252,8 @@ mod tests {
     #[test]
     fn matching_channel_binding_completes_handshake_without_identity() {
         use crate::ChannelBinding;
-        let binding = ChannelBinding::new(b"tls-exporter:matching-outer-channel".to_vec());
+        let binding = ChannelBinding::new(b"tls-exporter:matching-outer-channel")
+            .expect("valid channel binding");
         let (mut client, hello) = Session::new_initiator_with_auth(
             RekeyThresholds::default(),
             SessionAuthConfig::bound_to_channel(binding.clone()),
@@ -1180,11 +1284,15 @@ mod tests {
         // Models a relay: each side is bound to a different outer channel.
         let (_client, hello) = Session::new_initiator_with_auth(
             RekeyThresholds::default(),
-            SessionAuthConfig::bound_to_channel(ChannelBinding::new(b"channel-A".to_vec())),
+            SessionAuthConfig::bound_to_channel(
+                ChannelBinding::new(b"channel-A").expect("valid channel binding"),
+            ),
         );
         let mut server = Session::new_responder_with_auth(
             RekeyThresholds::default(),
-            SessionAuthConfig::bound_to_channel(ChannelBinding::new(b"channel-B".to_vec())),
+            SessionAuthConfig::bound_to_channel(
+                ChannelBinding::new(b"channel-B").expect("valid channel binding"),
+            ),
         );
 
         let err = server
@@ -1199,7 +1307,9 @@ mod tests {
         // The initiator binds to a channel; the responder does not.
         let (_client, hello) = Session::new_initiator_with_auth(
             RekeyThresholds::default(),
-            SessionAuthConfig::bound_to_channel(ChannelBinding::new(b"channel-A".to_vec())),
+            SessionAuthConfig::bound_to_channel(
+                ChannelBinding::new(b"channel-A").expect("valid channel binding"),
+            ),
         );
         let mut server = Session::new_responder_with_auth(
             RekeyThresholds::default(),
@@ -1217,7 +1327,7 @@ mod tests {
         use crate::ChannelBinding;
         let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
         let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
-        let binding = ChannelBinding::new(b"tls-exporter:bound".to_vec());
+        let binding = ChannelBinding::new(b"tls-exporter:bound").expect("valid channel binding");
         let client_auth = SessionAuthConfig::new()
             .with_local_identity(client_identity.clone())
             .with_peer_identity(PeerIdentity::new(server_identity.public_key()))

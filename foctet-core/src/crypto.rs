@@ -43,16 +43,34 @@ pub enum Direction {
 /// exactly one place and are zeroized when that place is dropped. Share keys
 /// through a [`KeyHandle`] (a reference-counted handle) instead of copying the
 /// secret bytes into multiple owners.
+///
+/// Raw traffic-key construction is intentionally unavailable:
+///
+/// ```compile_fail
+/// use foctet_core::TrafficKeys;
+///
+/// let keys = TrafficKeys {
+///     key_id: 1,
+///     c2s: [0u8; 32],
+///     s2c: [0u8; 32],
+/// };
+/// # let _ = keys;
+/// ```
 pub struct TrafficKeys {
     /// Active key identifier carried in frame headers.
     pub key_id: u8,
     /// Client-to-server key bytes.
-    pub c2s: [u8; 32],
+    c2s: [u8; 32],
     /// Server-to-client key bytes.
-    pub s2c: [u8; 32],
+    s2c: [u8; 32],
 }
 
 impl TrafficKeys {
+    /// Returns the public key-generation identifier carried in frame headers.
+    pub fn key_id(&self) -> u8 {
+        self.key_id
+    }
+
     /// Returns key bytes for the specified direction.
     pub fn key_for(&self, direction: Direction) -> [u8; 32] {
         match direction {

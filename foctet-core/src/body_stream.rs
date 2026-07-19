@@ -217,6 +217,9 @@ impl StreamSealer {
         context: &[u8],
         limits: &BodyEnvelopeLimits,
     ) -> Result<(Self, Vec<u8>), BodyEnvelopeError> {
+        if context.len() > limits.max_context_len {
+            return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+        }
         if recipient_key_id.is_empty() {
             return Err(BodyEnvelopeError::InvalidHeader("empty recipient key id"));
         }
@@ -357,6 +360,9 @@ impl StreamOpener {
         context: &[u8],
         limits: &BodyEnvelopeLimits,
     ) -> Result<Self, BodyEnvelopeError> {
+        if context.len() > limits.max_context_len {
+            return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+        }
         let parsed = parse_stream_header(header, limits)?;
         let content_key = unwrap_content_key(
             &parsed.wrapped_key,
@@ -518,8 +524,27 @@ impl StreamFrameDecoder {
     }
 
     /// Appends received bytes to the internal buffer.
-    pub fn push(&mut self, bytes: &[u8]) {
+    ///
+    /// At most one maximum-sized undecoded frame may be buffered. Callers
+    /// should drain [`Self::decode_next`] between input reads; oversized reads
+    /// are rejected so transport backpressure cannot turn this decoder into an
+    /// unbounded queue.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), BodyEnvelopeError> {
+        let max_buffered = self.limits.max_header_bytes.max(
+            STREAM_CHUNK_OVERHEAD
+                .checked_add(self.limits.max_payload_len)
+                .ok_or(BodyEnvelopeError::LimitExceeded("stream_buffer_len"))?,
+        );
+        let new_len = self
+            .buf
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(BodyEnvelopeError::LimitExceeded("stream_buffer_len"))?;
+        if new_len > max_buffered {
+            return Err(BodyEnvelopeError::LimitExceeded("stream_buffer_len"));
+        }
         self.buf.extend_from_slice(bytes);
+        Ok(())
     }
 
     /// Drains the next complete frame, or `None` if more bytes are needed.
@@ -606,7 +631,7 @@ mod tests {
 
         // Feed the wire 3 bytes at a time to exercise frames split across pushes.
         for piece in wire.chunks(3) {
-            decoder.push(piece);
+            decoder.push(piece).expect("push");
             while let Some(item) = decoder.decode_next().expect("decode") {
                 match item {
                     StreamItem::Header(h) => {
@@ -628,6 +653,21 @@ mod tests {
 
         assert!(opener.expect("opener built").is_finished());
         assert_eq!(assembled, b"alphabetagammadelta");
+    }
+
+    #[test]
+    fn decoder_rejects_an_oversized_input_queue() {
+        let limits = BodyEnvelopeLimits {
+            max_header_bytes: 128,
+            max_payload_len: 256,
+            ..BodyEnvelopeLimits::default()
+        };
+        let mut decoder = StreamFrameDecoder::new(&limits);
+        let oversized = vec![0u8; STREAM_CHUNK_OVERHEAD + limits.max_payload_len + 1];
+        assert!(matches!(
+            decoder.push(&oversized),
+            Err(BodyEnvelopeError::LimitExceeded("stream_buffer_len"))
+        ));
     }
 
     #[test]

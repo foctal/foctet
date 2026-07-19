@@ -13,7 +13,10 @@
 
 use std::time::Duration;
 
-use crate::replay::{DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector};
+use crate::replay::{
+    DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, MAX_REPLAY_WINDOW, MAX_REPLAY_WINDOWS,
+    ReplayProtector,
+};
 
 /// Default upper bound on a single inbound frame's ciphertext length (16 MiB).
 ///
@@ -51,6 +54,15 @@ pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// these, so the receiver tolerates frames that were encrypted just before a
 /// rekey took effect.
 pub const DEFAULT_MAX_RETAINED_KEYS: usize = 2;
+
+/// Hard upper bound on previous traffic-key generations retained by one endpoint.
+pub const MAX_RETAINED_KEYS: usize = 16;
+
+/// Default maximum number of distinct active outbound stream IDs.
+pub const DEFAULT_MAX_OUTBOUND_STREAMS: usize = 1024;
+
+/// Hard upper bound on distinct active outbound stream IDs.
+pub const MAX_OUTBOUND_STREAMS: usize = 4096;
 
 /// Centralized resource limits for the stream-oriented transports.
 ///
@@ -148,7 +160,7 @@ impl ProtocolLimits {
     /// to decrypt frames still in flight when a rekey takes effect.
     #[must_use]
     pub fn with_max_retained_keys(mut self, max: usize) -> Self {
-        self.max_retained_keys = max.max(1);
+        self.max_retained_keys = max.clamp(1, MAX_RETAINED_KEYS);
         self
     }
 
@@ -158,7 +170,7 @@ impl ProtocolLimits {
     /// most recently seen sequence number.
     #[must_use]
     pub fn with_replay_window(mut self, window: u64) -> Self {
-        self.replay_window = window.max(1);
+        self.replay_window = window.clamp(1, MAX_REPLAY_WINDOW);
         self
     }
 
@@ -167,7 +179,7 @@ impl ProtocolLimits {
     /// Clamped to a minimum of `1`.
     #[must_use]
     pub fn with_max_replay_windows(mut self, max: usize) -> Self {
-        self.max_replay_windows = max.max(1);
+        self.max_replay_windows = max.clamp(1, MAX_REPLAY_WINDOWS);
         self
     }
 
@@ -214,6 +226,17 @@ mod tests {
         assert_eq!(limits.max_retained_keys, 1);
         assert_eq!(limits.replay_window, 1);
         assert_eq!(limits.max_replay_windows, 1);
+    }
+
+    #[test]
+    fn builders_clamp_allocation_sensitive_limits_to_safe_maximums() {
+        let limits = ProtocolLimits::default()
+            .with_max_retained_keys(usize::MAX)
+            .with_replay_window(u64::MAX)
+            .with_max_replay_windows(usize::MAX);
+        assert_eq!(limits.max_retained_keys, MAX_RETAINED_KEYS);
+        assert_eq!(limits.replay_window, MAX_REPLAY_WINDOW);
+        assert_eq!(limits.max_replay_windows, MAX_REPLAY_WINDOWS);
     }
 
     #[test]

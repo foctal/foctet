@@ -37,6 +37,8 @@ pub struct BodyEnvelopeLimits {
     pub max_wrapped_key_len: usize,
     /// Maximum payload ciphertext length in bytes.
     pub max_payload_len: usize,
+    /// Maximum application context length bound into AEAD associated data.
+    pub max_context_len: usize,
 }
 
 impl Default for BodyEnvelopeLimits {
@@ -47,6 +49,7 @@ impl Default for BodyEnvelopeLimits {
             max_key_id_len: 512,
             max_wrapped_key_len: 512,
             max_payload_len: 64 * 1024 * 1024,
+            max_context_len: 64 * 1024,
         }
     }
 }
@@ -163,6 +166,9 @@ pub fn seal_body_with_context(
     context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    if context.len() > limits.max_context_len {
+        return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+    }
     if recipient_key_id.is_empty() {
         return Err(BodyEnvelopeError::InvalidHeader("empty recipient key id"));
     }
@@ -269,6 +275,9 @@ pub fn open_body_with_context(
     context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    if context.len() > limits.max_context_len {
+        return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+    }
     let parsed = parse_envelope(envelope, limits)?;
     let aad = aead_aad(parsed.header_bytes, context);
 
@@ -342,6 +351,9 @@ pub fn open_body_for_key_id_with_context(
     context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    if context.len() > limits.max_context_len {
+        return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+    }
     let parsed = parse_envelope(envelope, limits)?;
     let aad = aead_aad(parsed.header_bytes, context);
 
@@ -886,6 +898,39 @@ mod tests {
         let err = open_body_with_limits(&envelope, recipient_priv.to_bytes(), &limits)
             .expect_err("must fail");
         assert_eq!(err, BodyEnvelopeError::LimitExceeded("header_len"));
+    }
+
+    #[test]
+    fn open_rejects_many_recipients_before_parsing_entries_or_unwrapping() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let mut envelope = seal_body(b"hello", recipient_pub, b"kid").expect("seal");
+
+        let mut cursor = 12;
+        decode_varint(&envelope, &mut cursor).expect("header length");
+        envelope[cursor] = (BodyEnvelopeLimits::default().max_recipients + 1) as u8;
+
+        let err = open_body(&envelope, recipient_priv.to_bytes())
+            .expect_err("recipient count must be rejected before entry parsing");
+        assert_eq!(err, BodyEnvelopeError::LimitExceeded("recipient_count"));
+    }
+
+    #[test]
+    fn context_limit_is_enforced_before_sealing_or_opening() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let limits = BodyEnvelopeLimits {
+            max_context_len: 4,
+            ..BodyEnvelopeLimits::default()
+        };
+        let err = seal_body_with_context(b"hello", recipient_pub, b"kid", b"large", &limits)
+            .expect_err("oversized sealing context");
+        assert_eq!(err, BodyEnvelopeError::LimitExceeded("context_len"));
+
+        let envelope = seal_body(b"hello", recipient_pub, b"kid").expect("seal");
+        let err = open_body_with_context(&envelope, recipient_priv.to_bytes(), b"large", &limits)
+            .expect_err("oversized opening context");
+        assert_eq!(err, BodyEnvelopeError::LimitExceeded("context_len"));
     }
 
     #[test]

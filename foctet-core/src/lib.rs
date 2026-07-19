@@ -77,7 +77,8 @@ pub mod storage;
 
 pub use auth::{
     AuthenticatedPeer, ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth,
-    HandshakeSigner, IdentityKeyPair, PeerIdentity, SessionAuthConfig,
+    HandshakeSigner, IdentityKeyPair, MAX_CHANNEL_BINDING_LEN, PeerIdentity, ProductionSessionAuth,
+    SessionAuthConfig,
 };
 pub use body::{
     BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,
@@ -105,7 +106,8 @@ pub use frame::{
 };
 pub use limits::{
     DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_MAX_BUFFERED_TX_BYTES, DEFAULT_MAX_CIPHERTEXT_LEN,
-    DEFAULT_MAX_PLAINTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS, ProtocolLimits,
+    DEFAULT_MAX_OUTBOUND_STREAMS, DEFAULT_MAX_PLAINTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS,
+    MAX_OUTBOUND_STREAMS, MAX_RETAINED_KEYS, ProtocolLimits,
 };
 pub use message::{
     DEFAULT_MAX_MESSAGE_SIZE, DecodedMessage, MESSAGE_FRAME_OVERHEAD, MessageConfig,
@@ -114,10 +116,14 @@ pub use message::{
 pub use observe::{SessionEvent, SessionObserver};
 pub use payload::{Tlv, decode_tlvs, encode_tlvs, tlv_type};
 pub use replay::{
-    DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow,
+    DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, MAX_REPLAY_WINDOW, MAX_REPLAY_WINDOWS,
+    ReplayProtector, ReplayWindow,
 };
 pub use secure_channel::{AsyncSecureChannel, SecureChannel};
-pub use session::{HandshakeRole, PreparedRekey, RekeyThresholds, Session, SessionState};
+pub use session::{
+    DatagramEndpointKeyLease, HandshakeRole, MessageEndpointKeyLease, PreparedRekey,
+    RekeyThresholds, Session, SessionState,
+};
 pub use storage::{
     StorageRecord, open_storage_record, open_storage_record_with_limits, seal_storage_record,
     seal_storage_record_with_limits,
@@ -214,6 +220,9 @@ pub enum CoreError {
     /// Too many distinct `(key_id, stream_id)` replay windows are being tracked.
     #[error("replay window capacity exceeded")]
     ReplayCapacityExceeded,
+    /// Too many distinct outbound stream IDs are being tracked.
+    #[error("outbound stream capacity exceeded")]
+    OutboundStreamCapacityExceeded,
     /// Frame exceeds configured size limits.
     #[error("frame exceeds configured limit")]
     FrameTooLarge,
@@ -253,6 +262,12 @@ pub enum CoreError {
     /// Peer identity did not match the pinned expectation.
     #[error("peer identity mismatch")]
     PeerIdentityMismatch,
+    /// An authenticated outer-channel binding was empty.
+    #[error("channel binding must not be empty")]
+    InvalidChannelBinding,
+    /// An authenticated outer-channel binding exceeded its fixed resource limit.
+    #[error("channel binding exceeds configured limit")]
+    ChannelBindingTooLarge,
     /// The handshake did not complete within the configured deadline.
     #[error("handshake timed out")]
     HandshakeTimeout,
@@ -260,6 +275,12 @@ pub enum CoreError {
     /// (rate limiting); retry later or drop the connection.
     #[error("handshake rate limited")]
     HandshakeRateLimited,
+    /// The configured concurrent handshake/session admission cap was reached.
+    #[error("handshake concurrency limit reached")]
+    HandshakeConcurrencyLimited,
+    /// A nonce-owning endpoint of this shape was already created for the session.
+    #[error("session endpoint nonce domain already claimed")]
+    EndpointAlreadyClaimed,
 }
 
 impl CoreError {
@@ -273,7 +294,12 @@ impl CoreError {
             | Self::ResourceExhausted
             | Self::TlvTooLarge
             | Self::RekeyInProgress
-            | Self::HandshakeRateLimited => CoreErrorDisposition::Recoverable,
+            | Self::InvalidChannelBinding
+            | Self::ChannelBindingTooLarge
+            | Self::OutboundStreamCapacityExceeded
+            | Self::HandshakeRateLimited
+            | Self::HandshakeConcurrencyLimited
+            | Self::EndpointAlreadyClaimed => CoreErrorDisposition::Recoverable,
             Self::InvalidHeaderLength(_)
             | Self::InvalidMagic
             | Self::UnsupportedVersion(_)

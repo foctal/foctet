@@ -887,6 +887,12 @@ mod tests {
         PROFILE_X25519_HKDF_XCHACHA20POLY1305, flags,
     };
 
+    fn fixed_test_keys() -> KeyHandle {
+        KeyHandle::new(
+            derive_traffic_keys(&[0x11; 32], &[0x22; 32], 1).expect("derive test traffic keys"),
+        )
+    }
+
     #[derive(Default, Debug)]
     struct MemoryIo {
         inbound: VecDeque<u8>,
@@ -1019,11 +1025,7 @@ mod tests {
 
     #[test]
     fn partial_write_failure_makes_framed_transport_terminal() {
-        let keys = KeyHandle::new(crate::TrafficKeys {
-            key_id: 1,
-            c2s: [0x11; 32],
-            s2c: [0x22; 32],
-        });
+        let keys = fixed_test_keys();
         let io = FailingWriteIo {
             outbound: Vec::new(),
             fail_after: 7,
@@ -1052,11 +1054,7 @@ mod tests {
 
     #[test]
     fn flush_failure_after_frame_drain_makes_framed_transport_terminal() {
-        let keys = KeyHandle::new(crate::TrafficKeys {
-            key_id: 1,
-            c2s: [0x11; 32],
-            s2c: [0x22; 32],
-        });
+        let keys = fixed_test_keys();
         let io = FailingWriteIo {
             outbound: Vec::new(),
             fail_after: usize::MAX,
@@ -1082,11 +1080,7 @@ mod tests {
 
     #[test]
     fn zero_byte_write_failure_makes_plain_stream_terminal() {
-        let keys = KeyHandle::new(crate::TrafficKeys {
-            key_id: 1,
-            c2s: [0x11; 32],
-            s2c: [0x22; 32],
-        });
+        let keys = fixed_test_keys();
         let io = FailingWriteIo {
             outbound: Vec::new(),
             fail_after: 0,
@@ -1117,11 +1111,7 @@ mod tests {
 
     #[test]
     fn flush_failure_after_plain_stream_frame_is_terminal() {
-        let keys = KeyHandle::new(crate::TrafficKeys {
-            key_id: 1,
-            c2s: [0x11; 32],
-            s2c: [0x22; 32],
-        });
+        let keys = fixed_test_keys();
         let io = FailingWriteIo {
             outbound: Vec::new(),
             fail_after: usize::MAX,
