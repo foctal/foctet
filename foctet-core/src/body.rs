@@ -104,6 +104,19 @@ pub enum BodyEnvelopeError {
     ChunkOutOfOrder,
 }
 
+impl BodyEnvelopeError {
+    /// Returns a low-cardinality, secret-free metric category for this error.
+    pub const fn security_metric(&self) -> Option<crate::SecurityMetric> {
+        match self {
+            Self::DecryptFailed | Self::EncryptFailed | Self::KeyUnwrapFailed => {
+                Some(crate::SecurityMetric::AeadFailure)
+            }
+            Self::LimitExceeded(_) => Some(crate::SecurityMetric::LimitHit),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RecipientEntry {
     key_id: Vec<u8>,

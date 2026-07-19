@@ -51,7 +51,7 @@ pub use context::{
     DEFAULT_MAX_CLOCK_SKEW_SECS, MAX_BOUND_HEADER_NAME_BYTES, MAX_BOUND_HEADER_VALUE_BYTES,
     MAX_BOUND_HEADERS, MAX_PROTECTED_CONTEXT_BYTES, MESSAGE_ID_LEN, ProtectedContext,
 };
-pub use error::{HttpError, HttpErrorDisposition};
+pub use error::{HttpError, HttpErrorDisposition, HttpSecurityMetric};
 // Re-exported because it appears in public signatures (`HttpSealOptions`,
 // `open_request_stream`, `HttpStreamSealer::for_request`, …), so callers do not
 // need a direct `foctet-core` dependency to name it.
