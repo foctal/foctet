@@ -64,15 +64,17 @@ fn encode_split_archive_from_built(
     built: crate::types::BuiltArchive,
     target_part_size: usize,
 ) -> Result<SplitArchive, ArchiveError> {
-    let part_groups = partition_chunks(&built.chunks, target_part_size);
+    let part_groups = partition_chunks(&built.chunks, target_part_size)?;
 
     let mut part_entries = Vec::with_capacity(part_groups.len());
     let mut parts = Vec::with_capacity(part_groups.len());
 
     for (part_no, group) in part_groups.iter().enumerate() {
-        let part_no_u32 = part_no as u32;
+        let part_no_u32 =
+            u32::try_from(part_no).map_err(|_| ArchiveError::InvalidInput("too many parts"))?;
         let first_chunk_index = group.first().map(|c| c.chunk_index).unwrap_or(0);
-        let chunk_count = group.len() as u32;
+        let chunk_count = u32::try_from(group.len())
+            .map_err(|_| ArchiveError::InvalidInput("too many chunks in part"))?;
 
         let mut part_bytes = Vec::new();
         part_bytes.extend_from_slice(&PART_MAGIC);
@@ -84,7 +86,9 @@ fn encode_split_archive_from_built(
         part_bytes.extend_from_slice(&chunk_count.to_be_bytes());
 
         for rec in group {
-            part_bytes.extend_from_slice(&(rec.chunk_ct.len() as u32).to_be_bytes());
+            let chunk_len = u32::try_from(rec.chunk_ct.len())
+                .map_err(|_| ArchiveError::InvalidInput("chunk ciphertext too large"))?;
+            part_bytes.extend_from_slice(&chunk_len.to_be_bytes());
             part_bytes.extend_from_slice(&rec.chunk_ct);
         }
 
@@ -103,7 +107,9 @@ fn encode_split_archive_from_built(
     manifest.push(WIRE_VERSION_V0);
     manifest.push(PROFILE_X25519_HKDF_XCHACHA20POLY1305);
     encode_wrapped_table(&mut manifest, &built.wrapped)?;
-    manifest.extend_from_slice(&(part_entries.len() as u32).to_be_bytes());
+    let total_parts = u32::try_from(part_entries.len())
+        .map_err(|_| ArchiveError::InvalidInput("too many parts"))?;
+    manifest.extend_from_slice(&total_parts.to_be_bytes());
 
     for entry in &part_entries {
         manifest.extend_from_slice(&entry.part_no.to_be_bytes());
@@ -175,7 +181,7 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
     let wrapped = decode_wrapped_table(&mut rd, limits)?;
 
     let total_parts = read_u32_be(&mut rd)? as usize;
-    if total_parts > limits.max_total_parts {
+    if total_parts > limits.total_parts() {
         return Err(ArchiveError::LimitExceeded("total_parts"));
     }
     let manifest_parts = parse_manifest_part_entries(&mut rd, total_parts, limits)?;
@@ -202,10 +208,13 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
         .ok_or(ArchiveError::Parse)?;
     let header = decrypt_header(&dek, aad_prefix, &header_ct)?;
     let total_chunks = header.manifest.total_chunks as usize;
-    if total_chunks > limits.max_total_chunks {
+    if total_chunks > limits.total_chunks() {
         return Err(ArchiveError::LimitExceeded("total_chunks"));
     }
 
+    if part_files.len() > limits.total_parts() {
+        return Err(ArchiveError::LimitExceeded("provided_parts"));
+    }
     if part_files.len() != total_parts {
         return Err(ArchiveError::InvalidInput(
             "provided part count does not match manifest",

@@ -5,7 +5,7 @@ use rkyv::rancor::Error as RkyvError;
 
 use crate::{
     ArchiveBuildSecrets, ArchiveError, ArchiveLimits, ArchiveOptions, EncryptedHeader,
-    FileManifest,
+    FileManifest, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_RECIPIENTS,
     crypto::{
         aead_decrypt, aead_encrypt, chunk_nonce, header_nonce, wrap_dek,
         wrap_dek_with_ephemeral_secret,
@@ -162,7 +162,7 @@ pub(crate) fn decrypt_chunk_records_with_limits(
     if records.len() != header.manifest.total_chunks as usize {
         return Err(ArchiveError::Parse);
     }
-    if records.len() > limits.max_total_chunks {
+    if records.len() > limits.total_chunks() {
         return Err(ArchiveError::LimitExceeded("total_chunks"));
     }
     let file_size = usize::try_from(header.manifest.file_size)
@@ -225,9 +225,9 @@ pub(crate) fn decrypt_chunk_records_with_limits(
 pub(crate) fn partition_chunks(
     chunks: &[EncryptedChunkRecord],
     target_part_size: usize,
-) -> Vec<Vec<EncryptedChunkRecord>> {
+) -> Result<Vec<Vec<EncryptedChunkRecord>>, ArchiveError> {
     if chunks.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut out = Vec::new();
@@ -236,20 +236,25 @@ pub(crate) fn partition_chunks(
 
     for rec in chunks {
         let record_size = 4 + rec.chunk_ct.len();
-        if !current.is_empty() && current_size + record_size > target_part_size {
+        let next_size = current_size
+            .checked_add(record_size)
+            .ok_or(ArchiveError::InvalidInput("part size overflow"))?;
+        if !current.is_empty() && next_size > target_part_size {
             out.push(current);
             current = Vec::new();
             current_size = 0;
         }
         current.push(rec.clone());
-        current_size += record_size;
+        current_size = current_size
+            .checked_add(record_size)
+            .ok_or(ArchiveError::InvalidInput("part size overflow"))?;
     }
 
     if !current.is_empty() {
         out.push(current);
     }
 
-    out
+    Ok(out)
 }
 
 pub(crate) fn validate_inputs(
@@ -275,8 +280,25 @@ pub(crate) fn validate_inputs(
     if options.chunk_size > u32::MAX as usize {
         return Err(ArchiveError::InvalidInput("chunk_size exceeds u32 max"));
     }
-    if recipient_public_keys.len() > u16::MAX as usize {
+    if recipient_public_keys.len() > MAX_ARCHIVE_RECIPIENTS {
         return Err(ArchiveError::InvalidInput("too many recipients"));
+    }
+    if options
+        .file_name
+        .as_ref()
+        .map_or(0, String::len)
+        .saturating_add(options.content_type.as_ref().map_or(0, String::len))
+        > ArchiveLimits::default().max_header_ciphertext_len
+    {
+        return Err(ArchiveError::InvalidInput(
+            "archive metadata exceeds header limit",
+        ));
+    }
+    let total_chunks = checked_total_chunks(plaintext.len(), options.chunk_size)?;
+    if total_chunks as usize > MAX_ARCHIVE_CHUNKS {
+        return Err(ArchiveError::InvalidInput(
+            "total chunks exceeds archive build limit",
+        ));
     }
     Ok(())
 }
@@ -302,14 +324,40 @@ pub(crate) fn ensure_profile(profile: u8, expected: u8) -> Result<(), ArchiveErr
 
 #[cfg(test)]
 mod tests {
-    use super::checked_total_chunks;
-    use crate::ArchiveError;
+    use super::{checked_total_chunks, validate_inputs};
+    use crate::{ArchiveError, ArchiveOptions, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_RECIPIENTS};
 
     #[test]
     fn total_chunks_rejects_values_that_would_repeat_a_nonce() {
         assert!(matches!(
             checked_total_chunks(usize::MAX, 1),
             Err(ArchiveError::InvalidInput("total chunks exceeds u32 max"))
+        ));
+    }
+
+    #[test]
+    fn build_rejects_excess_chunks_before_hashing_or_allocating_records() {
+        let plaintext = vec![0u8; MAX_ARCHIVE_CHUNKS + 1];
+        let options = ArchiveOptions {
+            chunk_size: 1,
+            ..ArchiveOptions::default()
+        };
+        let err = validate_inputs(&plaintext, &[[7u8; 32]], &options)
+            .expect_err("chunk budget must be bounded");
+        assert!(matches!(
+            err,
+            ArchiveError::InvalidInput("total chunks exceeds archive build limit")
+        ));
+    }
+
+    #[test]
+    fn build_rejects_excess_recipients_before_key_agreement() {
+        let recipients = vec![[7u8; 32]; MAX_ARCHIVE_RECIPIENTS + 1];
+        let err = validate_inputs(b"payload", &recipients, &ArchiveOptions::default())
+            .expect_err("recipient budget must be bounded");
+        assert!(matches!(
+            err,
+            ArchiveError::InvalidInput("too many recipients")
         ));
     }
 }

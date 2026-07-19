@@ -136,7 +136,7 @@ pub fn decrypt_archive_to_bytes_with_limits(
     let header = decrypt_header(&dek, aad_prefix, &header_ct)?;
 
     let total_chunks = header.manifest.total_chunks as usize;
-    if total_chunks > limits.max_total_chunks {
+    if total_chunks > limits.total_chunks() {
         return Err(ArchiveError::LimitExceeded("total_chunks"));
     }
     let mut chunks = Vec::with_capacity(total_chunks);

@@ -41,7 +41,10 @@ mod split;
 mod types;
 
 pub use error::ArchiveError;
-pub use limits::ArchiveLimits;
+pub use limits::{
+    ArchiveLimits, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_PART_CHUNKS, MAX_ARCHIVE_PARTS,
+    MAX_ARCHIVE_RECIPIENTS,
+};
 pub use single::{
     create_archive_from_bytes, create_archive_from_bytes_with_secrets, decrypt_archive_to_bytes,
     decrypt_archive_to_bytes_with_limits,
