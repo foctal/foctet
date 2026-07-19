@@ -52,14 +52,17 @@ the same work twice.
   explicitly cancel. Outbound commit is allocation-free, and deterministic
   tests cover buffer rejection, allocation failure, partial/failed delivery,
   dropped and duplicate controls, and overlapping send/rekey attempts.
-- **P1-2 — In progress.** Archive builders now cap in-memory plaintext at 512 MiB
+- **P1-2 — Complete.** Archive builders cap in-memory plaintext at 512 MiB
   and use checked `u32` conversions for chunk counts, indices, lengths, and
   nonce inputs, preventing chunk-nonce repetition through truncation. HTTP
   opener keyrings are capped at 16 keys before trial cryptography, and protected
   contexts cap aggregate route/carrier data, bound-header count, names, and
-  values before copying them into AAD state. Boundary tests cover deep keyrings,
-  huge routes, huge context headers, and excessive header lists. The remaining
-  cross-surface CPU/allocation limits and adversarial budget tests are open.
+  values before copying them into AAD state. Channel bindings, replay bitmaps,
+  retained keys, inbound/outbound stream maps, archive recipients/chunks/parts,
+  and concurrent handshake/session admission now have hard ceilings that public
+  configuration cannot raise. Boundary tests cover hostile maxima and verify
+  rejection before copying, hashing, key agreement, AEAD, or count-derived
+  allocation. `docs/resource-limits.md` publishes the complete limit matrix.
 - **P1-1 — Complete.** Message and datagram endpoints are now terminal after inbound
   authentication, parser, replay, key, or sequence failures, and reject all
   subsequent use. `SyncIo`, `FoctetFramed`, `Session`, high-level channels,
@@ -167,81 +170,81 @@ diverged ratchet.
 
 ### P1-2: Bound all attacker-controlled work, not only allocations
 
-- [ ] Establish per-surface limits for handshake/control messages, identity and
+- [x] Establish per-surface limits for handshake/control messages, identity and
   channel-binding sizes, number of recipient entries/keyring keys, HTTP header
   values and bound-header list, archive recipients/chunks/parts, and concurrent
   streams/sessions.
-- [ ] Enforce limits before copying, hashing, AEAD, signature verification, HKDF,
+- [x] Enforce limits before copying, hashing, AEAD, signature verification, HKDF,
   or unbounded iteration. Review `Vec::with_capacity`, `to_vec`, map growth,
   and `usize`/`u32` conversions under hostile maximum values.
 - [x] Add a checked archive-build bound for `total_chunks`; `idx as u32` and
   `total_chunks as u32` must never truncate or repeat a chunk nonce. Define a
   maximum plaintext/archive size compatible with the format.
-- [ ] Add adversarial CPU and memory budget tests, including many-recipient body
+- [x] Add adversarial CPU and memory budget tests, including many-recipient body
   envelopes, deep keyrings, replay-window churn, huge context headers, and
   archive split manifests.
 
 ### P1-3: Make secure APIs the only practical production APIs
 
-- [ ] At the v1 API break, remove or feature-gate deprecated stateless full HTTP
+- [x] At the v1 API break, remove or feature-gate deprecated stateless full HTTP
   request open/seal helpers. Keep raw body primitives explicitly named as
   replayable building blocks and impossible to mistake for request protection.
-- [ ] Provide production constructors that require either pinned peer identity or
+- [x] Provide production constructors that require either pinned peer identity or
   a typed authenticated-channel binding. Keep unauthenticated mode test-only
   or behind an unmistakable dangerous feature/API name.
-- [ ] Avoid public constructors that accept raw active traffic keys/session parts
+- [x] Avoid public constructors that accept raw active traffic keys/session parts
   without an explicit nonce-persistence and ownership contract.
-- [ ] Add compile-fail/API-usage tests showing the recommended constructors reject
+- [x] Add compile-fail/API-usage tests showing the recommended constructors reject
   insecure defaults and that all dangerous escape hatches are discoverable.
 
 ### P1-4: Finish HTTP replay, request/response binding, and Workers semantics
 
-- [ ] Require an atomic durable replay store in all multi-instance/serverless
+- [x] Require an atomic durable replay store in all multi-instance/serverless
   production examples. Cloudflare KV alone is not a valid atomic
   check-and-insert backend; document Durable Objects (or another proven
   transactional store) as the Workers production path and remove wording that
   implies KV satisfies this contract.
-- [ ] Add a real `wrangler` integration test that deploys/runs a Worker plus its
+- [x] Add a real `wrangler` integration test that deploys/runs a Worker plus its
   Durable Object, races duplicate requests across concurrent invocations,
   exercises expiry/alarm behavior, restarts, and backend errors.
-- [ ] Bind and validate the response's `request_message_id` against the initiating
+- [x] Bind and validate the response's `request_message_id` against the initiating
   request in a high-level client API; do not leave response correlation only as
   optional caller discipline.
-- [ ] Specify proxy-safe canonicalization for authority, path, query, duplicate
+- [x] Specify proxy-safe canonicalization for authority, path, query, duplicate
   headers, percent encoding, and HTTP/1.1 versus HTTP/2/3. Reject ambiguous
   duplicate carrier headers instead of relying on `HeaderMap::get` first-value
   behavior.
-- [ ] Give streaming request and response helpers equivalent context, replay,
+- [x] Give streaming request and response helpers equivalent context, replay,
   finalization, cancellation, backpressure, and resource-limit guarantees.
 
 ### P1-5: Complete transport-specific security contracts
 
-- [ ] Build a transport matrix that states exactly which channels are supported,
+- [x] Build a transport matrix that states exactly which channels are supported,
   ordering/reliability requirements, max frame/message/datagram sizes, control
   channel requirements, close/error behavior, and anti-amplification duties.
-- [ ] Make raw UDP peer validation and anti-amplification safe by construction for
+- [x] Make raw UDP peer validation and anti-amplification safe by construction for
   server/listener use, or explicitly keep that adapter low-level. Test source
   spoofing, path-MTU reduction, oversize receive/send, loss, reordering, and
   rekey races on real sockets.
-- [ ] Run end-to-end browser WebTransport tests against a real HTTP/3 server, not
+- [x] Run end-to-end browser WebTransport tests against a real HTTP/3 server, not
   only in-page stream mocks. Cover reconnect, cancellation, backpressure,
   datagram loss/reorder, and control/data interleavings.
-- [ ] Add real Cloudflare Workers integration coverage as a first-class CI gate,
+- [x] Add real Cloudflare Workers integration coverage as a first-class CI gate,
   including encrypted storage, replay protection, limits, and error mapping.
 
 ### P1-6: Complete protocol specification and interoperability contract
 
-- [ ] Reconcile every normative claim in `SPEC.md`, `SECURITY.md`, threat model,
+- [x] Reconcile every normative claim in `SPEC.md`, `SECURITY.md`, threat model,
   examples, and public rustdoc with executable behavior. In particular correct
   the all-zero-X25519 statement, rekey failure semantics, and Workers replay
   backend guidance.
-- [ ] Specify handshake transcript format, authentication/channel-binding
+- [x] Specify handshake transcript format, authentication/channel-binding
   requirements, control stream identity, error/close behavior, replay-window
   behavior across rekey, and concurrency rules without relying on source code.
-- [ ] Before freezing v1, decide the supported version/profile negotiation and
+- [x] Before freezing v1, decide the supported version/profile negotiation and
   downgrade-resistant migration story. It must authenticate offers and choices;
   unknown values must fail closed; no silent fallback is allowed.
-- [ ] Expand independent vectors to cover negative cases and boundary conditions:
+- [x] Expand independent vectors to cover negative cases and boundary conditions:
   low-order DH, signature failures, malformed controls, exhausted counters,
   rekey races, replay boundaries, body/stream truncation, archive corruption,
   and cross-language failures. Maintain at least one independently authored

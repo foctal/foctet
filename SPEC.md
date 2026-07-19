@@ -7,7 +7,7 @@ Foctet Protocol Specification (Draft v0)
 *   **Status**: Draft v0 (work-in-progress). **Not production-ready.** See `SECURITY.md` for the current security posture and known limitations, and `docs/THREAT_MODEL.md` for the full threat model.
 *   **Spec version**: `foctet-spec/0.3-draft`. The specification is versioned independently of the crate versions: crates may release without spec changes, and this stamp only changes when normative content changes. Any wire-level change MUST bump this stamp and move `test-vectors/` in the same commit (see the compatibility policy below).
 *   **Conformance language**: The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119/8174. Unless a section is explicitly marked *informative*, requirements stated with these key words are normative for Draft v0 implementations; an implementation that violates a MUST is not a conforming Foctet implementation even if it interoperates with this codebase.
-*   **Implementation status**: This specification describes the target protocol. As of this revision, the implemented surface is: **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket / muxtls, all covered by a real-connection conformance suite), the **message shape** (raw WebSocket, native + browser), the **datagram API** (`foctet_core::datagram`) with QUIC and raw-UDP adapters (opt-in anti-amplification) and rekey-over-datagram via a reliable control channel, the one-shot body envelope and archive formats, streaming HTTP bodies with per-chunk AEAD, an HTTP protected-context + anti-replay layer (in-memory / Redis / Cloudflare Durable Object stores), the DH-ratchet rekey, and a **WASM/TypeScript SDK** (`foctet-wasm`) covering the body envelope **and** the framed session (message + datagram modes, including in-session rekey), tested in headless Chrome in CI, plus a browser-WebTransport datagram adapter (`foctet_transport::webtrans_browser`). The canonical vectors are additionally verified by an independent non-Rust implementation (`interop/verify_vectors.mjs`, in CI). Still pending items are marked "(pending)" in place; the largest are a published npm package and an end-to-end Workers/`wrangler` test.
+*   **Implementation status**: This specification describes the target protocol. As of this revision, the implemented surface is: **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket / muxtls, all covered by a real-connection conformance suite), the **message shape** (raw WebSocket, native + browser), the **datagram API** (`foctet_core::datagram`) with QUIC and raw-UDP adapters (mandatory anti-amplification for unvalidated server peers) and rekey-over-datagram via a reliable control channel, the one-shot body envelope and archive formats, streaming HTTP request and response bodies with per-chunk AEAD, an HTTP protected-context + anti-replay layer (in-memory / Redis / Cloudflare Durable Object stores), the DH-ratchet rekey, and a **WASM/TypeScript SDK** (`foctet-wasm`) covering the body envelope **and** the framed session (message + datagram modes, including in-session rekey), tested in headless Chrome in CI, plus a browser-WebTransport datagram adapter (`foctet_transport::webtrans_browser`). The canonical vectors are additionally verified by an independent non-Rust implementation (`interop/verify_vectors.mjs`, in CI), and the Workers path is exercised against Wrangler with a real Durable Object.
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
@@ -123,7 +123,7 @@ Relays forward frames without decryption and SHOULD NOT require any Foctet aware
 Foctet Core can run over:
 
 *   **Byte stream** transports (TCP, TLS-TCP, WSS, QUIC/WebTransport bidirectional streams): requires Foctet framing delimiter/length prefix.
-*   **Datagram** transports (UDP, QUIC datagram, WebTransport datagram): each datagram MUST contain exactly one complete, bounded frame; the maximum datagram size MUST be configured at or below the transport MTU; replay state MUST be committed only after AEAD authentication; and anti-amplification limits MUST be applied at the transport layer. This uses a dedicated datagram API (`foctet_core::datagram::DatagramEndpoint`) that is separate from the byte-stream API and MUST NOT be approximated by reusing the stream API. QUIC (`foctet_transport::quinn::QuinnDatagramChannel`), raw-UDP (`foctet_transport::udp::UdpDatagramTransport`, opt-in anti-amplification), and browser-WebTransport (`foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`, wasm32, over `WebTransport.datagrams`) adapters are implemented. See §5.1.1 for the normative MTU/fragmentation policy.
+*   **Datagram** transports (UDP, QUIC datagram, WebTransport datagram): each datagram MUST contain exactly one complete, bounded frame; the maximum datagram size MUST be configured at or below the transport MTU; replay state MUST be committed only after AEAD authentication; and anti-amplification limits MUST be applied at the transport layer. This uses a dedicated datagram API (`foctet_core::datagram::DatagramEndpoint`) that is separate from the byte-stream API and MUST NOT be approximated by reusing the stream API. QUIC (`foctet_transport::quinn::QuinnDatagramChannel`), raw-UDP (`foctet_transport::udp::UdpDatagramTransport`, mandatory anti-amplification for unvalidated server peers), and browser-WebTransport (`foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`, wasm32, over `WebTransport.datagrams`) adapters are implemented. See §5.1.1 for the normative MTU/fragmentation policy.
 
 Transport MUST provide a method to send/receive bytes. Reliability is not required but affects upper-layer behavior.
 
@@ -201,7 +201,9 @@ Default replay window recommendation: 4096 frames.
 *   Handshake: X25519 ephemeral key agreement
 *   KDF: HKDF-SHA256
 *   AEAD: XChaCha20-Poly1305
-*   Identity: optional in v0 core; can be layered via signed handshake transcript (recommended)
+*   Identity: Ed25519 signed transcript or a typed authenticated-channel binding
+    is required by production constructors. Unauthenticated operation is a
+    dangerous, explicitly feature-gated testing profile.
 
 #### 7.1.1 Nonce Construction
 
@@ -328,6 +330,22 @@ Draft v0 native handshake messages MAY carry an authentication payload after the
 
 For backwards compatibility with older Draft v0 test vectors, decoders MAY accept handshake messages with no trailing `auth_mode` byte and treat them as unauthenticated.
 
+Every control message begins with `magic = "FCTL"` (4 bytes),
+`control_version = 0x00` (1 byte), and `kind` (1 byte). Integers are big-endian.
+No trailing bytes are permitted.
+
+| Kind | Value | Body |
+| --- | --- | --- |
+| ClientHello | `0x01` | `client_eph_public[32] || session_salt[32] || client_transcript_binding[32] || auth` |
+| ServerHello | `0x02` | `server_eph_public[32] || server_transcript_binding[32] || auth` |
+| Rekey | `0x03` | `old_key_id[1] || new_key_id[1] || ratchet_public[32] || rekey_transcript_binding[32]` |
+| Error | `0xff` | `error_code[2]` |
+
+`auth` is either absent (legacy dangerous mode), `0x00`, or
+`0x01 || identity_public_key[32] || signature[64]`. The largest encoded control
+is therefore 199 bytes. Unknown versions, kinds, authentication modes, lengths,
+or trailing data are terminal protocol errors.
+
 ### 8.2.2 Transcript Signature Inputs
 
 When `auth_mode = 0x01`, signatures are computed over domain-separated transcript messages:
@@ -338,6 +356,26 @@ When `auth_mode = 0x01`, signatures are computed over domain-separated transcrip
     *   `"foctet auth server" || client_eph_public || server_eph_public || session_salt || server_transcript_binding`
 
 The claimed `identity_public_key` MUST verify the corresponding signature.
+
+### 8.2.3 Control-channel and concurrency contract
+
+The initiator sends exactly one ClientHello and accepts exactly one ServerHello.
+The responder accepts exactly one ClientHello and sends exactly one ServerHello.
+Any other message kind, duplicate, malformed message, EOF, timeout, or
+authentication failure before activation terminates the handshake and its
+transport. A session becomes active only after transcript, identity or channel
+binding, and X25519 checks succeed.
+
+After activation, control messages are Foctet frames with `IS_CONTROL` set.
+Rekey controls use the same reliable ordered channel as application frames, or
+a dedicated reliable ordered encrypted control channel for datagram data.
+Applications must not route controls through an unordered or lossy channel.
+
+Each session has one mutable handshake/ratchet state machine. Concurrent
+application streams may allocate distinct `stream_id` values, but outbound
+sequence ownership for a given endpoint is exclusive. A `Session` grants at
+most one message endpoint and one datagram endpoint lease. Implementations must
+bound simultaneous handshakes before X25519 or signature work.
 
 ### 8.3 Authentication (Recommended)
 
@@ -556,6 +594,18 @@ Compatibility policy targets:
 
 *   Draft v0 (`0.x` line): breaking changes are allowed, but MUST update spec and vectors together.
 *   v1+: wire compatibility MUST be preserved within major version, and incompatibilities MUST use a new wire `version`.
+
+Draft v0 and the initial v1 API use a **fixed profile**, not in-band
+negotiation. A peer sends only version `0x00` and profile `0x01`; any other
+value fails closed. There is no silent fallback.
+
+A future negotiated version must define authenticated ordered offer and
+selection fields inside the signed/channel-bound handshake transcript. The
+selection must be a member of the initiator's offer and both offer and selection
+must feed traffic-key derivation. Until such a wire version is specified,
+migration uses a separately configured endpoint or authenticated outer
+protocol identifier (for example an ALPN value); automatic probing and fallback
+on the same security context are forbidden.
 
 ### 14.2 Encrypted Payload TLV (Recommended)
 

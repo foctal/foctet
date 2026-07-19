@@ -9,7 +9,7 @@ This guide collects the recommended Foctet examples by deployment style.
 | Authenticated end-to-end stream over a single connection | `foctet/examples/secure_channel_tokio.rs` | Smallest authenticated native-handshake example with pinned identities |
 | Runtime-agnostic transport integration over a real stream transport | `foctet-transport/examples/quinn_split.rs` | Shows the recommended `foctet-transport` builder flow with authenticated per-stream sessions |
 | HTTP body encryption with a Rust server | `foctet-http/examples/axum_body_echo_server.rs` and `foctet-http/examples/axum_body_echo_client.rs` | Demonstrates the production-recommended protected-context path (`*_with_context`) with replay defense |
-| HTTP body encryption with Cloudflare Workers | `foctet-http/examples/workers-echo` plus `foctet-http/examples/workers_echo_client.rs` | Shows Workers integration while preserving body-only scope |
+| Context-bound HTTP encryption with Cloudflare Workers | `foctet-http/examples/workers-echo` plus `foctet-http/examples/workers_echo_client.rs` | Binds routes and request/response correlation and uses Durable Object replay protection |
 | Archive/file encryption and split archive roundtrip | `foctet/examples/file_archive_roundtrip.rs` | Shows single-file and split archive creation plus restore |
 | Deterministic interoperability fixtures | `foctet/examples/gen_vectors.rs` | Regenerates the repository test vectors |
 

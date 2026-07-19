@@ -208,18 +208,17 @@ endpoint as an amplifier.
   (`DEFAULT_HANDSHAKE_TIMEOUT`) and the runtime-agnostic futures path.
 - **Authenticate-before-commit** everywhere: forged input cannot mutate
   replay/session state, so an off-path attacker cannot poison a session.
-- **UDP anti-amplification** — the raw-UDP adapter has an opt-in QUIC-style
-  limiter (`with_anti_amplification`, default factor 3): until the peer is
-  validated, an endpoint will not send more than `factor ×` the bytes it has
-  received, defeating spoofed-source reflection. QUIC/WebTransport enforce
-  this at the transport layer already.
+- **UDP anti-amplification** — the raw-UDP adapter rejects unconnected sockets,
+  and its unvalidated-server constructor always installs a QUIC-style 3x
+  limiter. Until validation, an endpoint cannot send more than three times the
+  bytes received. QUIC/WebTransport enforce this at the transport layer.
 - Parsers for every attacker-facing format are fuzzed continuously (7 targets,
   seeded, time-budgeted in CI).
 
-**Residual risk.** Foctet bounds per-session and per-message work; it does not
-rate-limit connection/handshake *attempts* — deploy standard perimeter
-controls (SYN/handshake rate limits, concurrency caps). This is tracked as an
-open item (TODO §2.4).
+**Residual risk.** The transport crate provides token-bucket handshake rate
+limiting and RAII concurrency admission, but applications must install and
+share those limiters at every listener. Perimeter SYN/routing controls remain
+outside Foctet.
 
 ### 3.8 Metadata leakage (traffic analysis)
 

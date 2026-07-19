@@ -94,7 +94,7 @@ supported-version policy will accompany the first `v1` release.
 - **Authenticated-by-default native handshake.** A default `SessionAuthConfig`
   fails closed: an unauthenticated handshake requires an explicit
   `SessionAuthConfig::unauthenticated_for_testing()` /
-  `allow_unauthenticated(true)` opt-in, intended only for tests or for use inside
+  `dangerously_allow_unauthenticated(true)` opt-in, intended only for tests or for use inside
   an already-authenticated outer channel (e.g. mutually authenticated TLS).
   Identity authentication uses Ed25519 transcript signatures with pinned peer
   identities.
@@ -103,12 +103,12 @@ supported-version policy will accompany the first `v1` release.
   authority, path, timestamp, message ID, …) is folded into the AEAD associated
   data so a captured envelope cannot be replayed onto a different request.
 
-## Known limitations (do not rely on these yet)
+## Security contracts and remaining limitations
 
-These are tracked work items; treat each as **unsupported** until implemented,
-documented, and thoroughly tested:
+The implemented contracts below include explicit operational limits. Items
+described as pending or unsupported must not be relied on.
 
-1. **HTTP anti-replay (near-complete, not yet hard-enforced).** `foctet-http`
+1. **HTTP anti-replay.** `foctet-http`
    ships a versioned protected-context schema (`ProtectedContext`, `x-foctet-*`
    carrier headers), a bounded `ReplayStore` with atomic check-and-insert
    (`InMemoryReplayStore`), and context-bound APIs
@@ -118,12 +118,14 @@ documented, and thoroughly tested:
    deployments have an `AsyncReplayStore` trait (`!Send`-friendly for
    Cloudflare Workers) with a Redis backend (`RedisReplayStore`, atomic
    `SET NX PX`) **and** a Cloudflare **Durable Object** adapter
-   (`DurableObjectReplayStore`). The stateless full-request family is
-   `#[deprecated]` in favor of the context-bound path; hard removal/gating is
-   deferred to the API freeze so downstream callers get a deprecation cycle.
+   (`DurableObjectReplayStore`). The stateless full-request family is gated
+   behind `dangerous-stateless-http`.
    The low-level `seal_body` / `open_body` primitives remain stateless by
    design — production HTTP code must use the `*_with_context` APIs backed by
-   a shared, durable store. Still open: authority-normalization guidance.
+   an atomic shared, durable store. Cloudflare KV is not valid for replay
+   decisions. Wrangler CI covers races, restart persistence, alarm expiry, and
+   backend errors. High-level response APIs require the initiating request ID;
+   `docs/http-canonicalization.md` specifies the proxy contract.
 2. **Forward-secret DH ratchet rekey.** In-session
    rekey now performs a Diffie-Hellman ratchet step: each rekey mixes a fresh
    ephemeral X25519 output into a root-key chain, and rekeys **alternate**
@@ -141,23 +143,24 @@ documented, and thoroughly tested:
    rekey-delivery acknowledgement. Outbound rekey commit performs no fallible
    allocation; retained-key storage is reserved during the pre-delivery prepare
    phase.
-3. **Datagram support (near-complete).** A dedicated datagram API
+3. **Datagram support.** A dedicated datagram API
    (`foctet_core::datagram::DatagramEndpoint`: one bounded frame per datagram,
    size cap, authenticate-before-replay, loss/reorder tolerant) ships with a
    QUIC datagram adapter (`foctet_transport::quinn::QuinnDatagramChannel`) and
    a raw-UDP adapter over a connected socket
-   (`foctet_transport::udp::UdpDatagramTransport`) with an **opt-in
-   anti-amplification limiter** (`with_anti_amplification`; peer
-   discovery/pinning and MTU discovery remain the caller's responsibility).
+   (`foctet_transport::udp::UdpDatagramTransport`). Unconnected sockets are
+   rejected, and `new_unvalidated_peer` makes the 3x anti-amplification limit
+   mandatory for server/listener handoff. Path-MTU discovery remains the
+   caller's responsibility.
    **Rekey-over-datagram** is supported: the DH-ratchet rekey rides a reliable
    control channel and `SecureDatagramChannel::rekey_from_session` adopts the
    rotated keys, with retained previous keys so reordered old-key datagrams
    still decrypt. A browser-WebTransport datagram adapter now ships as
    `foctet_transport::webtrans_browser::BrowserWebTransportDatagrams`
    (`transport-webtrans-browser`, wasm32) and is exercised in headless Chrome
-   against in-page WHATWG streams. Still pending: a live end-to-end browser
-   test against a real HTTP/3 WebTransport server, plus more deployment
-   guidance around path-MTU changes and conservative datagram sizing.
+   against a real native HTTP/3 WebTransport server, including reconnect,
+   cancellation, backpressure, deliberate loss, and reversed delivery.
+   `docs/transport-matrix.md` defines path-MTU and sizing responsibilities.
 4. **WASM/TypeScript SDK (partial).** The `foctet-wasm` crate ships a
    `wasm-bindgen` API for the body envelope (seal/open, context-bound variants,
    `KeyPair`) **and** a framed `FoctetSession` (authenticated handshake,
@@ -174,15 +177,16 @@ documented, and thoroughly tested:
    needed. Still pending: a published npm package and host-backed
    (non-extractable) key handling (documented as unavailable on current
    platforms).
-5. **Streaming HTTP bodies (near-complete).** A chunked streaming mode exists
+5. **Streaming HTTP bodies.** A chunked streaming mode exists
    (`foctet_core::body_stream`, plus `foctet_http`'s `HttpStreamSealer` /
    `HttpStreamOpener`): per-chunk AEAD with unique nonces, an authenticated
    final-chunk marker (truncation/extension resistance), ordering checks, and
    the same protected-context + replay binding as the one-shot path. Turn-key
-   request wiring exists (`StreamFrameDecoder`, the framework-agnostic
-   `HttpRequestStreamReader`, and the axum helper `open_request_stream`, no
-   whole-body buffering). Still open: a response-body streaming helper and
-   backpressure *tuning* guidance.
+   request and response wiring exists (`StreamFrameDecoder`,
+   `HttpRequestStreamReader`, `HttpResponseStreamReader`, and the axum helper
+   `open_request_stream`, no whole-body buffering). Input buffering is capped
+   to one maximum-sized undecoded frame and both readers require authenticated
+   finalization after cancellation or EOF.
 6. **Wire format is unstable** (`0.x`, Draft v0). Even though vectors and
    interoperability fixtures are checked in CI, breaking wire changes may still
    occur until the v1 compatibility commitment begins.
