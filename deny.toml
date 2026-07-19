@@ -14,6 +14,7 @@ yanked = "deny"
 ignore = [
     # rustls-pemfile is unmaintained (no safe upgrade) but only reachable through
     # transport examples/tests (dev surface), not the published library API.
+    # Owner: maintainer. Review-by: 2026-10-01. Remove when the example stack upgrades.
     "RUSTSEC-2025-0134",
 ]
 
