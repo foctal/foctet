@@ -791,7 +791,9 @@ version = "0.1.0"
 dependencies = [
  "foctet-archive",
  "foctet-core",
+ "foctet-http",
  "libfuzzer-sys",
+ "x25519-dalek",
 ]
 
 [[package]]
