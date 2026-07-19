@@ -62,7 +62,9 @@ pub use replay_store::{
     AsyncReplayStore, DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore,
     ReplayStoreError,
 };
-pub use stream::{HttpRequestStreamReader, HttpStreamOpener, HttpStreamSealer};
+pub use stream::{
+    HttpRequestStreamReader, HttpResponseStreamReader, HttpStreamOpener, HttpStreamSealer,
+};
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";
@@ -197,6 +199,7 @@ impl HttpSealer {
     /// for production. By default this also adds the advisory
     /// `x-foctet-scope: body-only` header so downstream consumers do not mistake
     /// body protection for full HTTP message protection.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -348,9 +351,10 @@ impl HttpOpener {
     /// Opens a context-bound request using a durable [`AsyncReplayStore`].
     ///
     /// Identical to [`HttpOpener::open_request_with_context`] but awaits the
-    /// store, so it works with networked/durable backends (Redis, Cloudflare KV,
-    /// a Durable Object, or a shared SQL table) needed once more than one
-    /// instance serves traffic. Authentication still happens before the store is
+    /// store, so it works with atomic networked/durable backends (Redis
+    /// `SET NX`, a Durable Object, or a transactional SQL table) needed once
+    /// more than one instance serves traffic. Cloudflare KV is not atomic enough
+    /// for this contract. Authentication still happens before the store is
     /// consulted.
     pub async fn open_request_with_async_store<S>(
         &self,
@@ -414,20 +418,24 @@ impl HttpOpener {
     }
 
     /// Opens a response sealed with [`HttpSealer::seal_response_with_context`],
-    /// validating the bound context and freshness.
+    /// validating the bound context, freshness, and initiating request ID.
     ///
-    /// A client typically expects a single response, so no replay store is
-    /// required here; callers may additionally check that the carrier's
-    /// `request_message_id` matches the request they sent.
+    /// `expected_request_message_id` MUST be the message ID from the request
+    /// that initiated this exchange. A missing or different response
+    /// `request_message_id` is rejected before returning plaintext.
     pub fn open_response_with_context(
         &self,
         response: Response<Vec<u8>>,
+        expected_request_message_id: [u8; MESSAGE_ID_LEN],
         now_secs: u64,
         max_skew_secs: u64,
     ) -> Result<Response<Vec<u8>>, HttpError> {
         let (mut parts, body) = response.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
+        if carrier.request_message_id != Some(expected_request_message_id) {
+            return Err(HttpError::ResponseRequestMismatch);
+        }
         let context = ProtectedContext::for_response(&parts, carrier)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
 
@@ -444,6 +452,7 @@ impl HttpOpener {
     ///
     /// This provides **no** replay protection or HTTP-context binding; prefer
     /// [`HttpOpener::open_request_with_context`] for production.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -479,13 +488,16 @@ impl HttpOpener {
 mod tests {
     use foctet_core::BodyEnvelopeLimits;
     use getrandom::SysRng;
-    use http::{Request, Response, StatusCode, Version, header};
+    #[cfg(feature = "dangerous-stateless-http")]
+    use http::Version;
+    use http::{Request, Response, StatusCode, header};
     use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::*;
 
     #[test]
+    #[cfg(feature = "dangerous-stateless-http")]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn sealer_and_opener_roundtrip_request_and_response() {
         let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
@@ -765,10 +777,34 @@ mod tests {
             .expect("seal");
 
         let opened = opener
-            .open_response_with_context(sealed, now, 30)
+            .open_response_with_context(sealed, [3u8; 16], now, 30)
             .expect("open");
         assert_eq!(opened.status(), StatusCode::OK);
         assert_eq!(opened.body(), b"result");
+    }
+
+    #[test]
+    fn context_bound_response_rejects_wrong_or_missing_request_id() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let now = 2_000u64;
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(b"result".to_vec())
+            .expect("response");
+        let sealed = sealer
+            .seal_response_with_context(
+                response,
+                ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS).answering([3u8; 16]),
+            )
+            .expect("seal");
+        let err = opener
+            .open_response_with_context(sealed, [4u8; 16], now, 30)
+            .expect_err("wrong request id");
+        assert!(matches!(err, HttpError::ResponseRequestMismatch));
     }
 
     fn clone_request(request: &Request<Vec<u8>>) -> Request<Vec<u8>> {

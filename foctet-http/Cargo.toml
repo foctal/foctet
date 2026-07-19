@@ -28,6 +28,7 @@ getrandom.workspace = true
 x25519-dalek.workspace = true
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 futures-util = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -35,6 +36,7 @@ worker = { version = "0.8.5", optional = true }
 
 [features]
 default = []
+dangerous-stateless-http = []
 axum = ["dep:axum", "dep:http-body-util"]
 workers = ["dep:worker"]
 redis = ["dep:redis"]

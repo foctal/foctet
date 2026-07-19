@@ -110,6 +110,7 @@ impl AxumOpener {
     ///
     /// Body-only; no replay protection or HTTP-context binding. Prefer
     /// [`AxumOpener::open_request_with_context`] for production.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -155,9 +156,10 @@ impl AxumOpener {
             .map_err(AxumError::Http)
     }
 
-    /// Opens an encrypted Axum request using a durable [`AsyncReplayStore`]
-    /// (Redis, Cloudflare KV, a shared SQL table, …) for multi-instance
-    /// deployments.
+    /// Opens an encrypted Axum request using an atomic durable
+    /// [`AsyncReplayStore`] (Redis `SET NX`, a transactional SQL table, …) for
+    /// multi-instance deployments. Eventually consistent key/value stores do
+    /// not satisfy the replay-store contract.
     pub async fn open_request_with_async_store<S>(
         &self,
         request: AxumRequest,
@@ -221,6 +223,7 @@ impl AxumSealer {
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -239,6 +242,7 @@ pub async fn open_axum_request_body(
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes with explicit envelope limits.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -303,6 +307,8 @@ impl ::axum::response::IntoResponse for AxumError {
             AxumError::Http(
                 HttpError::MissingContext(_)
                 | HttpError::InvalidContext(_)
+                | HttpError::DuplicateContext(_)
+                | HttpError::ResponseRequestMismatch
                 | HttpError::ContextTimestampInFuture,
             ) => StatusCode::BAD_REQUEST,
             AxumError::Http(HttpError::ContextExpired) => StatusCode::UNAUTHORIZED,

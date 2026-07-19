@@ -63,10 +63,12 @@ pub trait ReplayStore {
 
 /// Asynchronous anti-replay store for durable / networked backends.
 ///
-/// This is the trait to implement for stores that must perform I/O — Redis,
-/// Cloudflare KV, a Durable Object, or a SQL table shared across instances —
-/// which is required once requests are served by more than one process or
-/// serverless isolate (an [`InMemoryReplayStore`] is single-process only).
+/// This is the trait to implement for stores that must perform I/O — Redis with
+/// an atomic conditional write, a Durable Object, or a transactional SQL table
+/// shared across instances — which is required once requests are served by more
+/// than one process or serverless isolate (an [`InMemoryReplayStore`] is
+/// single-process only). Cloudflare KV does **not** provide the required atomic
+/// check-and-insert contract and must not be used for replay decisions.
 ///
 /// The futures intentionally do **not** require `Send`, so the trait is usable
 /// from `!Send` runtimes such as Cloudflare Workers. Implementations must keep

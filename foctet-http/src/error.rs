@@ -36,6 +36,12 @@ pub enum HttpError {
     /// A protected-context value is malformed.
     #[error("invalid protected-context value: {0}")]
     InvalidContext(&'static str),
+    /// A protected-context header occurred more than once.
+    #[error("duplicate protected-context value: {0}")]
+    DuplicateContext(&'static str),
+    /// A protected response does not answer the initiating request.
+    #[error("protected response does not answer the initiating request")]
+    ResponseRequestMismatch,
     /// The protected-context timestamp is too far in the future.
     #[error("protected-context timestamp is in the future")]
     ContextTimestampInFuture,
@@ -66,6 +72,8 @@ impl HttpError {
             | Self::OpenFailed(_)
             | Self::MissingContext(_)
             | Self::InvalidContext(_)
+            | Self::DuplicateContext(_)
+            | Self::ResponseRequestMismatch
             | Self::ContextTimestampInFuture
             | Self::ContextExpired
             | Self::Replayed

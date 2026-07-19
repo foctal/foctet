@@ -13,6 +13,9 @@
 //!
 //! Time is supplied by the caller (`now_secs`), so this module works on native
 //! targets and on environments such as Cloudflare Workers.
+//!
+//! The cross-version and reverse-proxy canonicalization contract is specified
+//! in `docs/http-canonicalization.md`.
 
 use http::HeaderMap;
 use http::header::{HeaderName, HeaderValue};
@@ -84,10 +87,10 @@ pub struct ContextBinding {
     /// Header names to additionally bind into the request context, in this
     /// order. Each header's presence and raw value bytes are authenticated,
     /// so adding, removing, or modifying a bound header fails authentication.
-    /// Only the header's *first* value is bound (multi-value headers are not
-    /// disambiguated). Empty by default — preserves the exact associated-data
-    /// bytes of a [`ContextBinding`] that doesn't bind any headers, so this is
-    /// purely opt-in. Currently applies to **requests only**; see
+    /// A configured header occurring more than once is rejected as ambiguous.
+    /// Empty by default — preserves the exact associated-data bytes of a
+    /// [`ContextBinding`] that doesn't bind any headers, so this is purely
+    /// opt-in. Currently applies to **requests only**; see
     /// [`ProtectedContext::for_request`].
     pub bound_headers: &'static [&'static str],
 }
@@ -102,20 +105,17 @@ impl ContextBinding {
     ///
     /// # Authority normalization (read before enabling)
     ///
-    /// The authority is bound as **raw bytes**: `example.com`,
-    /// `EXAMPLE.COM`, `example.com:443`, and a punycoded form are four
-    /// different values, and any client/server disagreement fails
-    /// authentication. HTTP infrastructure routinely rewrites this value
+    /// The authority is ASCII-lowercased, but is otherwise bound exactly:
+    /// `example.com` and `example.com:443` are different values, and Unicode
+    /// host names are not IDNA-normalized by this crate. HTTP infrastructure
+    /// routinely rewrites this value
     /// (proxies adding default ports, clients title-casing `Host`, HTTP/2
     /// `:authority` vs HTTP/1.1 `Host` differences), so before enabling,
     /// both peers MUST derive the authority through the same normalization:
     ///
-    /// 1. lowercase the host,
-    /// 2. IDNA/punycode-encode it (bind the `xn--…` form, never the Unicode
-    ///    form),
-    /// 3. strip the port when it is the scheme default (`:443` for https,
-    ///    `:80` for http) and keep it otherwise,
-    /// 4. on the server, reconstruct from the same source the client bound
+    /// 1. IDNA/punycode-encode the host before building the HTTP request,
+    /// 2. decide consistently whether a default port is present,
+    /// 3. on the server, reconstruct from the same source the client bound
     ///    (the request-target/`:authority` when present, else `Host`) —
     ///    **before** any reverse-proxy rewriting, or configure the expected
     ///    external authority statically instead of trusting headers.
@@ -206,7 +206,7 @@ impl ContextCarrier {
             .parse::<u64>()
             .map_err(|_| HttpError::InvalidContext("expiry"))?;
 
-        let idempotency_key = match headers.get(IDEMPOTENCY_HEADER) {
+        let idempotency_key = match get_optional(headers, IDEMPOTENCY_HEADER)? {
             Some(value) => {
                 if value.as_bytes().len() > MAX_PROTECTED_CONTEXT_BYTES {
                     return Err(HttpError::LimitExceeded("protected_context_len"));
@@ -221,7 +221,7 @@ impl ContextCarrier {
             None => None,
         };
 
-        let request_message_id = match headers.get(REQUEST_MSG_ID_HEADER) {
+        let request_message_id = match get_optional(headers, REQUEST_MSG_ID_HEADER)? {
             Some(value) => {
                 let s = value
                     .to_str()
@@ -290,7 +290,7 @@ impl ProtectedContext {
     ) -> Result<Self, HttpError> {
         let mut context_bytes = request_context_bytes(parts, &carrier, bind_authority)?;
         let authority = if bind_authority {
-            request_authority(parts)
+            request_authority(parts)?
         } else {
             None
         };
@@ -303,7 +303,7 @@ impl ProtectedContext {
             if name.len() > MAX_BOUND_HEADER_NAME_BYTES {
                 return Err(HttpError::LimitExceeded("bound_header_name_len"));
             }
-            let value = parts.headers.get(name).map(|value| value.as_bytes());
+            let value = get_optional_dynamic(&parts.headers, name)?.map(|value| value.as_bytes());
             if value.is_some_and(|value| value.len() > MAX_BOUND_HEADER_VALUE_BYTES) {
                 return Err(HttpError::LimitExceeded("bound_header_value_len"));
             }
@@ -434,15 +434,25 @@ pub fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn request_authority(parts: &http::request::Parts) -> Option<String> {
-    if let Some(authority) = parts.uri.authority() {
-        return Some(authority.as_str().to_ascii_lowercase());
+fn request_authority(parts: &http::request::Parts) -> Result<Option<String>, HttpError> {
+    let uri_authority = parts
+        .uri
+        .authority()
+        .map(|authority| authority.as_str().to_ascii_lowercase());
+    let host = get_optional_dynamic(&parts.headers, http::header::HOST.as_str())?
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_ascii_lowercase)
+                .map_err(|_| HttpError::InvalidContext("authority"))
+        })
+        .transpose()?;
+    if let (Some(uri), Some(host)) = (&uri_authority, &host)
+        && uri != host
+    {
+        return Err(HttpError::InvalidContext("conflicting authority"));
     }
-    parts
-        .headers
-        .get(http::header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase())
+    Ok(uri_authority.or(host))
 }
 
 fn carrier_context_bytes(carrier: &ContextCarrier) -> Result<usize, HttpError> {
@@ -459,18 +469,7 @@ fn request_context_bytes(
     bind_authority: bool,
 ) -> Result<usize, HttpError> {
     let authority_len = if bind_authority {
-        parts
-            .uri
-            .authority()
-            .map(|authority| authority.as_str().len())
-            .or_else(|| {
-                parts
-                    .headers
-                    .get(http::header::HOST)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::len)
-            })
-            .unwrap_or(0)
+        request_authority(parts)?.map_or(0, |authority| authority.len())
     } else {
         0
     };
@@ -509,11 +508,34 @@ fn insert_str(headers: &mut HeaderMap, name: &'static str, value: &str) -> Resul
 }
 
 fn get_str<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a str, HttpError> {
-    headers
-        .get(name)
+    get_optional(headers, name)?
         .ok_or(HttpError::MissingContext(name))?
         .to_str()
         .map_err(|_| HttpError::InvalidContext(name))
+}
+
+fn get_optional<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> Result<Option<&'a HeaderValue>, HttpError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(HttpError::DuplicateContext(name));
+    }
+    Ok(value)
+}
+
+fn get_optional_dynamic<'a>(
+    headers: &'a HeaderMap,
+    name: &str,
+) -> Result<Option<&'a HeaderValue>, HttpError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(HttpError::InvalidContext("duplicate bound header"));
+    }
+    Ok(value)
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -562,6 +584,48 @@ mod tests {
         carrier.apply_to_headers(&mut headers).expect("apply");
         let parsed = ContextCarrier::from_headers(&headers).expect("parse");
         assert_eq!(parsed, carrier);
+    }
+
+    #[test]
+    fn carrier_rejects_duplicate_required_and_optional_headers() {
+        let carrier = ContextCarrier::generate(1000, 60).with_idempotency_key("first");
+        let mut headers = HeaderMap::new();
+        carrier.apply_to_headers(&mut headers).expect("apply");
+        headers.append(
+            MSG_ID_HEADER,
+            HeaderValue::from_static("00000000000000000000000000000000"),
+        );
+        assert!(matches!(
+            ContextCarrier::from_headers(&headers),
+            Err(HttpError::DuplicateContext(MSG_ID_HEADER))
+        ));
+
+        let mut headers = HeaderMap::new();
+        carrier.apply_to_headers(&mut headers).expect("apply");
+        headers.append(IDEMPOTENCY_HEADER, HeaderValue::from_static("second"));
+        assert!(matches!(
+            ContextCarrier::from_headers(&headers),
+            Err(HttpError::DuplicateContext(IDEMPOTENCY_HEADER))
+        ));
+    }
+
+    #[test]
+    fn request_context_rejects_duplicate_bound_headers() {
+        let carrier = ContextCarrier::generate(1000, 60);
+        let (mut parts, _) = http::Request::builder()
+            .uri("/resource")
+            .header("x-operation", "one")
+            .body(())
+            .expect("request")
+            .into_parts();
+        parts
+            .headers
+            .append("x-operation", HeaderValue::from_static("two"));
+        let binding = ContextBinding::new().with_bound_headers(&["x-operation"]);
+        assert!(matches!(
+            ProtectedContext::for_request(&parts, carrier, binding),
+            Err(HttpError::InvalidContext("duplicate bound header"))
+        ));
     }
 
     #[test]

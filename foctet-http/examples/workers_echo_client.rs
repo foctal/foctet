@@ -49,6 +49,7 @@ fn select_server_key() -> ServerKeyChoice {
 
 #[tokio::main]
 async fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // Override with a deployed Worker URL to run against a real environment,
     // e.g. WORKERS_URL=https://<name>.<account>.workers.dev/foctet
     let workers_url =
@@ -72,6 +73,17 @@ async fn main() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_secs();
+    let ttl_secs = std::env::var("CONTEXT_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_CONTEXT_TTL_SECS);
+    let mut request_carrier = ContextCarrier::generate(now_secs, ttl_secs);
+    if let Ok(value) = std::env::var("FIXED_MESSAGE_ID_BYTE") {
+        let byte = u8::from_str_radix(&value, 16)
+            .expect("FIXED_MESSAGE_ID_BYTE must be a two-digit hexadecimal byte");
+        request_carrier.message_id = [byte; 16];
+    }
+    let request_message_id = request_carrier.message_id;
     let encrypted_request = sealer
         .seal_request_with_context(
             http::Request::builder()
@@ -79,16 +91,48 @@ async fn main() {
                 .uri(workers_url.as_str())
                 .body(plaintext_request)
                 .expect("build request"),
-            ContextCarrier::generate(now_secs, DEFAULT_CONTEXT_TTL_SECS),
+            request_carrier,
             ContextBinding::default(),
         )
         .expect("seal request");
+
+    if let Ok(count) = std::env::var("RACE_REQUESTS").map(|value| {
+        value
+            .parse::<usize>()
+            .expect("RACE_REQUESTS must be an integer")
+    }) {
+        let responses = futures_util::future::join_all(
+            (0..count).map(|_| send(&client, workers_url.as_str(), &encrypted_request)),
+        )
+        .await;
+        let accepted = responses
+            .iter()
+            .filter(|response| response.status() == StatusCode::OK)
+            .count();
+        let replayed = responses
+            .iter()
+            .filter(|response| response.status() == StatusCode::CONFLICT)
+            .count();
+        assert_eq!(accepted, 1, "exactly one racing request must be accepted");
+        assert_eq!(replayed, count - 1, "all other requests must be replays");
+        println!("race accepted={accepted} replayed={replayed}");
+        return;
+    }
 
     let response = send(&client, workers_url.as_str(), &encrypted_request).await;
     let status = response.status();
     let version = response.version();
     let headers = response.headers().clone();
     let body = response.bytes().await.expect("read response body").to_vec();
+
+    if let Ok(expected) = std::env::var("EXPECTED_STATUS") {
+        let expected = expected
+            .parse::<u16>()
+            .expect("EXPECTED_STATUS must be an integer");
+        assert_eq!(status.as_u16(), expected, "{body:?}");
+        println!("status: {status} (expected)");
+        return;
+    }
 
     if !server_key.accepted {
         // Failure handling: a request sealed to a key the Worker does not hold
@@ -108,7 +152,12 @@ async fn main() {
         response_builder = response_builder.header(name, value);
     }
     let decrypted_response = opener
-        .open_response(response_builder.body(body).expect("build response"))
+        .open_response_with_context(
+            response_builder.body(body).expect("build response"),
+            request_message_id,
+            now_secs,
+            DEFAULT_CONTEXT_TTL_SECS,
+        )
         .expect("open response");
 
     println!("status: {}", decrypted_response.status());

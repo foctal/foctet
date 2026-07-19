@@ -9,8 +9,10 @@
 use foctet_core::{
     BodyEnvelopeLimits, open_body, open_body_with_limits, seal_body, seal_body_with_limits,
 };
+#[cfg(feature = "dangerous-stateless-http")]
+use http::Request;
 use http::{
-    HeaderMap, Request, Response,
+    HeaderMap, Response,
     header::{self, HeaderName, HeaderValue},
 };
 
@@ -99,6 +101,7 @@ pub fn open_http_body_with_limits(
 }
 
 /// Seals request body and sets `Content-Type: application/foctet`.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -119,6 +122,7 @@ pub fn seal_http_request(
 }
 
 /// Seals request body with explicit limits and sets `Content-Type: application/foctet`.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -140,6 +144,7 @@ pub fn seal_http_request_with_limits(
 }
 
 /// Validates foctet content type and opens request body.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -156,6 +161,7 @@ pub fn open_http_request(
 }
 
 /// Validates foctet content type and opens request body with explicit limits.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -230,7 +236,9 @@ pub(crate) fn is_foctet_content_type_value(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use getrandom::SysRng;
-    use http::{HeaderMap, Request, Response, StatusCode, Version, header};
+    use http::{HeaderMap, header};
+    #[cfg(feature = "dangerous-stateless-http")]
+    use http::{Request, Response, StatusCode, Version};
     use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -278,6 +286,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "dangerous-stateless-http")]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn wrong_content_type_rejected_on_request_open() {
         let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
@@ -293,6 +302,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "dangerous-stateless-http")]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn request_and_response_helpers_roundtrip() {
         let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
