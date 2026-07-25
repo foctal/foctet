@@ -286,6 +286,9 @@ impl StreamSealer {
         if plaintext.len() > self.max_chunk_plaintext {
             return Err(BodyEnvelopeError::LimitExceeded("chunk_plaintext"));
         }
+        if self.next_index == u64::MAX && !is_final {
+            return Err(BodyEnvelopeError::LimitExceeded("chunk_index"));
+        }
 
         let index = self.next_index;
         let flags = if is_final { FLAG_FINAL } else { 0 };
@@ -312,9 +315,13 @@ impl StreamSealer {
         out.extend_from_slice(&ct_len.to_be_bytes());
         out.extend_from_slice(&ciphertext);
 
-        self.next_index = self.next_index.wrapping_add(1);
         if is_final {
             self.finished = true;
+        } else {
+            self.next_index = self
+                .next_index
+                .checked_add(1)
+                .ok_or(BodyEnvelopeError::LimitExceeded("chunk_index"))?;
         }
         Ok(out)
     }
@@ -415,6 +422,10 @@ impl StreamOpener {
         if flags & !FLAG_FINAL != 0 {
             return Err(BodyEnvelopeError::InvalidHeader("chunk flags"));
         }
+        let is_final = flags & FLAG_FINAL != 0;
+        if index == u64::MAX && !is_final {
+            return Err(BodyEnvelopeError::LimitExceeded("chunk_index"));
+        }
 
         let nonce = chunk_nonce(&self.nonce_prefix, index);
         let aad = chunk_aad(&self.header, index, flags, &self.context);
@@ -429,10 +440,13 @@ impl StreamOpener {
             )
             .map_err(|_| BodyEnvelopeError::DecryptFailed)?;
 
-        self.expected_index = self.expected_index.wrapping_add(1);
-        let is_final = flags & FLAG_FINAL != 0;
         if is_final {
             self.finished = true;
+        } else {
+            self.expected_index = self
+                .expected_index
+                .checked_add(1)
+                .ok_or(BodyEnvelopeError::LimitExceeded("chunk_index"))?;
         }
         Ok(DecodedChunk {
             plaintext,
@@ -720,6 +734,56 @@ mod tests {
             .open_chunk(&chunks[0])
             .expect_err("post-final chunk must be rejected");
         assert!(matches!(err, BodyEnvelopeError::StreamFinished));
+    }
+
+    #[test]
+    fn chunk_index_exhaustion_fails_closed() {
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        let (mut sealer, header) = StreamSealer::new(public, b"kid", b"", &limits).expect("sealer");
+        sealer.next_index = u64::MAX;
+
+        let err = sealer
+            .seal_chunk(b"not final", false)
+            .expect_err("a non-final maximum index would reuse nonce zero next");
+        assert!(matches!(
+            err,
+            BodyEnvelopeError::LimitExceeded("chunk_index")
+        ));
+
+        let index = u64::MAX;
+        let flags = 0;
+        let nonce = chunk_nonce(&sealer.nonce_prefix, index);
+        let aad = chunk_aad(&sealer.header, index, flags, &sealer.context);
+        let ciphertext = sealer
+            .cipher
+            .encrypt(
+                &XNonce::try_from(&nonce[..]).expect("fixed-size nonce"),
+                Payload {
+                    msg: b"not final",
+                    aad: &aad,
+                },
+            )
+            .expect("construct authenticated peer input");
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&index.to_be_bytes());
+        chunk.push(flags);
+        chunk.extend_from_slice(
+            &u32::try_from(ciphertext.len())
+                .expect("small ciphertext")
+                .to_be_bytes(),
+        );
+        chunk.extend_from_slice(&ciphertext);
+
+        let mut opener = StreamOpener::new(secret, &header, b"", &limits).expect("opener");
+        opener.expected_index = u64::MAX;
+        let err = opener
+            .open_chunk(&chunk)
+            .expect_err("an authenticated peer must not wrap the receive index");
+        assert!(matches!(
+            err,
+            BodyEnvelopeError::LimitExceeded("chunk_index")
+        ));
     }
 
     #[test]

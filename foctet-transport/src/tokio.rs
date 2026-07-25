@@ -602,7 +602,11 @@ mod tests {
         };
 
         let result = TokioTransportBuilder::new()
-            .establish_initiator(io, RekeyThresholds::default())
+            .establish_initiator_with_auth(
+                io,
+                RekeyThresholds::default(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+            )
             .await;
         assert!(matches!(result, Err(foctet_core::CoreError::Io(_))));
         assert!(
@@ -669,13 +673,21 @@ mod tests {
         let client_task = tokio::spawn({
             async move {
                 client_builder
-                    .establish_initiator_from_split(client_recv, client_send, thresholds)
+                    .establish_initiator_with_auth(
+                        crate::adapter::SplitIo::from_split(client_recv, client_send),
+                        thresholds,
+                        SessionAuthConfig::unauthenticated_for_testing(),
+                    )
                     .await
             }
         });
 
         let mut server = builder
-            .establish_responder_from_split(server_recv, server_send, RekeyThresholds::default())
+            .establish_responder_with_auth(
+                crate::adapter::SplitIo::from_split(server_recv, server_send),
+                RekeyThresholds::default(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+            )
             .await
             .expect("server channel");
         let mut client = client_task
@@ -703,9 +715,10 @@ mod tests {
             let thresholds = thresholds.clone();
             async move {
                 builder
-                    .establish_initiator_with_timeout(
+                    .establish_initiator_with_auth_and_timeout(
                         crate::adapter::SplitIo::from_split(client_recv, client_send),
                         thresholds,
+                        SessionAuthConfig::unauthenticated_for_testing(),
                         std::time::Duration::from_secs(5),
                     )
                     .await
@@ -713,9 +726,10 @@ mod tests {
         });
 
         let server = builder
-            .establish_responder_with_timeout(
+            .establish_responder_with_auth_and_timeout(
                 crate::adapter::SplitIo::from_split(server_recv, server_send),
                 thresholds,
+                SessionAuthConfig::unauthenticated_for_testing(),
                 std::time::Duration::from_secs(5),
             )
             .await;
@@ -735,9 +749,10 @@ mod tests {
 
         let builder = TokioTransportBuilder::new();
         let result = builder
-            .establish_initiator_with_timeout(
+            .establish_initiator_with_auth_and_timeout(
                 crate::adapter::SplitIo::from_split(client_recv, client_send),
                 thresholds,
+                SessionAuthConfig::unauthenticated_for_testing(),
                 std::time::Duration::from_millis(50),
             )
             .await;

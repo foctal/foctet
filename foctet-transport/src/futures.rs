@@ -557,7 +557,11 @@ mod tests {
         };
 
         let result = FuturesTransportBuilder::new()
-            .establish_initiator(io, RekeyThresholds::default())
+            .establish_initiator_with_auth(
+                io,
+                RekeyThresholds::default(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+            )
             .await;
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert!(

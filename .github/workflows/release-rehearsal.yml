@@ -34,7 +34,15 @@ jobs:
         run: git rev-parse --verify "${{ inputs.baseline }}^{commit}"
       - name: Check Rust SemVer compatibility
         run: cargo semver-checks check-release --workspace --baseline-rev "${{ inputs.baseline }}"
+      - name: Verify Rust release packages
+        run: cargo package --workspace --exclude foctet-fuzz --locked
+      - name: Test minimal runtime feature configurations
+        run: |
+          cargo test -p foctet-transport --no-default-features --features runtime-tokio --locked
+          cargo test -p foctet-transport --no-default-features --features runtime-futures --locked
       - name: Check WASM release target
+        env:
+          RUSTFLAGS: "-D warnings"
         run: |
           cargo check -p foctet-http --features workers --locked --target wasm32-unknown-unknown
           cargo check -p foctet-wasm --locked --target wasm32-unknown-unknown

@@ -579,7 +579,12 @@ impl Session {
                 if *old_key_id != active.key_id {
                     return Err(CoreError::UnexpectedControlMessage);
                 }
-                if *new_key_id != old_key_id.wrapping_add(1) {
+                if self.can_rekey {
+                    return Err(CoreError::RekeyNotPermitted);
+                }
+                let expected_new_key_id =
+                    old_key_id.checked_add(1).ok_or(CoreError::KeyIdExhausted)?;
+                if *new_key_id != expected_new_key_id {
                     return Err(CoreError::InvalidControlMessage);
                 }
 
@@ -1554,6 +1559,61 @@ mod tests {
             .handle_control(&forged_rekey)
             .expect_err("rekey from an unrecognized old_key_id must be rejected");
         assert!(matches!(err, CoreError::UnexpectedControlMessage));
+    }
+
+    #[test]
+    fn received_rekey_rejects_key_id_wraparound() {
+        let (_client, mut server) = active_pair();
+        server.active_keys = Some(KeyHandle::new(
+            derive_traffic_keys(&[0x11; 32], &server.session_salt, u8::MAX)
+                .expect("derive terminal key generation"),
+        ));
+
+        let ratchet_public = EphemeralKeyPair::generate().public;
+        let wrapped_rekey = ControlMessage::Rekey {
+            old_key_id: u8::MAX,
+            new_key_id: 0,
+            ratchet_public,
+            transcript_binding: rekey_binding(u8::MAX, 0, &ratchet_public, server.session_salt),
+        };
+
+        let err = server
+            .handle_control(&wrapped_rekey)
+            .expect_err("received key identifiers must never wrap");
+        assert!(matches!(err, CoreError::KeyIdExhausted));
+        assert_eq!(server.state(), SessionState::Closed);
+        assert!(server.active_keys().is_none());
+    }
+
+    #[test]
+    fn received_rekey_rejects_a_peer_ratcheting_twice_in_a_row() {
+        let (mut client, mut server) = active_pair();
+        let first_rekey = client.force_rekey().expect("client rekeys on its turn");
+        server
+            .handle_control(&first_rekey)
+            .expect("server applies the first rekey");
+        assert!(server.can_rekey(), "the ratchet turn passes to the server");
+
+        let active_key_id = server.active_keys().expect("active keys").key_id;
+        let next_key_id = active_key_id.checked_add(1).expect("test key id fits");
+        let ratchet_public = EphemeralKeyPair::generate().public;
+        let out_of_turn_rekey = ControlMessage::Rekey {
+            old_key_id: active_key_id,
+            new_key_id: next_key_id,
+            ratchet_public,
+            transcript_binding: rekey_binding(
+                active_key_id,
+                next_key_id,
+                &ratchet_public,
+                server.session_salt,
+            ),
+        };
+
+        let err = server
+            .handle_control(&out_of_turn_rekey)
+            .expect_err("the same peer must not take two consecutive ratchet turns");
+        assert!(matches!(err, CoreError::RekeyNotPermitted));
+        assert_eq!(server.state(), SessionState::Closed);
     }
 
     #[test]

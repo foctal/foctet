@@ -458,6 +458,7 @@ pub fn seal_worker_response_body(
         .seal_response_body(plaintext)
 }
 
+#[cfg(feature = "dangerous-stateless-http")]
 fn extract_worker_request_metadata(
     request: &worker::Request,
 ) -> Result<WorkerRequestMetadata, WorkersError> {

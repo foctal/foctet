@@ -49,6 +49,69 @@ struct AmplificationLimiter {
     validated: AtomicBool,
 }
 
+struct AmplificationReservation {
+    limiter: Arc<AmplificationLimiter>,
+    bytes: u64,
+    committed: bool,
+}
+
+impl AmplificationReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AmplificationReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.limiter.sent.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
+}
+
+impl AmplificationLimiter {
+    /// Atomically reserves an unvalidated send budget across transport clones.
+    ///
+    /// The returned guard releases the reservation if the send fails or its
+    /// future is cancelled. Once the peer is validated no reservation is needed.
+    fn reserve_send(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> std::io::Result<Option<AmplificationReservation>> {
+        loop {
+            if self.validated.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+
+            let budget = self
+                .received
+                .load(Ordering::Acquire)
+                .saturating_mul(self.factor);
+            let sent = self.sent.load(Ordering::Acquire);
+            let projected = sent.saturating_add(bytes);
+            if projected > budget {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "anti-amplification limit reached: cannot send more until the peer is \
+                     validated or has sent more",
+                ));
+            }
+
+            if self
+                .sent
+                .compare_exchange_weak(sent, projected, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(Some(AmplificationReservation {
+                    limiter: self.clone(),
+                    bytes,
+                    committed: false,
+                }));
+            }
+        }
+    }
+}
+
 /// [`DatagramTransport`] over a connected `tokio::net::UdpSocket`.
 #[derive(Clone, Debug)]
 pub struct UdpDatagramTransport {
@@ -147,32 +210,30 @@ impl DatagramTransport for UdpDatagramTransport {
                 "datagram exceeds configured path maximum",
             ));
         }
-        if let Some(limiter) = &self.limiter
-            && !limiter.validated.load(Ordering::Acquire)
-        {
-            let budget = limiter
-                .received
-                .load(Ordering::Acquire)
-                .saturating_mul(limiter.factor);
-            let projected = limiter
-                .sent
-                .load(Ordering::Acquire)
-                .saturating_add(datagram.len() as u64);
-            if projected > budget {
+        let datagram_len = datagram.len() as u64;
+        let reservation = match &self.limiter {
+            Some(limiter) => limiter.reserve_send(datagram_len)?,
+            None => None,
+        };
+
+        match self.socket.send(&datagram).await {
+            Ok(sent) if sent == datagram.len() => {}
+            Ok(_) => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "anti-amplification limit reached: cannot send more until the peer is \
-                     validated or has sent more",
+                    std::io::ErrorKind::WriteZero,
+                    "UDP socket accepted only part of a datagram",
                 ));
             }
+            Err(error) => return Err(error),
         }
 
-        self.socket.send(&datagram).await?;
-
-        if let Some(limiter) = &self.limiter {
-            limiter
-                .sent
-                .fetch_add(datagram.len() as u64, Ordering::AcqRel);
+        match reservation {
+            Some(reservation) => reservation.commit(),
+            None => {
+                if let Some(limiter) = &self.limiter {
+                    limiter.sent.fetch_add(datagram_len, Ordering::AcqRel);
+                }
+            }
         }
         Ok(())
     }
@@ -312,6 +373,37 @@ mod tests {
         a.send_datagram(vec![0u8; 1000])
             .await
             .expect("validated peer may use the full path limit");
+    }
+
+    #[test]
+    fn anti_amplification_reservation_is_atomic_across_clones() {
+        let limiter = Arc::new(AmplificationLimiter {
+            factor: 1,
+            received: AtomicU64::new(100),
+            sent: AtomicU64::new(0),
+            validated: AtomicBool::new(false),
+        });
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let limiter = limiter.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    limiter.reserve_send(100).ok().flatten()
+                })
+            })
+            .collect();
+
+        let reservations: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("reservation worker"))
+            .flatten()
+            .collect();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(limiter.sent.load(Ordering::Acquire), 100);
+        drop(reservations);
+        assert_eq!(limiter.sent.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]

@@ -17,25 +17,25 @@
 //! # Quick Start
 //!
 //! ```rust
-//! use foctet_core::{ChannelBinding, ProductionSessionAuth, RekeyThresholds};
-//! use foctet_transport::TokioTransportBuilder;
+//! #[cfg(feature = "runtime-tokio")]
+//! async fn quick_start() -> Result<(), foctet_core::CoreError> {
+//!     use foctet_core::{ChannelBinding, ProductionSessionAuth, RekeyThresholds};
+//!     use foctet_transport::TokioTransportBuilder;
 //!
-//! # #[tokio::main]
-//! # async fn main() -> Result<(), foctet_core::CoreError> {
-//! let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-//! let binding = ChannelBinding::new(b"authenticated outer channel exporter")?;
-//! let client_auth = ProductionSessionAuth::authenticated_channel(binding.clone());
-//! let server_auth = ProductionSessionAuth::authenticated_channel(binding);
+//!     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+//!     let binding = ChannelBinding::new(b"authenticated outer channel exporter")?;
+//!     let client_auth = ProductionSessionAuth::authenticated_channel(binding.clone());
+//!     let server_auth = ProductionSessionAuth::authenticated_channel(binding);
 //!
-//! let (client, server) = tokio::join!(
-//!     TokioTransportBuilder::new().establish_production_initiator(
-//!         client_io, RekeyThresholds::default(), client_auth),
-//!     TokioTransportBuilder::new().establish_production_responder(
-//!         server_io, RekeyThresholds::default(), server_auth),
-//! );
-//! assert!(client.is_ok() && server.is_ok());
-//! # Ok(())
-//! # }
+//!     let (client, server) = tokio::join!(
+//!         TokioTransportBuilder::new().establish_production_initiator(
+//!             client_io, RekeyThresholds::default(), client_auth),
+//!         TokioTransportBuilder::new().establish_production_responder(
+//!             server_io, RekeyThresholds::default(), server_auth),
+//!     );
+//!     assert!(client.is_ok() && server.is_ok());
+//!     Ok(())
+//! }
 //! ```
 //!
 //! Transport-specific helpers follow the same authentication model; the main
