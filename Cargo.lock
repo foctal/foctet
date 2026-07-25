@@ -732,7 +732,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foctet"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ed25519-dalek",
  "foctet-archive",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "foctet-archive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "foctet-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "foctet-http"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "foctet-core",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "foctet-transport"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "clap",
@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "foctet-wasm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "foctet-core",
  "foctet-http",

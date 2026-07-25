@@ -1,7 +1,7 @@
 {
   "name": "@foctet/wasm-dev",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Development harness for building and testing the Foctet WASM SDK",
   "license": "Apache-2.0",
   "scripts": {
