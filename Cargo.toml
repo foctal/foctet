@@ -15,7 +15,7 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["shellrow <shellrow@foctal.com>"]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/foctal/foctet"
 description = "Transport-agnostic end-to-end encryption layer for secure data transfer."
 

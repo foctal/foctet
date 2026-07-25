@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.3.0",
   "description": "Development harness for building and testing the Foctet WASM SDK",
+  "license": "Apache-2.0",
   "scripts": {
     "build:node": "wasm-pack build --scope foctet --target nodejs --out-dir pkg-node",
     "build:web": "wasm-pack build --scope foctet --target web --out-dir pkg-web",
