@@ -1,0 +1,11 @@
+{
+  "name": "foctet-browser-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:webtransport": "node webtransport-e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.58.2"
+  }
+}

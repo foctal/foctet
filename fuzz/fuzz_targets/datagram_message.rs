@@ -12,9 +12,17 @@ fuzz_target!(|data: &[u8]| {
     };
     let keys = KeyHandle::new(keys);
 
-    let mut datagram = DatagramEndpoint::new(keys.clone(), Direction::S2C, Direction::C2S);
+    let mut datagram = DatagramEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+        keys.clone(),
+        Direction::S2C,
+        Direction::C2S,
+    );
     let _ = datagram.open(data);
 
-    let mut message = MessageEndpoint::new(keys, Direction::S2C, Direction::C2S);
+    let mut message = MessageEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+        keys,
+        Direction::S2C,
+        Direction::C2S,
+    );
     let _ = message.open(data);
 });

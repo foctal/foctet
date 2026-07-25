@@ -38,8 +38,8 @@ use http_body_util::BodyExt;
 use thiserror::Error;
 
 use crate::{
-    AsyncReplayStore, ContextBinding, ContextCarrier, HttpError, HttpOpenOptions, HttpOpener,
-    HttpRequestStreamReader, HttpSealOptions, HttpSealer, ReplayStore,
+    AsyncReplayStore, ContextBinding, ContextCarrier, HttpError, HttpErrorDisposition,
+    HttpOpenOptions, HttpOpener, HttpRequestStreamReader, HttpSealOptions, HttpSealer, ReplayStore,
 };
 
 /// Error type for Axum adapter operations.
@@ -51,6 +51,19 @@ pub enum AxumError {
     /// Foctet HTTP-layer operation failed.
     #[error("foctet http operation failed")]
     Http(#[from] HttpError),
+}
+
+impl AxumError {
+    /// Classifies the required handling of this request-scoped adapter error.
+    ///
+    /// An Axum body-read failure can follow partial HTTP-body delivery, so the
+    /// protected request must be rejected rather than retried in place.
+    pub const fn disposition(&self) -> HttpErrorDisposition {
+        match self {
+            Self::BodyRead(_) => HttpErrorDisposition::Reject,
+            Self::Http(error) => error.disposition(),
+        }
+    }
 }
 
 /// High-level Axum request opener.
@@ -97,6 +110,7 @@ impl AxumOpener {
     ///
     /// Body-only; no replay protection or HTTP-context binding. Prefer
     /// [`AxumOpener::open_request_with_context`] for production.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -142,9 +156,10 @@ impl AxumOpener {
             .map_err(AxumError::Http)
     }
 
-    /// Opens an encrypted Axum request using a durable [`AsyncReplayStore`]
-    /// (Redis, Cloudflare KV, a shared SQL table, …) for multi-instance
-    /// deployments.
+    /// Opens an encrypted Axum request using an atomic durable
+    /// [`AsyncReplayStore`] (Redis `SET NX`, a transactional SQL table, …) for
+    /// multi-instance deployments. Eventually consistent key/value stores do
+    /// not satisfy the replay-store contract.
     pub async fn open_request_with_async_store<S>(
         &self,
         request: AxumRequest,
@@ -208,6 +223,7 @@ impl AxumSealer {
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -226,6 +242,7 @@ pub async fn open_axum_request_body(
 }
 
 /// Opens an encrypted Axum request body into plaintext bytes with explicit envelope limits.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -286,9 +303,12 @@ impl ::axum::response::IntoResponse for AxumError {
             AxumError::Http(HttpError::MissingContentType | HttpError::InvalidContentType) => {
                 StatusCode::BAD_REQUEST
             }
+            AxumError::Http(HttpError::LimitExceeded(_)) => StatusCode::PAYLOAD_TOO_LARGE,
             AxumError::Http(
                 HttpError::MissingContext(_)
                 | HttpError::InvalidContext(_)
+                | HttpError::DuplicateContext(_)
+                | HttpError::ResponseRequestMismatch
                 | HttpError::ContextTimestampInFuture,
             ) => StatusCode::BAD_REQUEST,
             AxumError::Http(HttpError::ContextExpired) => StatusCode::UNAUTHORIZED,
@@ -351,10 +371,13 @@ pub trait ProtectedHttpState: Send + Sync {
 ///
 /// Requires the application's `State` to implement [`ProtectedHttpState`]:
 ///
-/// ```ignore
+/// ```rust,no_run
+/// use axum::response::IntoResponse;
+/// use foctet_http::axum::ProtectedRequest;
+///
 /// async fn handler(ProtectedRequest(request): ProtectedRequest) -> impl IntoResponse {
 ///     let plaintext = request.body();
-///     // ...
+///     plaintext.len().to_string()
 /// }
 /// ```
 #[derive(Debug)]
@@ -437,15 +460,16 @@ mod tests {
     #[allow(deprecated)] // seal_http_request is deprecated; used to build a test fixture
     use crate::raw::seal_http_request;
     use crate::{BODY_ONLY_SCOPE, CONTENT_TYPE, HttpSealer, SCOPE_HEADER};
+    use getrandom::SysRng;
     use http::{Request, Response, StatusCode, Version, header};
-    use rand_core::OsRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     #[tokio::test]
     async fn open_request_stream_decodes_a_streaming_upload() {
         use crate::{HttpStreamSealer, InMemoryReplayStore};
 
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_secret = recipient_priv.to_bytes();
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits::default();
@@ -502,7 +526,7 @@ mod tests {
     #[tokio::test]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     async fn open_axum_request_body_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain_request = Request::builder()
@@ -533,7 +557,7 @@ mod tests {
 
     #[test]
     fn seal_axum_response_body_sets_content_type() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let response = Response::builder()
@@ -559,7 +583,7 @@ mod tests {
     async fn open_axum_request_with_context_enforces_replay() {
         use crate::{ContextBinding, ContextCarrier, InMemoryReplayStore};
 
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"axum-kid"));
@@ -636,7 +660,7 @@ mod tests {
     async fn protected_request_extractor_authenticates_and_rejects_replay() {
         use ::axum::extract::FromRequest;
 
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let now = 1_000_000u64;
 

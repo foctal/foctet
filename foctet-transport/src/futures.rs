@@ -14,7 +14,7 @@ use futures_util::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{TransportConfig, adapter::SplitIo};
 
-const HANDSHAKE_CONTROL_MAX_LEN: usize = 1024;
+const HANDSHAKE_CONTROL_MAX_LEN: usize = foctet_core::MAX_CONTROL_MESSAGE_LEN;
 
 /// Builder for the futures-io integration path.
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,6 +81,7 @@ impl FuturesTransportBuilder {
     }
 
     /// Runs the native Foctet handshake as initiator on the transport, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_initiator<T>(
         self,
         mut io: T,
@@ -112,7 +113,22 @@ impl FuturesTransportBuilder {
         self.build(io, session)
     }
 
+    /// Runs a production initiator handshake with typed authenticated config.
+    pub async fn establish_production_initiator<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        auth: foctet_core::ProductionSessionAuth,
+    ) -> Result<FuturesTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_initiator_with_auth(io, thresholds, auth.into_session_auth())
+            .await
+    }
+
     /// Runs the native Foctet handshake as responder on the transport, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_responder<T>(
         self,
         mut io: T,
@@ -142,6 +158,20 @@ impl FuturesTransportBuilder {
     {
         let session = run_responder_handshake(&mut io, thresholds, auth).await?;
         self.build(io, session)
+    }
+
+    /// Runs a production responder handshake with typed authenticated config.
+    pub async fn establish_production_responder<T>(
+        self,
+        io: T,
+        thresholds: RekeyThresholds,
+        auth: foctet_core::ProductionSessionAuth,
+    ) -> Result<FuturesTransportChannel<T>, CoreError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.establish_responder_with_auth(io, thresholds, auth.into_session_auth())
+            .await
     }
 
     /// Runs the native Foctet handshake as initiator with explicit authentication
@@ -191,6 +221,7 @@ impl FuturesTransportBuilder {
     }
 
     /// Runs the native Foctet handshake as initiator on split transport halves, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_initiator_from_split<R, W>(
         self,
         recv: R,
@@ -206,6 +237,7 @@ impl FuturesTransportBuilder {
     }
 
     /// Runs the native Foctet handshake as responder on split transport halves, then builds a secure channel.
+    #[cfg(feature = "dangerous-unauthenticated")]
     pub async fn establish_responder_from_split<R, W>(
         self,
         recv: R,
@@ -251,8 +283,13 @@ where
 {
     let encoded = msg.encode();
     let len = u16::try_from(encoded.len()).map_err(|_| CoreError::InvalidControlMessage)?;
-    io.write_all(&len.to_be_bytes()).await?;
-    io.write_all(&encoded).await?;
+    let mut serialized = Vec::with_capacity(2 + encoded.len());
+    serialized.extend_from_slice(&len.to_be_bytes());
+    serialized.extend_from_slice(&encoded);
+    // Keep one immutable serialization alive until the complete handshake
+    // control has been written. The builder owns `io`, so any write or flush
+    // error drops the connection and the uncommitted session together.
+    io.write_all(&serialized).await?;
     io.flush().await?;
     Ok(())
 }
@@ -321,6 +358,11 @@ where
         self.inner.send_data(plaintext).await
     }
 
+    /// Immediately performs one fail-closed transactional rekey.
+    pub async fn rekey_now(&mut self) -> Result<(), CoreError> {
+        self.inner.rekey_now().await
+    }
+
     /// Receives the next application payload.
     pub async fn recv_application(&mut self) -> Result<Vec<u8>, CoreError> {
         self.inner.recv_application().await
@@ -383,12 +425,42 @@ where
 mod tests {
     use super::*;
     use std::io;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::task::Context;
 
     /// A futures-io transport whose writes succeed instantly but whose reads
     /// never produce data, so any handshake stalls waiting for the peer's reply.
     #[derive(Debug)]
     struct StalledIo;
+
+    #[derive(Clone, Copy, Debug)]
+    enum HandshakeWriteFailure {
+        ErrorAfter(usize),
+        WriteZero,
+        Flush,
+        PeerClosed,
+    }
+
+    #[derive(Debug, Default)]
+    struct HandshakeWriteState {
+        outbound: Vec<u8>,
+    }
+
+    #[derive(Debug)]
+    struct FailingHandshakeIo {
+        failure: HandshakeWriteFailure,
+        state: Arc<Mutex<HandshakeWriteState>>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for FailingHandshakeIo {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
 
     impl AsyncRead for StalledIo {
         fn poll_read(
@@ -415,6 +487,92 @@ mod tests {
 
         fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for FailingHandshakeIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            match self.failure {
+                HandshakeWriteFailure::PeerClosed => Poll::Ready(Ok(0)),
+                _ => Poll::Pending,
+            }
+        }
+    }
+
+    impl AsyncWrite for FailingHandshakeIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut state = self.state.lock().expect("handshake state lock");
+            match self.failure {
+                HandshakeWriteFailure::ErrorAfter(limit) => {
+                    let remaining = limit.saturating_sub(state.outbound.len());
+                    if remaining == 0 {
+                        return Poll::Ready(Err(io::Error::other(
+                            "injected handshake write failure",
+                        )));
+                    }
+                    let written = remaining.min(buf.len());
+                    state.outbound.extend_from_slice(&buf[..written]);
+                    Poll::Ready(Ok(written))
+                }
+                HandshakeWriteFailure::WriteZero => Poll::Ready(Ok(0)),
+                HandshakeWriteFailure::Flush | HandshakeWriteFailure::PeerClosed => {
+                    state.outbound.extend_from_slice(buf);
+                    Poll::Ready(Ok(buf.len()))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match self.failure {
+                HandshakeWriteFailure::Flush => {
+                    Poll::Ready(Err(io::Error::other("injected handshake flush failure")))
+                }
+                _ => Poll::Ready(Ok(())),
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn assert_handshake_write_failure(
+        failure: HandshakeWriteFailure,
+        expected_emitted: Option<usize>,
+    ) {
+        let state = Arc::new(Mutex::new(HandshakeWriteState::default()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let io = FailingHandshakeIo {
+            failure,
+            state: state.clone(),
+            dropped: dropped.clone(),
+        };
+
+        let result = FuturesTransportBuilder::new()
+            .establish_initiator_with_auth(
+                io,
+                RekeyThresholds::default(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+            )
+            .await;
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "failed handshake must discard its owned connection"
+        );
+
+        let emitted = state.lock().expect("handshake state lock").outbound.len();
+        match expected_emitted {
+            Some(expected) => assert_eq!(emitted, expected),
+            None => assert!(emitted > 2, "complete handshake frame must be emitted"),
         }
     }
 
@@ -445,5 +603,14 @@ mod tests {
             .await
             .expect_err("stalled handshake must time out");
         assert!(matches!(err, CoreError::HandshakeTimeout));
+    }
+
+    #[tokio::test]
+    async fn handshake_write_failures_discard_the_connection() {
+        assert_handshake_write_failure(HandshakeWriteFailure::ErrorAfter(0), Some(0)).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::ErrorAfter(7), Some(7)).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::WriteZero, Some(0)).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::Flush, None).await;
+        assert_handshake_write_failure(HandshakeWriteFailure::PeerClosed, None).await;
     }
 }

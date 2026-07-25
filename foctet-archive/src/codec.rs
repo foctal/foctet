@@ -51,7 +51,7 @@ pub(crate) fn decode_wrapped_table<R: Read>(
     limits: &ArchiveLimits,
 ) -> Result<Vec<WrappedDek>, ArchiveError> {
     let wrapped_count = read_u16_be(rd)? as usize;
-    if wrapped_count > limits.max_wrapped_recipients {
+    if wrapped_count > limits.wrapped_recipients() {
         return Err(ArchiveError::LimitExceeded("wrapped_recipients"));
     }
     let mut wrapped = Vec::with_capacity(wrapped_count);
@@ -99,7 +99,7 @@ pub(crate) fn parse_manifest_part_entries<R: Read>(
     total_parts: usize,
     limits: &ArchiveLimits,
 ) -> Result<std::collections::HashMap<u32, ManifestPartEntry>, ArchiveError> {
-    if total_parts > limits.max_total_parts {
+    if total_parts > limits.total_parts() {
         return Err(ArchiveError::LimitExceeded("total_parts"));
     }
     let mut manifest_parts = std::collections::HashMap::with_capacity(total_parts);
@@ -165,7 +165,7 @@ pub(crate) fn parse_part_file(
     let chunk_count = read_u32_be(&mut rd)?;
     let chunk_count_usize =
         usize::try_from(chunk_count).map_err(|_| ArchiveError::LimitExceeded("part_chunks"))?;
-    if chunk_count_usize > limits.max_part_chunks {
+    if chunk_count_usize > limits.part_chunks() {
         return Err(ArchiveError::LimitExceeded("part_chunks"));
     }
 

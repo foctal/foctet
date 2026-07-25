@@ -1,6 +1,7 @@
 use foctet_core::body::{open_body, seal_body};
+use getrandom::SysRng;
 use proptest::prelude::*;
-use rand_core::OsRng;
+use rand_core::UnwrapErr;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 #[test]
@@ -14,7 +15,7 @@ fn body_parser_corpus_fixtures_never_panic() {
         &[0u8; 128],
     ];
 
-    let recipient_priv = StaticSecret::random_from_rng(OsRng);
+    let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
     for data in cases {
         let _ = open_body(data, recipient_priv.to_bytes());
     }
@@ -25,13 +26,13 @@ proptest! {
 
     #[test]
     fn body_parser_never_panics_on_random_input(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let _ = open_body(&data, recipient_priv.to_bytes());
     }
 
     #[test]
     fn body_seal_open_roundtrip_property(payload in proptest::collection::vec(any::<u8>(), 0..2048)) {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let envelope = seal_body(&payload, recipient_pub, b"prop-kid").expect("seal");

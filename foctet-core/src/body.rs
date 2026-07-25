@@ -2,8 +2,9 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::{TryRng, UnwrapErr};
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -36,6 +37,8 @@ pub struct BodyEnvelopeLimits {
     pub max_wrapped_key_len: usize,
     /// Maximum payload ciphertext length in bytes.
     pub max_payload_len: usize,
+    /// Maximum application context length bound into AEAD associated data.
+    pub max_context_len: usize,
 }
 
 impl Default for BodyEnvelopeLimits {
@@ -46,6 +49,7 @@ impl Default for BodyEnvelopeLimits {
             max_key_id_len: 512,
             max_wrapped_key_len: 512,
             max_payload_len: 64 * 1024 * 1024,
+            max_context_len: 64 * 1024,
         }
     }
 }
@@ -74,6 +78,10 @@ pub enum BodyEnvelopeError {
     /// No matching recipient entry could be used.
     #[error("recipient not found")]
     RecipientNotFound,
+    /// A caller attempted to seal to an X25519 public key that produces a
+    /// forbidden all-zero shared secret.
+    #[error("invalid recipient public key")]
+    InvalidRecipientKey,
     /// Content-key unwrap failed for a selected recipient entry.
     #[error("content-key unwrap failed")]
     KeyUnwrapFailed,
@@ -94,6 +102,19 @@ pub enum BodyEnvelopeError {
     /// duplicate).
     #[error("stream chunk out of order")]
     ChunkOutOfOrder,
+}
+
+impl BodyEnvelopeError {
+    /// Returns a low-cardinality, secret-free metric category for this error.
+    pub const fn security_metric(&self) -> Option<crate::SecurityMetric> {
+        match self {
+            Self::DecryptFailed | Self::EncryptFailed | Self::KeyUnwrapFailed => {
+                Some(crate::SecurityMetric::AeadFailure)
+            }
+            Self::LimitExceeded(_) => Some(crate::SecurityMetric::LimitHit),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +179,9 @@ pub fn seal_body_with_context(
     context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    if context.len() > limits.max_context_len {
+        return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+    }
     if recipient_key_id.is_empty() {
         return Err(BodyEnvelopeError::InvalidHeader("empty recipient key id"));
     }
@@ -174,12 +198,16 @@ pub fn seal_body_with_context(
     }
 
     let mut content_key = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
-    OsRng.fill_bytes(&mut content_key[..]);
+    SysRng
+        .try_fill_bytes(&mut content_key[..])
+        .expect("OS random number generator is unavailable");
 
     let mut payload_nonce = [0u8; XCHACHA_NONCE_LEN];
-    OsRng.fill_bytes(&mut payload_nonce);
+    SysRng
+        .try_fill_bytes(&mut payload_nonce)
+        .expect("OS random number generator is unavailable");
 
-    let eph_priv = StaticSecret::random_from_rng(OsRng);
+    let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
     let eph_pub = PublicKey::from(&eph_priv).to_bytes();
 
     let wrapped_key = wrap_content_key(
@@ -212,7 +240,7 @@ pub fn seal_body_with_context(
         .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
     let payload_ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&payload_nonce),
+            &XNonce::try_from(&payload_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: plaintext,
                 aad: &aad,
@@ -260,6 +288,9 @@ pub fn open_body_with_context(
     context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    if context.len() > limits.max_context_len {
+        return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+    }
     let parsed = parse_envelope(envelope, limits)?;
     let aad = aead_aad(parsed.header_bytes, context);
 
@@ -280,7 +311,7 @@ pub fn open_body_with_context(
 
         let plain = cipher
             .decrypt(
-                XNonce::from_slice(&parsed.payload_nonce),
+                &XNonce::try_from(&parsed.payload_nonce[..]).expect("fixed-size nonce"),
                 Payload {
                     msg: parsed.payload_ciphertext,
                     aad: &aad,
@@ -333,6 +364,9 @@ pub fn open_body_for_key_id_with_context(
     context: &[u8],
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
+    if context.len() > limits.max_context_len {
+        return Err(BodyEnvelopeError::LimitExceeded("context_len"));
+    }
     let parsed = parse_envelope(envelope, limits)?;
     let aad = aead_aad(parsed.header_bytes, context);
 
@@ -354,7 +388,7 @@ pub fn open_body_for_key_id_with_context(
 
     cipher
         .decrypt(
-            XNonce::from_slice(&parsed.payload_nonce),
+            &XNonce::try_from(&parsed.payload_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: parsed.payload_ciphertext,
                 aad: &aad,
@@ -543,8 +577,8 @@ pub(crate) fn wrap_content_key(
     eph_pub: [u8; 32],
     key_id: &[u8],
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
-    let recipient = PublicKey::from(recipient_public_key);
-    let shared = Zeroizing::new(eph_priv.diffie_hellman(&recipient).to_bytes());
+    let shared = crate::crypto::x25519_shared_secret(&eph_priv, recipient_public_key)
+        .map_err(|_| BodyEnvelopeError::InvalidRecipientKey)?;
 
     let (wrap_key, wrap_nonce) = derive_wrap_material(&shared, eph_pub, recipient_public_key)?;
 
@@ -552,7 +586,7 @@ pub(crate) fn wrap_content_key(
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
     cipher
         .encrypt(
-            XNonce::from_slice(&wrap_nonce),
+            &XNonce::try_from(&wrap_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: content_key,
                 aad: key_id,
@@ -569,9 +603,11 @@ pub(crate) fn unwrap_content_key(
 ) -> Result<[u8; CONTENT_KEY_LEN], BodyEnvelopeError> {
     let recipient_priv = StaticSecret::from(recipient_secret_key);
     let recipient_public = PublicKey::from(&recipient_priv).to_bytes();
-    let eph_pub = PublicKey::from(ephemeral_public_key);
-
-    let shared = Zeroizing::new(recipient_priv.diffie_hellman(&eph_pub).to_bytes());
+    // Deliberately collapse invalid peer keys into the same error as an
+    // authentication failure. An opener must not reveal whether a recipient
+    // entry matched its private key to an attacker controlling the envelope.
+    let shared = crate::crypto::x25519_shared_secret(&recipient_priv, ephemeral_public_key)
+        .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
     let (wrap_key, wrap_nonce) =
         derive_wrap_material(&shared, ephemeral_public_key, recipient_public)?;
 
@@ -579,7 +615,7 @@ pub(crate) fn unwrap_content_key(
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
     let unwrapped = cipher
         .decrypt(
-            XNonce::from_slice(&wrap_nonce),
+            &XNonce::try_from(&wrap_nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: wrapped_key,
                 aad: key_id,
@@ -734,7 +770,7 @@ mod tests {
 
     #[test]
     fn body_roundtrip_single_recipient() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello application/foctet body";
@@ -745,8 +781,39 @@ mod tests {
     }
 
     #[test]
+    fn seal_rejects_low_order_recipient_public_keys() {
+        for recipient_public in [[0u8; 32], {
+            let mut low_order = [0u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert_eq!(
+                seal_body(b"secret", recipient_public, b"kid"),
+                Err(BodyEnvelopeError::InvalidRecipientKey)
+            );
+        }
+    }
+
+    #[test]
+    fn open_hides_low_order_ephemeral_key_as_wrapper_failure() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let mut envelope = seal_body(b"secret", recipient_pub, b"kid").expect("seal");
+
+        // The ephemeral public key immediately follows the fixed prefix and
+        // three single-byte varints in this small fixture.
+        let eph_offset = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+        envelope[eph_offset..eph_offset + 32].fill(0);
+
+        assert_eq!(
+            open_body(&envelope, recipient_priv.to_bytes()),
+            Err(BodyEnvelopeError::RecipientNotFound)
+        );
+    }
+
+    #[test]
     fn context_binding_roundtrip_and_mismatch() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits::default();
 
@@ -776,7 +843,7 @@ mod tests {
 
     #[test]
     fn empty_context_matches_legacy_bytes() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
         let limits = BodyEnvelopeLimits::default();
         let plain = b"hello";
@@ -791,7 +858,7 @@ mod tests {
 
     #[test]
     fn open_rejects_invalid_magic() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -804,7 +871,7 @@ mod tests {
 
     #[test]
     fn open_rejects_unsupported_version() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -817,7 +884,7 @@ mod tests {
 
     #[test]
     fn open_rejects_truncated_input() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -830,7 +897,7 @@ mod tests {
 
     #[test]
     fn open_rejects_oversized_lengths() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";
@@ -847,10 +914,43 @@ mod tests {
     }
 
     #[test]
-    fn open_with_wrong_recipient_fails() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+    fn open_rejects_many_recipients_before_parsing_entries_or_unwrapping() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
-        let wrong_priv = StaticSecret::random_from_rng(OsRng);
+        let mut envelope = seal_body(b"hello", recipient_pub, b"kid").expect("seal");
+
+        let mut cursor = 12;
+        decode_varint(&envelope, &mut cursor).expect("header length");
+        envelope[cursor] = (BodyEnvelopeLimits::default().max_recipients + 1) as u8;
+
+        let err = open_body(&envelope, recipient_priv.to_bytes())
+            .expect_err("recipient count must be rejected before entry parsing");
+        assert_eq!(err, BodyEnvelopeError::LimitExceeded("recipient_count"));
+    }
+
+    #[test]
+    fn context_limit_is_enforced_before_sealing_or_opening() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let limits = BodyEnvelopeLimits {
+            max_context_len: 4,
+            ..BodyEnvelopeLimits::default()
+        };
+        let err = seal_body_with_context(b"hello", recipient_pub, b"kid", b"large", &limits)
+            .expect_err("oversized sealing context");
+        assert_eq!(err, BodyEnvelopeError::LimitExceeded("context_len"));
+
+        let envelope = seal_body(b"hello", recipient_pub, b"kid").expect("seal");
+        let err = open_body_with_context(&envelope, recipient_priv.to_bytes(), b"large", &limits)
+            .expect_err("oversized opening context");
+        assert_eq!(err, BodyEnvelopeError::LimitExceeded("context_len"));
+    }
+
+    #[test]
+    fn open_with_wrong_recipient_fails() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let wrong_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
 
         let plain = b"hello";
         let envelope = seal_body(plain, recipient_pub, b"kid").expect("seal");
@@ -861,7 +961,7 @@ mod tests {
 
     #[test]
     fn malformed_wrapped_key_is_rejected() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let plain = b"hello";

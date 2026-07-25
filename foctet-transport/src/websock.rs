@@ -43,8 +43,13 @@ use crate::{
     TokioTransportBuilder, TokioTransportChannel, TransportChannelError, TransportConfig,
     adapter::SplitIo,
 };
+#[cfg(all(
+    feature = "transport-websock-mux",
+    feature = "dangerous-unauthenticated"
+))]
+use foctet_core::Session;
 #[cfg(feature = "transport-websock-mux")]
-use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
+use foctet_core::{RekeyThresholds, SessionAuthConfig};
 #[cfg(feature = "transport-websock-mux")]
 use websock_tungstenite_mux as websock_mux;
 
@@ -64,10 +69,20 @@ use websock_tungstenite_mux as websock_mux;
 /// Negotiate a [`foctet_core::Session`] first (for example over a Foctet control
 /// stream or an out-of-band handshake), then wrap the connection:
 ///
-/// ```rust,ignore
-/// let transport = WebsockMessageTransport::new(connection);
-/// let mut channel = SecureMessageChannel::from_active_session(transport, &session)?;
-/// channel.send_message(0, 0, b"hello").await?;
+/// ```rust,no_run
+/// use foctet_core::Session;
+/// use foctet_transport::{MessageChannelError, SecureMessageChannel};
+/// use foctet_transport::websock::WebsockMessageTransport;
+/// use websock::{Error, WebSocketConnection};
+///
+/// async fn send<C: WebSocketConnection>(
+///     connection: C,
+///     session: &Session,
+/// ) -> Result<(), MessageChannelError<Error>> {
+///     let transport = WebsockMessageTransport::new(connection);
+///     let mut channel = SecureMessageChannel::from_active_session(transport, session)?;
+///     channel.send_message(0, 0, b"hello").await
+/// }
 /// ```
 ///
 /// Sends and receives are serialized through an internal async lock, matching
@@ -75,6 +90,7 @@ use websock_tungstenite_mux as websock_mux;
 /// frames are rejected — Foctet messages are always binary.
 pub struct WebsockMessageTransport<C> {
     conn: Mutex<C>,
+    max_message_size: Option<usize>,
 }
 
 impl<C> WebsockMessageTransport<C> {
@@ -82,6 +98,19 @@ impl<C> WebsockMessageTransport<C> {
     pub fn new(connection: C) -> Self {
         Self {
             conn: Mutex::new(connection),
+            max_message_size: None,
+        }
+    }
+
+    /// Wraps a connection and reports its configured WebSocket message limit.
+    ///
+    /// Pass the same value used in the connection's
+    /// [`websock::WebSocketLimits`] so [`crate::SecureMessageChannel`] can
+    /// clamp its Foctet frame size before sending.
+    pub fn with_max_message_size(connection: C, max_message_size: usize) -> Self {
+        Self {
+            conn: Mutex::new(connection),
+            max_message_size: Some(max_message_size),
         }
     }
 
@@ -113,12 +142,13 @@ where
     }
 
     fn max_message_size(&self) -> Option<usize> {
-        None
+        self.max_message_size
     }
 }
 
 /// Opens a bidirectional WebSocket-mux stream and wraps it as a Foctet secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -131,6 +161,7 @@ pub async fn open_secure_channel(
 
 /// Opens a bidirectional WebSocket-mux stream and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -151,6 +182,7 @@ pub async fn open_secure_channel_with(
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and wraps it as a secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -169,6 +201,7 @@ pub async fn open_secure_channel_with_handshake(
 
 /// Opens a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake_and_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -210,6 +243,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
 
 /// Accepts a bidirectional WebSocket-mux stream and wraps it as a Foctet secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -222,6 +256,7 @@ pub async fn accept_secure_channel(
 
 /// Accepts a bidirectional WebSocket-mux stream and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with(
     session_handle: &websock_mux::Session,
     session: Session,
@@ -242,6 +277,7 @@ pub async fn accept_secure_channel_with(
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and wraps it as a secure channel.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -260,6 +296,7 @@ pub async fn accept_secure_channel_with_handshake(
 
 /// Accepts a bidirectional WebSocket-mux stream, runs the native Foctet handshake, and applies a custom transport config.
 #[cfg(feature = "transport-websock-mux")]
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake_and_config(
     session_handle: &websock_mux::Session,
     thresholds: RekeyThresholds,
@@ -305,7 +342,7 @@ mod tests {
     use super::*;
     use crate::SecureMessageChannel;
     use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
-    use websock::{ClientBuilder, ServerBuilder};
+    use websock::{ClientBuilder, ServerBuilder, WebSocketLimits};
 
     /// Drives a real native Foctet handshake so both sides share traffic keys.
     fn shared_session_keys() -> (Session, Session) {
@@ -334,15 +371,21 @@ mod tests {
 
         // Plain (non-TLS) WebSocket loopback on an ephemeral port.
         let bind_addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("valid loopback addr");
+        let limits = WebSocketLimits {
+            max_message_size: 64 * 1024,
+            max_frame_size: 64 * 1024,
+            ..WebSocketLimits::default()
+        };
         let server = ServerBuilder::new()
             .with_addr(bind_addr)
+            .with_limits(limits)
             .build()
             .await
             .expect("build ws server");
         let addr = server.local_addr().expect("server addr");
         let accept = tokio::spawn(async move { server.accept().await });
 
-        let client = ClientBuilder::new().build();
+        let client = ClientBuilder::new().with_limits(limits).build();
         let client_conn = client
             .connect(&format!("ws://{addr}/"))
             .await
@@ -350,15 +393,17 @@ mod tests {
         let server_conn = accept.await.expect("accept task joins").expect("accept");
 
         let mut client = SecureMessageChannel::from_active_session(
-            WebsockMessageTransport::new(client_conn),
+            WebsockMessageTransport::with_max_message_size(client_conn, limits.max_message_size),
             &initiator,
         )
         .expect("client channel");
         let mut server = SecureMessageChannel::from_active_session(
-            WebsockMessageTransport::new(server_conn),
+            WebsockMessageTransport::with_max_message_size(server_conn, limits.max_message_size),
             &responder,
         )
         .expect("server channel");
+        assert!(client.max_plaintext_len() < limits.max_message_size);
+        assert_eq!(client.max_plaintext_len(), server.max_plaintext_len());
 
         // Client → server, one frame per WebSocket message.
         client

@@ -5,8 +5,9 @@ use chacha20poly1305::{
 use std::ops::Deref;
 use std::sync::Arc;
 
+use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::{TryRng, UnwrapErr};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -42,16 +43,34 @@ pub enum Direction {
 /// exactly one place and are zeroized when that place is dropped. Share keys
 /// through a [`KeyHandle`] (a reference-counted handle) instead of copying the
 /// secret bytes into multiple owners.
+///
+/// Raw traffic-key construction is intentionally unavailable:
+///
+/// ```compile_fail
+/// use foctet_core::TrafficKeys;
+///
+/// let keys = TrafficKeys {
+///     key_id: 1,
+///     c2s: [0u8; 32],
+///     s2c: [0u8; 32],
+/// };
+/// # let _ = keys;
+/// ```
 pub struct TrafficKeys {
     /// Active key identifier carried in frame headers.
     pub key_id: u8,
     /// Client-to-server key bytes.
-    pub c2s: [u8; 32],
+    c2s: [u8; 32],
     /// Server-to-client key bytes.
-    pub s2c: [u8; 32],
+    s2c: [u8; 32],
 }
 
 impl TrafficKeys {
+    /// Returns the public key-generation identifier carried in frame headers.
+    pub fn key_id(&self) -> u8 {
+        self.key_id
+    }
+
     /// Returns key bytes for the specified direction.
     pub fn key_for(&self, direction: Direction) -> [u8; 32] {
         match direction {
@@ -214,7 +233,9 @@ pub fn dh_ratchet_step(
 /// Generates a random session salt for key derivation.
 pub fn random_session_salt() -> [u8; 32] {
     let mut out = [0u8; 32];
-    OsRng.fill_bytes(&mut out);
+    SysRng
+        .try_fill_bytes(&mut out)
+        .expect("OS random number generator is unavailable");
     out
 }
 
@@ -239,7 +260,7 @@ impl core::fmt::Debug for EphemeralKeyPair {
 impl EphemeralKeyPair {
     /// Generates a fresh ephemeral X25519 key pair.
     pub fn generate() -> Self {
-        let private = StaticSecret::random_from_rng(OsRng);
+        let private = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&private);
         Self {
             private: Zeroizing::new(private.to_bytes()),
@@ -250,13 +271,28 @@ impl EphemeralKeyPair {
     /// Computes shared secret with peer ephemeral public key.
     pub fn shared_secret(&self, peer_public: [u8; 32]) -> Result<[u8; 32], CoreError> {
         let private = StaticSecret::from(*self.private);
-        let peer = PublicKey::from(peer_public);
-        let shared = private.diffie_hellman(&peer).to_bytes();
-        if shared.iter().all(|byte| *byte == 0) {
-            return Err(CoreError::InvalidSharedSecret);
-        }
-        Ok(shared)
+        let shared = x25519_shared_secret(&private, peer_public)?;
+        Ok(*shared)
     }
+}
+
+/// Computes an X25519 shared secret and rejects the forbidden all-zero result.
+///
+/// X25519 accepts every 32-byte input at the type level. Some low-order public
+/// inputs, however, produce an all-zero shared secret. Callers must use this
+/// helper instead of calling `StaticSecret::diffie_hellman` directly so those
+/// inputs cannot turn a public recipient key into a predictable wrapping key.
+/// The returned secret is zeroized when dropped.
+pub fn x25519_shared_secret(
+    private: &StaticSecret,
+    peer_public: [u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, CoreError> {
+    let peer = PublicKey::from(peer_public);
+    let shared = Zeroizing::new(private.diffie_hellman(&peer).to_bytes());
+    if shared.iter().all(|byte| *byte == 0) {
+        return Err(CoreError::InvalidSharedSecret);
+    }
+    Ok(shared)
 }
 
 /// XChaCha20-Poly1305 authentication tag length, in bytes.
@@ -301,7 +337,7 @@ pub fn encrypt_frame(
     );
 
     let nonce_raw = make_nonce(keys.key_id, stream_id, seq);
-    let nonce = XNonce::from_slice(&nonce_raw);
+    let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
 
     let mut aad_header = header.clone();
     aad_header.ct_len = expected_ct_len;
@@ -359,7 +395,7 @@ pub fn decrypt_frame_with_key(
         frame.header.stream_id,
         frame.header.seq,
     );
-    let nonce = XNonce::from_slice(&nonce_raw);
+    let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
     let aad = frame.header.encode();
     cipher
         .decrypt(
@@ -375,6 +411,31 @@ pub fn decrypt_frame_with_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x25519_dalek::StaticSecret;
+
+    #[test]
+    fn x25519_rejects_all_zero_and_low_order_public_inputs() {
+        let private = StaticSecret::from([0x42; 32]);
+        for public in [[0u8; 32], {
+            let mut low_order = [0u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert!(matches!(
+                x25519_shared_secret(&private, public),
+                Err(CoreError::InvalidSharedSecret)
+            ));
+        }
+    }
+
+    #[test]
+    fn ephemeral_key_pair_uses_shared_secret_helper() {
+        let pair = EphemeralKeyPair::generate();
+        assert!(matches!(
+            pair.shared_secret([0u8; 32]),
+            Err(CoreError::InvalidSharedSecret)
+        ));
+    }
 
     #[test]
     fn frame_roundtrip_encrypt_decrypt() {

@@ -45,9 +45,9 @@ npm ci
 npm test
 ```
 
-CI runs this on every push/PR (`interop-verify` job in
-`.github/workflows/rust.yml`), so the vectors and the Rust implementation
-cannot drift from the spec without an independent implementation noticing.
+The maintainer-dispatched release rehearsal runs this verification before a
+release. Run it locally when changing the vectors, wire format, or cryptographic
+behavior.
 
 ## `minimal_decoder.js` / `minimal_decoder.ts`
 

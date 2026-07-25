@@ -2,8 +2,9 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::OsRng;
+use rand_core::UnwrapErr;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
@@ -14,7 +15,7 @@ pub(crate) fn wrap_dek(
     dek: &[u8; 32],
     recipient_public: [u8; 32],
 ) -> Result<WrappedDek, ArchiveError> {
-    let eph_priv = StaticSecret::random_from_rng(OsRng);
+    let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
     wrap_dek_with_ephemeral_secret(dek, recipient_public, eph_priv.to_bytes())
 }
 
@@ -25,8 +26,8 @@ pub(crate) fn wrap_dek_with_ephemeral_secret(
 ) -> Result<WrappedDek, ArchiveError> {
     let eph_priv = StaticSecret::from(ephemeral_secret);
     let eph_pub = PublicKey::from(&eph_priv);
-    let recipient = PublicKey::from(recipient_public);
-    let shared = Zeroizing::new(eph_priv.diffie_hellman(&recipient).to_bytes());
+    let shared = foctet_core::x25519_shared_secret(&eph_priv, recipient_public)
+        .map_err(|_| ArchiveError::InvalidRecipientKey)?;
 
     let mut okm = Zeroizing::new([0u8; 56]);
     let hk = Hkdf::<Sha256>::new(None, &shared[..]);
@@ -64,8 +65,10 @@ pub(crate) fn unwrap_dek_from_recipients(
             continue;
         }
 
-        let eph_pub = PublicKey::from(item.ephemeral_public);
-        let shared = Zeroizing::new(priv_key.diffie_hellman(&eph_pub).to_bytes());
+        // Do not distinguish a malicious low-order ephemeral key from a
+        // failed wrapper authentication to callers opening attacker input.
+        let shared = foctet_core::x25519_shared_secret(&priv_key, item.ephemeral_public)
+            .map_err(|_| ArchiveError::Aead)?;
 
         let mut okm = Zeroizing::new([0u8; 56]);
         let hk = Hkdf::<Sha256>::new(None, &shared[..]);
@@ -116,7 +119,7 @@ pub(crate) fn aead_encrypt(
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| ArchiveError::Aead)?;
     cipher
         .encrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::try_from(&nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: plaintext,
                 aad,
@@ -134,7 +137,7 @@ pub(crate) fn aead_decrypt(
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| ArchiveError::Aead)?;
     cipher
         .decrypt(
-            XNonce::from_slice(nonce),
+            &XNonce::try_from(&nonce[..]).expect("fixed-size nonce"),
             Payload {
                 msg: ciphertext,
                 aad,

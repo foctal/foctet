@@ -107,7 +107,6 @@ async fn handle_foctet(
     let plaintext_response = http::Response::builder()
         .status(StatusCode::OK)
         .header("x-foctet-example", "axum")
-        .header("x-foctet-scope", "body-only")
         .body(transformed)
         .expect("build response");
 

@@ -22,6 +22,13 @@ cargo install cargo-fuzz --locked
 - `stream_body`: streaming-body header parser + incremental `StreamFrameDecoder`
 - `datagram_message`: datagram and message frame open paths (header + AEAD +
   replay handling)
+- `rekey_transaction`: prepare/cancel/commit, ambiguous delivery, duplicate
+  controls, and ratchet turn ordering
+- `http_context`: protected request context, bound-header, and AAD encoding
+- `workers_replay_adapter`: the hostile carrier-header boundary shared by the
+  Workers adapter (Durable Object storage remains covered by Wrangler E2E)
+- `archive_encoder`: deterministic single and split archive encoders across
+  chunk and part boundaries
 
 ## Seeds
 
@@ -37,7 +44,19 @@ cargo run -p foctet --example gen_fuzz_seeds
 Sealing uses random ephemerals, so regenerated seeds differ byte-for-byte;
 they only need to be valid, not reproducible.
 
-The working corpus (`corpus/`, git-ignored) grows locally
+The working corpus (`corpus/`, git-ignored) grows locally. CI uploads each
+corpus as a retained artifact and restores the latest cache on scheduled runs.
+`cargo fuzz` runs libFuzzer with AddressSanitizer on its supported native Linux
+runner; the daily ten-minute-per-target schedule and retained corpora provide
+continuous cumulative coverage comparable to a small dedicated fuzz service.
+
+## Triage and service level
+
+CI fuzz failures are security-sensitive. Preserve the crashing input as a
+private artifact, acknowledge it within 2 business days, determine severity
+within 7 days, and target a fix or advisory within 30 days (7 days for critical
+impact). Do not attach an unpatched crash input to a public issue. Add every
+fixed input to the permanent regression corpus before closing the finding.
 
 ## Run locally
 

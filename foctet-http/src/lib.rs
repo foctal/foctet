@@ -41,14 +41,17 @@ use http::{
     header::{self},
 };
 
-pub use config::{HttpConfig, HttpOpenOptions, HttpSealOptions};
+pub use config::{
+    HttpConfig, HttpOpenOptions, HttpOptionsError, HttpSealOptions, MAX_HTTP_RECIPIENT_KEYS,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use context::unix_now_secs;
 pub use context::{
     ContextBinding, ContextCarrier, ContextDirection, DEFAULT_CONTEXT_TTL_SECS,
-    DEFAULT_MAX_CLOCK_SKEW_SECS, MESSAGE_ID_LEN, ProtectedContext,
+    DEFAULT_MAX_CLOCK_SKEW_SECS, MAX_BOUND_HEADER_NAME_BYTES, MAX_BOUND_HEADER_VALUE_BYTES,
+    MAX_BOUND_HEADERS, MAX_PROTECTED_CONTEXT_BYTES, MESSAGE_ID_LEN, ProtectedContext,
 };
-pub use error::HttpError;
+pub use error::{HttpError, HttpErrorDisposition, HttpSecurityMetric};
 // Re-exported because it appears in public signatures (`HttpSealOptions`,
 // `open_request_stream`, `HttpStreamSealer::for_request`, …), so callers do not
 // need a direct `foctet-core` dependency to name it.
@@ -59,7 +62,9 @@ pub use replay_store::{
     AsyncReplayStore, DEFAULT_MAX_REPLAY_ENTRIES, InMemoryReplayStore, ReplayCheck, ReplayStore,
     ReplayStoreError,
 };
-pub use stream::{HttpRequestStreamReader, HttpStreamOpener, HttpStreamSealer};
+pub use stream::{
+    HttpRequestStreamReader, HttpResponseStreamReader, HttpStreamOpener, HttpStreamSealer,
+};
 
 /// Foctet HTTP media type.
 pub const CONTENT_TYPE: &str = "application/foctet";
@@ -157,7 +162,7 @@ impl HttpSealer {
         binding: ContextBinding,
     ) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
-        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding)?;
         let aad = context.to_aad_bytes();
         let sealed = self.seal_body_with_aad(&body, &aad)?;
         raw::set_foctet_content_type(&mut parts.headers);
@@ -176,7 +181,7 @@ impl HttpSealer {
         carrier: ContextCarrier,
     ) -> Result<Response<Vec<u8>>, HttpError> {
         let (mut parts, body) = response.into_parts();
-        let context = ProtectedContext::for_response(&parts, carrier.clone());
+        let context = ProtectedContext::for_response(&parts, carrier.clone())?;
         let aad = context.to_aad_bytes();
         let sealed = self.seal_body_with_aad(&body, &aad)?;
         raw::set_foctet_content_type(&mut parts.headers);
@@ -194,6 +199,7 @@ impl HttpSealer {
     /// for production. By default this also adds the advisory
     /// `x-foctet-scope: body-only` header so downstream consumers do not mistake
     /// body protection for full HTTP message protection.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -345,9 +351,10 @@ impl HttpOpener {
     /// Opens a context-bound request using a durable [`AsyncReplayStore`].
     ///
     /// Identical to [`HttpOpener::open_request_with_context`] but awaits the
-    /// store, so it works with networked/durable backends (Redis, Cloudflare KV,
-    /// a Durable Object, or a shared SQL table) needed once more than one
-    /// instance serves traffic. Authentication still happens before the store is
+    /// store, so it works with atomic networked/durable backends (Redis
+    /// `SET NX`, a Durable Object, or a transactional SQL table) needed once
+    /// more than one instance serves traffic. Cloudflare KV is not atomic enough
+    /// for this contract. Authentication still happens before the store is
     /// consulted.
     pub async fn open_request_with_async_store<S>(
         &self,
@@ -392,7 +399,7 @@ impl HttpOpener {
         let (parts, body) = request.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
-        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding);
+        let context = ProtectedContext::for_request(&parts, carrier.clone(), binding)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
         let aad = context.to_aad_bytes();
         let plain = self.open_body_with_aad(&body, &aad)?;
@@ -411,21 +418,25 @@ impl HttpOpener {
     }
 
     /// Opens a response sealed with [`HttpSealer::seal_response_with_context`],
-    /// validating the bound context and freshness.
+    /// validating the bound context, freshness, and initiating request ID.
     ///
-    /// A client typically expects a single response, so no replay store is
-    /// required here; callers may additionally check that the carrier's
-    /// `request_message_id` matches the request they sent.
+    /// `expected_request_message_id` MUST be the message ID from the request
+    /// that initiated this exchange. A missing or different response
+    /// `request_message_id` is rejected before returning plaintext.
     pub fn open_response_with_context(
         &self,
         response: Response<Vec<u8>>,
+        expected_request_message_id: [u8; MESSAGE_ID_LEN],
         now_secs: u64,
         max_skew_secs: u64,
     ) -> Result<Response<Vec<u8>>, HttpError> {
         let (mut parts, body) = response.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
-        let context = ProtectedContext::for_response(&parts, carrier);
+        if carrier.request_message_id != Some(expected_request_message_id) {
+            return Err(HttpError::ResponseRequestMismatch);
+        }
+        let context = ProtectedContext::for_response(&parts, carrier)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
 
         let aad = context.to_aad_bytes();
@@ -441,6 +452,7 @@ impl HttpOpener {
     ///
     /// This provides **no** replay protection or HTTP-context binding; prefer
     /// [`HttpOpener::open_request_with_context`] for production.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -475,16 +487,20 @@ impl HttpOpener {
 #[cfg(test)]
 mod tests {
     use foctet_core::BodyEnvelopeLimits;
-    use http::{Request, Response, StatusCode, Version, header};
-    use rand_core::OsRng;
+    use getrandom::SysRng;
+    #[cfg(feature = "dangerous-stateless-http")]
+    use http::Version;
+    use http::{Request, Response, StatusCode, header};
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::*;
 
     #[test]
+    #[cfg(feature = "dangerous-stateless-http")]
     #[allow(deprecated)] // exercises the deprecated stateless request path on purpose
     fn sealer_and_opener_roundtrip_request_and_response() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -531,7 +547,7 @@ mod tests {
 
     #[test]
     fn opener_respects_explicit_config() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -553,7 +569,7 @@ mod tests {
 
     #[test]
     fn scope_header_can_be_disabled() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::with_config(
@@ -572,7 +588,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_roundtrip_and_replay_rejected() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -608,7 +624,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_with_bound_header_rejects_header_tamper() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -651,7 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_bound_request_async_store_roundtrip_and_replay() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -686,7 +702,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_rejects_route_substitution() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -718,7 +734,7 @@ mod tests {
 
     #[test]
     fn context_bound_request_rejects_expired() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -744,7 +760,7 @@ mod tests {
 
     #[test]
     fn context_bound_response_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
@@ -761,10 +777,34 @@ mod tests {
             .expect("seal");
 
         let opened = opener
-            .open_response_with_context(sealed, now, 30)
+            .open_response_with_context(sealed, [3u8; 16], now, 30)
             .expect("open");
         assert_eq!(opened.status(), StatusCode::OK);
         assert_eq!(opened.body(), b"result");
+    }
+
+    #[test]
+    fn context_bound_response_rejects_wrong_or_missing_request_id() {
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
+        let sealer = HttpSealer::new(HttpSealOptions::new(recipient_pub, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(recipient_priv.to_bytes()));
+        let now = 2_000u64;
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(b"result".to_vec())
+            .expect("response");
+        let sealed = sealer
+            .seal_response_with_context(
+                response,
+                ContextCarrier::generate(now, DEFAULT_CONTEXT_TTL_SECS).answering([3u8; 16]),
+            )
+            .expect("seal");
+        let err = opener
+            .open_response_with_context(sealed, [4u8; 16], now, 30)
+            .expect_err("wrong request id");
+        assert!(matches!(err, HttpError::ResponseRequestMismatch));
     }
 
     fn clone_request(request: &Request<Vec<u8>>) -> Request<Vec<u8>> {
@@ -790,15 +830,17 @@ mod tests {
 
     #[test]
     fn key_rotation_overlap_accepts_current_and_previous_key() {
-        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let old_pub = PublicKey::from(&old_priv).to_bytes();
-        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let new_pub = PublicKey::from(&new_priv).to_bytes();
 
         // During the overlap window the recipient accepts both the current
         // (v2) key and the retiring (v1) key.
         let opener = HttpOpener::new(
-            HttpOpenOptions::new(new_priv.to_bytes()).with_recipient_key(old_priv.to_bytes()),
+            HttpOpenOptions::new(new_priv.to_bytes())
+                .with_recipient_key(old_priv.to_bytes())
+                .expect("two keys fit"),
         );
         assert_eq!(opener.options().recipient_key_count(), 2);
 
@@ -829,9 +871,9 @@ mod tests {
 
     #[test]
     fn key_rotation_rejects_key_after_it_is_retired() {
-        let old_priv = StaticSecret::random_from_rng(OsRng);
+        let old_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let old_pub = PublicKey::from(&old_priv).to_bytes();
-        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
 
         // Overlap window is over: the recipient holds only the current key.
         let opener = HttpOpener::new(HttpOpenOptions::new(new_priv.to_bytes()));
@@ -858,14 +900,16 @@ mod tests {
 
     #[tokio::test]
     async fn key_rotation_trial_decryption_does_not_consume_replay_slot() {
-        let old_priv = StaticSecret::random_from_rng(OsRng);
-        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let old_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let new_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let new_pub = PublicKey::from(&new_priv).to_bytes();
 
         // The non-matching old key is tried FIRST and fails authentication
         // before the matching new key succeeds.
         let opener = HttpOpener::new(
-            HttpOpenOptions::new(old_priv.to_bytes()).with_recipient_key(new_priv.to_bytes()),
+            HttpOpenOptions::new(old_priv.to_bytes())
+                .with_recipient_key(new_priv.to_bytes())
+                .expect("two keys fit"),
         );
         let sealer = HttpSealer::new(HttpSealOptions::new(new_pub, b"server-v2"));
         let store = InMemoryReplayStore::new();

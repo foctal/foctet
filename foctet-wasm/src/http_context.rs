@@ -393,12 +393,13 @@ impl WasmHttpRequestContext {
 impl WasmHttpRequestContext {
     fn protected_context(&self) -> Result<ProtectedContext, WasmHttpError> {
         let parts = request_parts(&self.method, &self.uri, &self.headers)?;
-        Ok(ProtectedContext::for_request_with_header_binding(
+        ProtectedContext::for_request_with_header_binding(
             &parts,
             self.carrier.inner.clone(),
             self.bind_authority,
             self.bound_header_names.iter(),
-        ))
+        )
+        .map_err(WasmHttpError::from)
     }
 
     fn aad_inner(&self) -> Result<Vec<u8>, WasmHttpError> {
@@ -471,10 +472,8 @@ impl WasmHttpResponseContext {
 impl WasmHttpResponseContext {
     fn protected_context(&self) -> Result<ProtectedContext, WasmHttpError> {
         let parts = response_parts(self.status)?;
-        Ok(ProtectedContext::for_response(
-            &parts,
-            self.carrier.inner.clone(),
-        ))
+        ProtectedContext::for_response(&parts, self.carrier.inner.clone())
+            .map_err(WasmHttpError::from)
     }
 
     fn aad_inner(&self) -> Result<Vec<u8>, WasmHttpError> {
@@ -598,6 +597,7 @@ mod tests {
             carrier.inner.clone(),
             ContextBinding::default().with_bound_headers(&["x-tenant-id"]),
         )
+        .expect("context within limits")
         .to_aad_bytes();
 
         assert_eq!(wasm_ctx.aad_inner().expect("wasm aad"), rust_aad);

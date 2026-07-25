@@ -15,12 +15,12 @@
 //!
 //! Datagram sessions still require a reliable channel for the handshake and
 //! rekey control messages. In-session rekey is available through `canRekey`,
-//! `forceRekey`, and `handleControlMessage`.
+//! `prepareRekey`, `commitRekey`, and `handleControlMessage`.
 
 use foctet_core::{
     ChannelBinding, ControlMessage, CoreError, DatagramConfig, DatagramEndpoint, DecodedDatagram,
-    DecodedMessage, IdentityKeyPair, MessageEndpoint, PeerIdentity, RekeyThresholds, Session,
-    SessionAuthConfig, SessionState,
+    DecodedMessage, IdentityKeyPair, MessageEndpoint, PeerIdentity, PreparedRekey, RekeyThresholds,
+    Session, SessionAuthConfig, SessionState,
 };
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
@@ -33,6 +33,11 @@ fn core_to_js(err: CoreError) -> JsError {
 
 fn to_key32_js(bytes: &[u8]) -> Result<[u8; KEY_LEN], JsError> {
     <[u8; KEY_LEN]>::try_from(bytes).map_err(|_| JsError::new("expected a 32-byte key"))
+}
+
+fn validated_channel_binding_bytes(bytes: &[u8]) -> Result<Vec<u8>, CoreError> {
+    ChannelBinding::new(bytes)?;
+    Ok(bytes.to_vec())
 }
 
 /// An Ed25519 long-term identity key pair used to authenticate a handshake.
@@ -125,11 +130,13 @@ impl WasmAuthConfig {
     /// different outer channel fails closed. This is the production-oriented
     /// alternative to [`WasmAuthConfig::unauthenticated_for_testing`].
     #[wasm_bindgen(js_name = boundToChannel)]
-    pub fn bound_to_channel(channel_binding: &[u8]) -> WasmAuthConfig {
-        WasmAuthConfig {
+    pub fn bound_to_channel(channel_binding: &[u8]) -> Result<WasmAuthConfig, JsError> {
+        let channel_binding =
+            validated_channel_binding_bytes(channel_binding).map_err(core_to_js)?;
+        Ok(WasmAuthConfig {
             mode: AuthMode::UnauthenticatedForTesting,
-            channel_binding: Some(channel_binding.to_vec()),
-        }
+            channel_binding: Some(channel_binding),
+        })
     }
 
     /// Builds an unauthenticated config. Use only for tests or inside an
@@ -145,13 +152,15 @@ impl WasmAuthConfig {
     /// Returns a copy of this config additionally bound to `channel_binding`.
     ///
     /// Additive to any mode: both peers must supply the same binding or the
-    /// handshake fails. An empty binding leaves the transcript unchanged.
+    /// handshake fails.
     #[wasm_bindgen(js_name = withChannelBinding)]
-    pub fn with_channel_binding(&self, channel_binding: &[u8]) -> WasmAuthConfig {
-        WasmAuthConfig {
+    pub fn with_channel_binding(&self, channel_binding: &[u8]) -> Result<WasmAuthConfig, JsError> {
+        let channel_binding =
+            validated_channel_binding_bytes(channel_binding).map_err(core_to_js)?;
+        Ok(WasmAuthConfig {
             mode: self.mode.clone(),
-            channel_binding: Some(channel_binding.to_vec()),
-        }
+            channel_binding: Some(channel_binding),
+        })
     }
 }
 
@@ -168,7 +177,8 @@ impl WasmAuthConfig {
                 .require_peer_authentication(true),
         };
         if let Some(binding) = &self.channel_binding {
-            config = config.with_channel_binding(ChannelBinding::new(binding.clone()));
+            let binding = ChannelBinding::new(binding).expect("WASM auth validates binding length");
+            config = config.with_channel_binding(binding);
         }
         config
     }
@@ -273,6 +283,7 @@ pub struct FoctetSession {
     kind: TransportKind,
     endpoint: Option<SessionEndpoint>,
     pending_handshake: Option<Vec<u8>>,
+    pending_rekey: Option<PreparedRekey>,
 }
 
 #[wasm_bindgen]
@@ -349,15 +360,37 @@ impl FoctetSession {
         self.session.can_rekey()
     }
 
-    /// Performs one DH-ratchet rekey step and returns the control message to
-    /// send to the peer **over the reliable channel**. This side's keys rotate
-    /// immediately; the peer rotates when it feeds the message to
-    /// [`Self::handle_control_message`].
+    /// Prepares one DH-ratchet rekey and returns the exact control message to
+    /// send over the reliable channel. This side remains on the old key until
+    /// [`Self::commit_rekey`] is called after the transport accepts those bytes.
+    #[wasm_bindgen(js_name = prepareRekey)]
+    pub fn prepare_rekey(&mut self) -> Result<Vec<u8>, JsError> {
+        self.prepare_rekey_inner().map_err(core_to_js)
+    }
+
+    /// Commits the rekey previously returned by [`Self::prepare_rekey`]. Call
+    /// this only after the exact bytes were accepted by the transport. If send
+    /// outcome is ambiguous, discard this session instead of committing or
+    /// retrying with different bytes.
+    #[wasm_bindgen(js_name = commitRekey)]
+    pub fn commit_rekey(&mut self) -> Result<(), JsError> {
+        self.commit_rekey_inner().map_err(core_to_js)
+    }
+
+    /// Cancels a prepared rekey after the caller proves that no control bytes
+    /// reached the transport. The active key remains unchanged.
+    #[wasm_bindgen(js_name = cancelPreparedRekey)]
+    pub fn cancel_prepared_rekey(&mut self) -> Result<(), JsError> {
+        self.cancel_prepared_rekey_inner().map_err(core_to_js)
+    }
+
+    /// Permanently closes this session after ambiguous control delivery.
     ///
-    /// Throws when it is the peer's turn to rekey (`canRekey() === false`).
-    #[wasm_bindgen(js_name = forceRekey)]
-    pub fn force_rekey(&mut self) -> Result<Vec<u8>, JsError> {
-        self.force_rekey_inner().map_err(core_to_js)
+    /// Call this instead of cancelling when any rekey bytes may have reached
+    /// the peer, including after a partial write or failed flush.
+    #[wasm_bindgen(js_name = terminate)]
+    pub fn terminate(&mut self) {
+        self.terminate_inner();
     }
 
     /// The identifier of the traffic key currently used for sealing, or
@@ -371,6 +404,20 @@ impl FoctetSession {
     #[wasm_bindgen(js_name = isEstablished)]
     pub fn is_established(&self) -> bool {
         self.session.state() == SessionState::Active
+    }
+
+    /// Whether the message/datagram endpoint is terminal after a protocol
+    /// failure. Establish a fresh session instead of reusing it.
+    #[wasm_bindgen(js_name = isTerminal)]
+    pub fn is_terminal(&self) -> bool {
+        if self.session.state() == SessionState::Closed {
+            return true;
+        }
+        match self.endpoint.as_ref() {
+            Some(SessionEndpoint::Message(endpoint)) => endpoint.is_terminal(),
+            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.is_terminal(),
+            None => false,
+        }
     }
 
     /// Whether the peer proved a pinned identity during the handshake.
@@ -445,6 +492,7 @@ impl FoctetSession {
             kind,
             endpoint: None,
             pending_handshake: Some(hello.encode()),
+            pending_rekey: None,
         }
     }
 
@@ -454,13 +502,21 @@ impl FoctetSession {
             kind,
             endpoint: None,
             pending_handshake: None,
+            pending_rekey: None,
         }
     }
 
     fn handle_handshake_inner(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, CoreError> {
         let control = ControlMessage::decode(message)?;
-        let reply = self.session.handle_control(&control)?;
-        self.ensure_endpoint();
+        let reply = match self.session.handle_control(&control) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.pending_rekey = None;
+                self.endpoint = None;
+                return Err(error);
+            }
+        };
+        self.ensure_endpoint()?;
         // A rekey control message rotates the session's active key; adopt it
         // on the framing endpoint so subsequent seals use the new key while
         // retained previous keys still open in-flight frames.
@@ -468,10 +524,39 @@ impl FoctetSession {
         Ok(reply.map(|msg| msg.encode()))
     }
 
-    fn force_rekey_inner(&mut self) -> Result<Vec<u8>, CoreError> {
-        let msg = self.session.force_rekey()?;
+    fn prepare_rekey_inner(&mut self) -> Result<Vec<u8>, CoreError> {
+        if self.pending_rekey.is_some() {
+            return Err(CoreError::InvalidSessionState);
+        }
+        let prepared = self.session.prepare_rekey()?;
+        let message = prepared.control_message().encode();
+        self.pending_rekey = Some(prepared);
+        Ok(message)
+    }
+
+    fn commit_rekey_inner(&mut self) -> Result<(), CoreError> {
+        let prepared = self
+            .pending_rekey
+            .take()
+            .ok_or(CoreError::InvalidSessionState)?;
+        self.session.commit_rekey(prepared)?;
         self.sync_endpoint_keys();
-        Ok(msg.encode())
+        Ok(())
+    }
+
+    fn cancel_prepared_rekey_inner(&mut self) -> Result<(), CoreError> {
+        let prepared = self
+            .pending_rekey
+            .take()
+            .ok_or(CoreError::InvalidSessionState)?;
+        self.session.cancel_prepared_rekey(prepared)
+    }
+
+    fn terminate_inner(&mut self) {
+        self.pending_handshake = None;
+        self.pending_rekey = None;
+        self.endpoint = None;
+        self.session.terminate();
     }
 
     /// Installs the session's current active key on the framing endpoint
@@ -496,28 +581,25 @@ impl FoctetSession {
 
     /// Builds the framing endpoint (matching the session's mode) once the
     /// handshake reaches `Active`.
-    fn ensure_endpoint(&mut self) {
-        if self.endpoint.is_none()
-            && self.session.state() == SessionState::Active
-            && let Some(keys) = self.session.active_keys()
-        {
-            let inbound = self.session.inbound_direction();
-            let outbound = self.session.outbound_direction();
+    fn ensure_endpoint(&mut self) -> Result<(), CoreError> {
+        if self.endpoint.is_none() && self.session.state() == SessionState::Active {
             self.endpoint = Some(match self.kind {
-                TransportKind::Message => {
-                    SessionEndpoint::Message(MessageEndpoint::new(keys, inbound, outbound))
-                }
+                TransportKind::Message => SessionEndpoint::Message(
+                    MessageEndpoint::from_session_lease(self.session.claim_message_endpoint()?),
+                ),
                 TransportKind::Datagram { max_datagram_size } => {
                     let mut config = DatagramConfig::default();
                     if max_datagram_size > 0 {
                         config.max_datagram_size = max_datagram_size;
                     }
-                    SessionEndpoint::Datagram(DatagramEndpoint::with_config(
-                        keys, inbound, outbound, config,
+                    SessionEndpoint::Datagram(DatagramEndpoint::from_session_lease_with_config(
+                        self.session.claim_datagram_endpoint()?,
+                        config,
                     ))
                 }
             });
         }
+        Ok(())
     }
 
     fn seal_message_inner(
@@ -526,7 +608,7 @@ impl FoctetSession {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Message(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
             _ => Err(CoreError::InvalidSessionState),
@@ -534,7 +616,7 @@ impl FoctetSession {
     }
 
     fn open_message_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Message(endpoint)) => endpoint.open(message),
             _ => Err(CoreError::InvalidSessionState),
@@ -547,7 +629,7 @@ impl FoctetSession {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Datagram(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
             _ => Err(CoreError::InvalidSessionState),
@@ -555,7 +637,7 @@ impl FoctetSession {
     }
 
     fn open_datagram_inner(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
-        self.ensure_endpoint();
+        self.ensure_endpoint()?;
         match self.endpoint.as_mut() {
             Some(SessionEndpoint::Datagram(endpoint)) => endpoint.open(datagram),
             _ => Err(CoreError::InvalidSessionState),
@@ -603,18 +685,8 @@ mod tests {
 
         // A duplicate frame must be rejected as a replay.
         assert!(responder.open_message_inner(&frame).is_err());
-
-        // Reverse direction works too.
-        let back = responder
-            .seal_message_inner(7, 0, b"reply")
-            .expect("seal back");
-        assert_eq!(
-            initiator
-                .open_message_inner(&back)
-                .expect("open back")
-                .plaintext,
-            b"reply"
-        );
+        assert!(responder.is_terminal());
+        assert!(responder.seal_message_inner(7, 0, b"reply").is_err());
     }
 
     #[test]
@@ -668,8 +740,10 @@ mod tests {
     fn channel_bound_auth_config_completes_handshake() {
         // No Foctet identity: MITM resistance comes from a shared channel binding.
         let binding = b"tls-exporter:wasm-channel".to_vec();
-        let initiator_auth = WasmAuthConfig::bound_to_channel(&binding);
-        let responder_auth = WasmAuthConfig::bound_to_channel(&binding);
+        let initiator_auth =
+            WasmAuthConfig::bound_to_channel(&binding).expect("valid channel binding");
+        let responder_auth =
+            WasmAuthConfig::bound_to_channel(&binding).expect("valid channel binding");
 
         let mut initiator = FoctetSession::initiator(initiator_auth.build());
         let mut responder = FoctetSession::responder(responder_auth.build());
@@ -689,13 +763,24 @@ mod tests {
 
     #[test]
     fn mismatched_channel_binding_fails_wasm_handshake() {
-        let initiator_auth = WasmAuthConfig::bound_to_channel(b"channel-A");
-        let responder_auth = WasmAuthConfig::bound_to_channel(b"channel-B");
+        let initiator_auth =
+            WasmAuthConfig::bound_to_channel(b"channel-A").expect("valid channel binding");
+        let responder_auth =
+            WasmAuthConfig::bound_to_channel(b"channel-B").expect("valid channel binding");
         let mut initiator = FoctetSession::initiator(initiator_auth.build());
         let mut responder = FoctetSession::responder(responder_auth.build());
 
         let client_hello = initiator.initial_handshake_message().expect("client hello");
         assert!(responder.handle_handshake_inner(&client_hello).is_err());
+    }
+
+    #[test]
+    fn wasm_channel_binding_rejects_empty_and_oversized_values() {
+        assert!(validated_channel_binding_bytes(&[]).is_err());
+        assert!(
+            validated_channel_binding_bytes(&vec![0u8; foctet_core::MAX_CHANNEL_BINDING_LEN + 1])
+                .is_err()
+        );
     }
 
     #[test]
@@ -712,7 +797,8 @@ mod tests {
             &server_id.public_key(),
         )
         .expect("client auth")
-        .with_channel_binding(&binding);
+        .with_channel_binding(&binding)
+        .expect("valid channel binding");
         let server_auth = WasmAuthConfig::authenticated(
             &WasmIdentityKeyPair {
                 inner: IdentityKeyPair::from_secret_key_bytes(*server_id.expose_secret_key_bytes()),
@@ -720,7 +806,8 @@ mod tests {
             &client_id.public_key(),
         )
         .expect("server auth")
-        .with_channel_binding(&binding);
+        .with_channel_binding(&binding)
+        .expect("valid channel binding");
 
         let mut initiator = FoctetSession::initiator(client_auth.build());
         let mut responder = FoctetSession::responder(server_auth.build());
@@ -773,6 +860,7 @@ mod tests {
             .expect("server hello");
         // The initiator must reject the responder whose identity it did not pin.
         assert!(initiator.handle_handshake_inner(&server_hello).is_err());
+        assert!(initiator.is_terminal());
     }
 
     #[test]
@@ -788,7 +876,7 @@ mod tests {
         // The initiator holds the first ratchet turn; the responder does not.
         assert!(initiator.session.can_rekey());
         assert!(!responder.session.can_rekey());
-        assert!(responder.force_rekey_inner().is_err());
+        assert!(responder.prepare_rekey_inner().is_err());
 
         // A frame sealed under the old key, delivered after the rekey below,
         // must still open (previous key generations are retained).
@@ -796,7 +884,13 @@ mod tests {
             .seal_message_inner(1, 0, b"sealed before rekey")
             .expect("seal under old key");
 
-        let rekey = initiator.force_rekey_inner().expect("initiator rekeys");
+        let rekey = initiator
+            .prepare_rekey_inner()
+            .expect("initiator prepares rekey");
+        assert!(initiator.session.can_rekey(), "prepare must not rotate yet");
+        initiator
+            .commit_rekey_inner()
+            .expect("initiator commits rekey");
         assert!(
             !initiator.session.can_rekey(),
             "after rekeying, the turn passes to the peer"
@@ -833,7 +927,12 @@ mod tests {
         );
 
         // And the responder can now take its turn.
-        let rekey_back = responder.force_rekey_inner().expect("responder rekeys");
+        let rekey_back = responder
+            .prepare_rekey_inner()
+            .expect("responder prepares rekey");
+        responder
+            .commit_rekey_inner()
+            .expect("responder commits rekey");
         initiator
             .handle_handshake_inner(&rekey_back)
             .expect("initiator applies the responder's rekey");
@@ -851,6 +950,53 @@ mod tests {
                 .plaintext,
             b"third key"
         );
+    }
+
+    #[test]
+    fn prepared_rekey_can_be_cancelled_only_before_delivery() {
+        let mut initiator =
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+        let mut responder =
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+        drive_handshake(&mut initiator, &mut responder);
+        let old_key_id = initiator.active_key_id().expect("active key");
+
+        initiator
+            .prepare_rekey_inner()
+            .expect("prepare first rekey");
+        initiator
+            .cancel_prepared_rekey_inner()
+            .expect("cancel rejected delivery");
+        assert_eq!(initiator.active_key_id(), Some(old_key_id));
+        assert!(initiator.session.can_rekey());
+        assert!(initiator.commit_rekey_inner().is_err());
+
+        initiator
+            .prepare_rekey_inner()
+            .expect("prepare replacement rekey");
+        initiator
+            .commit_rekey_inner()
+            .expect("commit replacement rekey");
+        assert_eq!(initiator.active_key_id(), Some(old_key_id + 1));
+    }
+
+    #[test]
+    fn ambiguous_rekey_delivery_can_terminate_the_wasm_session() {
+        let mut initiator =
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+        let mut responder =
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+        drive_handshake(&mut initiator, &mut responder);
+
+        initiator
+            .prepare_rekey_inner()
+            .expect("prepare ambiguous rekey");
+        initiator.terminate_inner();
+
+        assert!(initiator.is_terminal());
+        assert!(initiator.session.active_keys().is_none());
+        assert!(initiator.commit_rekey_inner().is_err());
+        assert!(initiator.prepare_rekey_inner().is_err());
     }
 
     #[test]
@@ -876,7 +1022,12 @@ mod tests {
             .expect("seal under old key");
 
         // The rekey control message itself travels over the reliable channel.
-        let rekey = initiator.force_rekey_inner().expect("initiator rekeys");
+        let rekey = initiator
+            .prepare_rekey_inner()
+            .expect("initiator prepares rekey");
+        initiator
+            .commit_rekey_inner()
+            .expect("initiator commits rekey");
         responder
             .handle_handshake_inner(&rekey)
             .expect("responder applies rekey");

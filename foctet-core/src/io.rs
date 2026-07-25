@@ -365,6 +365,7 @@ pub struct SyncIo<T> {
     default_flags: u8,
     next_seq: OutboundSequence,
     replay: ReplayProtector,
+    terminal: bool,
 }
 
 impl<T> SyncIo<T> {
@@ -386,6 +387,7 @@ impl<T> SyncIo<T> {
             default_flags: 0,
             next_seq: OutboundSequence::default(),
             replay: limits.replay_protector(),
+            terminal: false,
             limits,
         }
     }
@@ -440,6 +442,17 @@ impl<T> SyncIo<T> {
     /// an observability counter that carries no key material.
     pub fn replay_rejections(&self) -> u64 {
         self.replay.rejections()
+    }
+
+    /// Returns whether an ambiguous outbound I/O failure permanently closed
+    /// this wrapper. A closed wrapper must be discarded along with its session;
+    /// it cannot safely retry or emit another encrypted frame.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub(crate) fn terminate(&mut self) {
+        self.terminal = true;
     }
 
     /// Returns known key IDs, active first.
@@ -498,6 +511,9 @@ impl<T: Read + Write> SyncIo<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
         if plaintext.len() > self.limits.max_plaintext_len {
             return Err(CoreError::FrameTooLarge);
         }
@@ -509,14 +525,25 @@ impl<T: Read + Write> SyncIo<T> {
             self.next_seq.current(),
             plaintext,
         )?;
-        // Fail closed on sequence exhaustion: never wrap the counter, otherwise
-        // the `(key_id, stream_id, seq)` nonce would repeat under the same key.
-        // This mirrors the async `FoctetFramed` path exactly so the two
-        // implementations cannot diverge in their exhaustion policy.
+        // Reserve before the first byte reaches the transport. `write_all` may
+        // fail after emitting a prefix (or all bytes), and `flush` may fail
+        // after peer delivery. Consuming the sequence first prevents a retry
+        // from ever encrypting different plaintext under the same nonce.
         let next_seq = self.next_seq.prepared_next()?;
-        self.io.write_all(&frame.to_bytes())?;
-        self.io.flush()?;
         self.next_seq.commit(next_seq);
+
+        // Keep the exact serialized frame alive for the complete write. There
+        // is intentionally no resume API: any write/flush error has ambiguous
+        // delivery semantics, so the only safe default is terminal closure.
+        let serialized = frame.to_bytes();
+        if let Err(error) = self.io.write_all(&serialized) {
+            self.terminal = true;
+            return Err(CoreError::Io(error));
+        }
+        if let Err(error) = self.io.flush() {
+            self.terminal = true;
+            return Err(CoreError::Io(error));
+        }
         Ok(())
     }
 
@@ -549,6 +576,17 @@ impl<T: Read + Write> SyncIo<T> {
 
     /// Receives and decrypts one frame payload.
     pub fn recv(&mut self) -> Result<Vec<u8>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.recv_inner();
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn recv_inner(&mut self) -> Result<Vec<u8>, CoreError> {
         let mut header_buf = [0u8; FRAME_HEADER_LEN];
         self.io.read_exact(&mut header_buf)?;
         let header = FrameHeader::decode(&header_buf)?;
@@ -632,18 +670,46 @@ impl<T: Read + Write> SyncIo<T> {
     ) -> Result<(), CoreError> {
         self.set_key_ring_from_session(session)?;
         let app_tlv = Tlv::application_data(plaintext)?;
-        self.send_tlvs_with(flags, stream_id, &[app_tlv])?;
+        if let Err(error) = self.send_tlvs_with(flags, stream_id, &[app_tlv]) {
+            if self.terminal {
+                session.terminate();
+            }
+            return Err(error);
+        }
 
-        if let Some(ctrl) = session.on_outbound_payload(plaintext.len())? {
-            let rekey_old = match &ctrl {
-                ControlMessage::Rekey { old_key_id, .. } => Some(*old_key_id),
-                _ => None,
-            };
-            if let Some(old_key_id) = rekey_old {
-                self.send_control_with_key_id(0, old_key_id, &ctrl)?;
-                self.set_key_ring_from_session(session)?;
-            } else {
-                self.send_control(0, &ctrl)?;
+        let prepared = match session.on_outbound_payload(plaintext.len()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // The application frame may already be delivered. A failure to
+                // account for its required session transition leaves delivery
+                // and ratchet state ambiguous, so fail closed as a pair.
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+        };
+
+        if let Some(prepared) = prepared {
+            if let Err(error) =
+                self.send_control_with_key_id(0, prepared.old_key_id(), prepared.control_message())
+            {
+                // The application frame was already emitted and the rekey
+                // control may have been partially emitted. Do not permit the
+                // caller to transplant the unchanged session to another I/O
+                // object after this ambiguous delivery failure.
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+            if let Err(error) = session.commit_rekey(prepared) {
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
+            }
+            if let Err(error) = self.set_key_ring_from_session(session) {
+                self.terminal = true;
+                session.terminate();
+                return Err(error);
             }
         }
         Ok(())
@@ -651,6 +717,20 @@ impl<T: Read + Write> SyncIo<T> {
 
     /// Receives next frame and applies session-aware control handling.
     pub fn recv_application_with_session(
+        &mut self,
+        session: &mut Session,
+    ) -> Result<Option<Vec<u8>>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.recv_application_with_session_inner(session);
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn recv_application_with_session_inner(
         &mut self,
         session: &mut Session,
     ) -> Result<Option<Vec<u8>>, CoreError> {
@@ -705,20 +785,57 @@ impl From<CoreError> for std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::io::{Read, Write};
+    use std::{
+        collections::VecDeque,
+        io::{Read, Write},
+        time::Duration,
+    };
 
     use super::SyncIo;
-    use crate::CoreError;
     use crate::crypto::{
         Direction, EphemeralKeyPair, KeyHandle, derive_traffic_keys, encrypt_frame,
         random_session_salt,
     };
+    use crate::{CoreError, RekeyThresholds, Session, SessionAuthConfig, SessionState};
 
     #[derive(Default)]
     struct MockIo {
         inbound: VecDeque<u8>,
         outbound: Vec<u8>,
+    }
+
+    struct FailingWriteIo {
+        outbound: Vec<u8>,
+        fail_after: usize,
+        fail_on_flush: Option<usize>,
+        flushes: usize,
+    }
+
+    impl Read for FailingWriteIo {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for FailingWriteIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let remaining = self.fail_after.saturating_sub(self.outbound.len());
+            if remaining == 0 {
+                return Err(std::io::Error::other("injected write failure"));
+            }
+            let written = remaining.min(buf.len());
+            self.outbound.extend_from_slice(&buf[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_on_flush == Some(self.flushes) {
+                Err(std::io::Error::other("injected flush failure"))
+            } else {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
     }
 
     impl Read for MockIo {
@@ -753,6 +870,31 @@ mod tests {
         KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"))
     }
 
+    fn active_initiator(max_frames: u64) -> Session {
+        let thresholds = RekeyThresholds {
+            max_frames,
+            max_bytes: 1 << 30,
+            max_age: Duration::from_secs(3600),
+            max_previous_keys: 2,
+        };
+        let (mut initiator, hello) = Session::new_initiator_with_auth(
+            thresholds.clone(),
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let mut responder = Session::new_responder_with_auth(
+            thresholds,
+            SessionAuthConfig::unauthenticated_for_testing(),
+        );
+        let reply = responder
+            .handle_control(&hello)
+            .expect("responder accepts hello")
+            .expect("responder reply");
+        initiator
+            .handle_control(&reply)
+            .expect("initiator accepts reply");
+        initiator
+    }
+
     #[test]
     fn sync_send_fails_closed_on_sequence_exhaustion() {
         let keys = test_keys();
@@ -780,7 +922,128 @@ mod tests {
     }
 
     #[test]
-    fn sync_replay_state_committed_only_after_auth() {
+    fn partial_write_failure_consumes_sequence_and_is_terminal() {
+        let keys = test_keys();
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: 7,
+            fail_on_flush: None,
+            flushes: 0,
+        };
+        let mut io = SyncIo::new(transport, keys, Direction::S2C, Direction::C2S);
+
+        assert!(matches!(io.send(b"first"), Err(CoreError::Io(_))));
+        assert!(io.is_terminal());
+        assert_eq!(
+            io.next_seq.current(),
+            1,
+            "reserved sequence is never reused"
+        );
+        let emitted = io.io.outbound.clone();
+
+        assert!(matches!(
+            io.send(b"different retry"),
+            Err(CoreError::TransportTerminal)
+        ));
+        assert_eq!(io.io.outbound, emitted, "terminal retry emits no bytes");
+    }
+
+    #[test]
+    fn flush_failure_after_complete_frame_is_terminal() {
+        let keys = test_keys();
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: usize::MAX,
+            fail_on_flush: Some(0),
+            flushes: 0,
+        };
+        let mut io = SyncIo::new(transport, keys, Direction::S2C, Direction::C2S);
+
+        assert!(matches!(
+            io.send(b"complete but ambiguous"),
+            Err(CoreError::Io(_))
+        ));
+        assert!(io.is_terminal());
+        assert_eq!(io.next_seq.current(), 1);
+        let emitted = io.io.outbound.clone();
+
+        assert!(matches!(
+            io.send(b"retry"),
+            Err(CoreError::TransportTerminal)
+        ));
+        assert_eq!(io.io.outbound, emitted);
+    }
+
+    #[test]
+    fn failed_rekey_control_closes_the_session_with_sync_io() {
+        let mut session = active_initiator(1);
+        let keys = session.active_keys().expect("active keys");
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: usize::MAX,
+            // The application frame flushes successfully. The following
+            // old-key rekey control flush fails after it may be delivered.
+            fail_on_flush: Some(1),
+            flushes: 0,
+        };
+        let mut io = SyncIo::new(
+            transport,
+            keys,
+            session.inbound_direction(),
+            session.outbound_direction(),
+        );
+
+        assert!(matches!(
+            io.send_data_with_session(&mut session, 0, 0, b"trigger rekey"),
+            Err(CoreError::Io(_))
+        ));
+        assert!(io.is_terminal());
+        assert_eq!(session.state(), SessionState::Closed);
+        assert!(
+            session.active_keys().is_none(),
+            "a session from an ambiguous rekey write cannot be reused"
+        );
+    }
+
+    #[test]
+    fn partial_rekey_control_write_closes_the_session_with_sync_io() {
+        let mut session = active_initiator(1);
+        let keys = session.active_keys().expect("active keys");
+        let app_payload =
+            crate::payload::encode_tlvs(&[
+                crate::Tlv::application_data(b"trigger rekey").expect("application TLV")
+            ])
+            .expect("application payload");
+        let app_frame_len =
+            encrypt_frame(&keys, session.outbound_direction(), 0, 0, 0, &app_payload)
+                .expect("application frame")
+                .to_bytes()
+                .len();
+        let transport = FailingWriteIo {
+            outbound: Vec::new(),
+            fail_after: app_frame_len + 7,
+            fail_on_flush: None,
+            flushes: 0,
+        };
+        let mut io = SyncIo::new(
+            transport,
+            keys,
+            session.inbound_direction(),
+            session.outbound_direction(),
+        );
+
+        assert!(matches!(
+            io.send_data_with_session(&mut session, 0, 0, b"trigger rekey"),
+            Err(CoreError::Io(_))
+        ));
+        assert_eq!(io.io.outbound.len(), app_frame_len + 7);
+        assert!(io.is_terminal());
+        assert_eq!(session.state(), SessionState::Closed);
+        assert!(session.active_keys().is_none());
+    }
+
+    #[test]
+    fn authentication_failure_makes_sync_io_terminal() {
         let keys = test_keys();
 
         // Receiver treats inbound traffic as the C2S direction, so the peer
@@ -803,14 +1066,9 @@ mod tests {
             .recv()
             .expect_err("forged frame must fail authentication");
         assert!(matches!(err, CoreError::Aead));
+        assert!(io.is_terminal());
 
-        // Because replay state is only committed after authentication, the
-        // forged seq=1_000_000 must NOT have advanced the window. The genuine
-        // seq=0 frame is therefore still accepted.
-        let plaintext = io
-            .recv()
-            .expect("legitimate low-sequence frame after forgery");
-        assert_eq!(plaintext, b"hello");
+        assert!(matches!(io.recv(), Err(CoreError::TransportTerminal)));
     }
 
     #[test]

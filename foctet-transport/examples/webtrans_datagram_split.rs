@@ -22,16 +22,21 @@ use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ::webtrans::quinn::SessionError;
 use ::webtrans::{ClientBuilder, ServerBuilder, Session as WebtransSession, tls};
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
+use foctet_core::{
+    ControlMessage, IdentityKeyPair, MAX_CONTROL_MESSAGE_LEN, PeerIdentity, RekeyThresholds,
+    Session, SessionAuthConfig,
+};
 use foctet_transport::adapter::SplitIo;
 use foctet_transport::{DatagramTransport, SecureDatagramChannel, TokioTransportBuilder};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 // Demo identities shared with the browser page (see examples/browser). The
@@ -73,6 +78,12 @@ struct Args {
     /// Client/loopback: number of datagrams to send. Default `4`.
     #[arg(long, default_value_t = 4)]
     datagrams: usize,
+    /// Test hook: drop the first outbound application datagram.
+    #[arg(long, default_value_t = false)]
+    drop_first_reply: bool,
+    /// Test hook: emit outbound application datagrams in reversed pairs.
+    #[arg(long, default_value_t = false)]
+    reorder_reply_pairs: bool,
 }
 
 fn client_auth() -> SessionAuthConfig {
@@ -118,12 +129,34 @@ fn resolve_cert_pair(
 /// each datagram here carries exactly one Foctet frame.
 struct WebtransDatagramTransport {
     session: Arc<WebtransSession>,
+    drop_next: AtomicBool,
+    reorder_pairs: bool,
+    pending_reply: Mutex<Option<Vec<u8>>>,
 }
 
 impl DatagramTransport for WebtransDatagramTransport {
     type Error = SessionError;
 
     async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
+        if self.drop_next.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        if self.reorder_pairs {
+            let pending = {
+                let mut pending = self.pending_reply.lock().expect("reply buffer lock");
+                match pending.take() {
+                    Some(first) => Some(first),
+                    None => {
+                        *pending = Some(datagram);
+                        return Ok(());
+                    }
+                }
+            };
+            self.session.send_datagram(Bytes::from(datagram))?;
+            self.session
+                .send_datagram(Bytes::from(pending.expect("present")))?;
+            return Ok(());
+        }
         self.session.send_datagram(Bytes::from(datagram))
     }
 
@@ -138,40 +171,104 @@ impl DatagramTransport for WebtransDatagramTransport {
 }
 
 /// Server side: authenticate over one bidi stream, then echo sealed datagrams.
-async fn serve(session: WebtransSession) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn serve(
+    session: WebtransSession,
+    drop_first_reply: bool,
+    reorder_reply_pairs: bool,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     // Handshake over a reliable bidi stream (byte-framed Foctet handshake).
-    let (send, recv) = session.accept_bi().await?;
-    let channel = TokioTransportBuilder::new()
-        .establish_responder_with_auth(
-            SplitIo::from_split(recv, send),
-            RekeyThresholds::default(),
-            server_auth(),
-        )
-        .await?;
+    let (mut send, mut recv) = session.accept_bi().await?;
+    let mut protocol = Session::new_responder_with_auth(RekeyThresholds::default(), server_auth());
+    let hello = read_control(&mut recv).await?;
+    let reply = protocol
+        .handle_control(&hello)?
+        .ok_or("responder did not produce ServerHello")?;
+    write_control(&mut send, &reply).await?;
     assert!(
-        channel.session().peer_authenticated(),
+        protocol.peer_authenticated(),
         "peer failed identity authentication"
     );
     println!("handshake complete; peer authenticated");
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        loop {
+            match read_control(&mut recv).await {
+                Ok(control) => {
+                    if control_tx.send(control).await.is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("control stream ended: {error}");
+                    break;
+                }
+            }
+        }
+    });
 
     let session = Arc::new(session);
     let transport = WebtransDatagramTransport {
         session: session.clone(),
+        drop_next: AtomicBool::new(drop_first_reply),
+        reorder_pairs: reorder_reply_pairs,
+        pending_reply: Mutex::new(None),
     };
-    let mut datagram = SecureDatagramChannel::from_active_session(transport, channel.session())?;
+    let mut datagram = SecureDatagramChannel::from_active_session(transport, &protocol)?;
     loop {
-        let incoming = match datagram.recv_datagram().await {
-            Ok(message) => message,
-            // A normal peer close ends the read loop.
-            Err(_) => break,
-        };
-        let reply = format!(
-            "webtrans datagram echo: {}",
-            String::from_utf8_lossy(&incoming.plaintext)
-        );
-        datagram.send_datagram(0, 0, reply.as_bytes()).await?;
-        println!("echoed {} byte(s)", incoming.plaintext.len());
+        tokio::select! {
+            incoming = datagram.recv_datagram() => {
+                let incoming = match incoming {
+                    Ok(message) => message,
+                    Err(_) => break,
+                };
+                let reply = format!(
+                    "webtrans datagram echo: {}",
+                    String::from_utf8_lossy(&incoming.plaintext)
+                );
+                datagram.send_datagram(0, 0, reply.as_bytes()).await?;
+                println!("echoed {} byte(s)", incoming.plaintext.len());
+            }
+            control = control_rx.recv() => {
+                let control = match control {
+                    Some(control) => control,
+                    None => break,
+                };
+                protocol.handle_control(&control)?;
+                datagram.rekey_from_session(&protocol)?;
+                // Test-harness acknowledgement: this is outer transport
+                // coordination, not a Foctet control message. It proves the
+                // receiver adopted the key before the browser commits and
+                // sends new-key datagrams on a separately ordered channel.
+                send.write_u16(1).await?;
+                send.write_all(&[0xac]).await?;
+                send.flush().await?;
+                println!("applied interleaved rekey control");
+            }
+        }
     }
+    Ok(())
+}
+
+async fn read_control(
+    recv: &mut webtrans::RecvStream,
+) -> Result<ControlMessage, Box<dyn Error + Send + Sync>> {
+    let len = recv.read_u16().await? as usize;
+    if len == 0 || len > MAX_CONTROL_MESSAGE_LEN {
+        return Err("invalid control length".into());
+    }
+    let mut encoded = vec![0u8; len];
+    recv.read_exact(&mut encoded).await?;
+    Ok(ControlMessage::decode(&encoded)?)
+}
+
+async fn write_control(
+    send: &mut webtrans::SendStream,
+    control: &ControlMessage,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let encoded = control.encode();
+    send.write_u16(encoded.len() as u16).await?;
+    send.write_all(&encoded).await?;
+    send.flush().await?;
     Ok(())
 }
 
@@ -199,6 +296,9 @@ async fn run_client(
     let session = Arc::new(session);
     let transport = WebtransDatagramTransport {
         session: session.clone(),
+        drop_next: AtomicBool::new(false),
+        reorder_pairs: false,
+        pending_reply: Mutex::new(None),
     };
     let mut datagram = SecureDatagramChannel::from_active_session(transport, channel.session())?;
     for idx in 0..datagrams {
@@ -234,7 +334,11 @@ async fn run_server_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>
     println!("demo keys are hardcoded for local examples only. do not use in production.");
     loop {
         let request = match server.accept().await {
-            Some(request) => request,
+            Some(Ok(request)) => request,
+            Some(Err(err)) => {
+                eprintln!("request setup failed: {err}");
+                continue;
+            }
             None => break,
         };
         let session = match request.ok().await {
@@ -245,10 +349,14 @@ async fn run_server_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>
             }
         };
         println!("accepted a WebTransport session");
-        match serve(session).await {
-            Ok(()) => println!("session finished"),
-            Err(err) => eprintln!("error serving session: {err}"),
-        }
+        let drop_first_reply = args.drop_first_reply;
+        let reorder_reply_pairs = args.reorder_reply_pairs;
+        tokio::spawn(async move {
+            match serve(session, drop_first_reply, reorder_reply_pairs).await {
+                Ok(()) => println!("session finished"),
+                Err(err) => eprintln!("error serving session: {err}"),
+            }
+        });
     }
     Ok(())
 }
@@ -262,9 +370,9 @@ async fn run_loopback(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_addr(addr)
         .with_certificate(cert_chain.clone(), key)?;
     let server_side = async move {
-        let request = server.accept().await.ok_or("server closed")?;
+        let request = server.accept().await.ok_or("server closed")??;
         let session = request.ok().await?;
-        serve(session).await
+        serve(session, false, false).await
     };
     let client_side = async move {
         let session = connect_client(addr, cert_chain).await?;

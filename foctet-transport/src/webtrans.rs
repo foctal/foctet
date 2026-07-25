@@ -1,13 +1,39 @@
 //! High-level Foctet integration helpers for `webtrans`.
 
-use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
+use bytes::Bytes;
+#[cfg(feature = "dangerous-unauthenticated")]
+use foctet_core::Session;
+use foctet_core::{RekeyThresholds, SessionAuthConfig};
 
 use crate::{
     TokioTransportBuilder, TokioTransportChannel, TransportChannelError, TransportConfig,
     adapter::SplitIo,
 };
 
+/// Datagram-transport view of a native [`webtrans::Session`], usable with
+/// [`crate::SecureDatagramChannel`].
+///
+/// WebTransport adds and removes its session identifier internally, so each
+/// datagram exposed here contains exactly one Foctet frame.
+impl crate::DatagramTransport for webtrans::Session {
+    type Error = webtrans::quinn::SessionError;
+
+    async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
+        webtrans::Session::send_datagram(self, Bytes::from(datagram))
+    }
+
+    async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
+        let bytes = webtrans::Session::read_datagram(self).await?;
+        Ok(bytes.to_vec())
+    }
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        Some(webtrans::Session::max_datagram_size(self))
+    }
+}
+
 /// Opens a bidirectional WebTransport stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel(
     session_handle: &webtrans::Session,
     session: Session,
@@ -19,6 +45,7 @@ pub async fn open_secure_channel(
 }
 
 /// Opens a bidirectional WebTransport stream and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with(
     session_handle: &webtrans::Session,
     session: Session,
@@ -38,6 +65,7 @@ pub async fn open_secure_channel_with(
 }
 
 /// Opens a bidirectional WebTransport stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake(
     session_handle: &webtrans::Session,
     thresholds: RekeyThresholds,
@@ -55,6 +83,7 @@ pub async fn open_secure_channel_with_handshake(
 }
 
 /// Opens a bidirectional WebTransport stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn open_secure_channel_with_handshake_and_config(
     session_handle: &webtrans::Session,
     thresholds: RekeyThresholds,
@@ -94,6 +123,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
 }
 
 /// Accepts a bidirectional WebTransport stream and wraps it as a Foctet secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel(
     session_handle: &webtrans::Session,
     session: Session,
@@ -105,6 +135,7 @@ pub async fn accept_secure_channel(
 }
 
 /// Accepts a bidirectional WebTransport stream and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with(
     session_handle: &webtrans::Session,
     session: Session,
@@ -124,6 +155,7 @@ pub async fn accept_secure_channel_with(
 }
 
 /// Accepts a bidirectional WebTransport stream, runs the native Foctet handshake, and wraps it as a secure channel.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake(
     session_handle: &webtrans::Session,
     thresholds: RekeyThresholds,
@@ -141,6 +173,7 @@ pub async fn accept_secure_channel_with_handshake(
 }
 
 /// Accepts a bidirectional WebTransport stream, runs the native Foctet handshake, and applies a custom transport config.
+#[cfg(feature = "dangerous-unauthenticated")]
 pub async fn accept_secure_channel_with_handshake_and_config(
     session_handle: &webtrans::Session,
     thresholds: RekeyThresholds,

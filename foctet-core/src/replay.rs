@@ -10,6 +10,12 @@ pub const DEFAULT_REPLAY_WINDOW: u64 = 4096;
 /// peer-driven memory growth in the replay map.
 pub const DEFAULT_MAX_REPLAY_WINDOWS: usize = 1024;
 
+/// Hard upper bound on one replay window, in sequence slots.
+pub const MAX_REPLAY_WINDOW: u64 = 65_536;
+
+/// Hard upper bound on distinct replay windows tracked by one endpoint.
+pub const MAX_REPLAY_WINDOWS: usize = 4096;
+
 /// Sliding replay window for sequence-number validation.
 #[derive(Clone, Debug)]
 pub struct ReplayWindow {
@@ -21,6 +27,7 @@ pub struct ReplayWindow {
 impl ReplayWindow {
     /// Creates a replay window with the specified size.
     pub fn new(window_size: u64) -> Self {
+        let window_size = window_size.clamp(1, MAX_REPLAY_WINDOW);
         let words = window_size.div_ceil(64) as usize;
         Self {
             window_size,
@@ -133,7 +140,7 @@ impl ReplayProtector {
     /// Overrides the maximum number of distinct `(key_id, stream_id)` windows
     /// tracked simultaneously. A value of `0` is treated as `1`.
     pub fn with_max_windows(mut self, max_windows: usize) -> Self {
-        self.max_windows = max_windows.max(1);
+        self.max_windows = max_windows.clamp(1, MAX_REPLAY_WINDOWS);
         self
     }
 
@@ -282,6 +289,16 @@ mod tests {
             .check_and_record(0, 0, 2)
             .expect("existing window still accepts new sequences");
         assert_eq!(protector.tracked_windows(), 2);
+    }
+
+    #[test]
+    fn replay_allocations_are_clamped_before_capacity_calculation() {
+        let window = ReplayWindow::new(u64::MAX);
+        assert_eq!(window.window_size, MAX_REPLAY_WINDOW);
+        assert_eq!(window.bits.len(), MAX_REPLAY_WINDOW.div_ceil(64) as usize);
+
+        let protector = ReplayProtector::new(64).with_max_windows(usize::MAX);
+        assert_eq!(protector.max_windows, MAX_REPLAY_WINDOWS);
     }
 
     #[test]

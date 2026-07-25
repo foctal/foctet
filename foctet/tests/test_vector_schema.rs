@@ -109,3 +109,29 @@ fn rekey_vector_schema_is_valid() {
         "new_key_id must be an integer"
     );
 }
+
+#[test]
+fn negative_vector_schema_is_valid() {
+    let v = load_json("negative-v0.json");
+    let mutations = v["mutations"].as_array().expect("mutations array");
+    let literals = v["literals"].as_array().expect("literals array");
+    assert!(!mutations.is_empty());
+    assert!(!literals.is_empty());
+    for mutation in mutations {
+        assert!(mutation["id"].as_str().is_some());
+        assert!(mutation["fixture"].as_str().is_some());
+        assert!(mutation["field"].as_str().is_some());
+        assert!(mutation["xor"].as_u64().is_some());
+        assert!(mutation["expected"].as_str().is_some());
+        assert!(
+            mutation["offset"].as_u64().is_some() || mutation["offset_from_end"].as_u64().is_some()
+        );
+    }
+    for literal in literals {
+        assert!(literal["id"].as_str().is_some());
+        assert_hex_field(literal, "hex");
+        assert!(literal["expected"].as_str().is_some());
+    }
+    assert_eq!(v["boundaries"]["maximum_key_id"].as_u64(), Some(255));
+    assert_eq!(v["boundaries"]["replay_window"].as_u64(), Some(4096));
+}

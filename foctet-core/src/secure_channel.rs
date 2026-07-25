@@ -8,7 +8,7 @@ use futures_core::Stream;
 use futures_sink::Sink;
 
 use crate::{
-    CoreError, FoctetFramed, Session,
+    CoreError, FoctetFramed, PreparedRekey, Session,
     io::SyncIo,
     payload::{self, Tlv, tlv_type},
 };
@@ -37,6 +37,8 @@ pub struct SecureChannel<T> {
 pub struct AsyncSecureChannel<T> {
     framed: FoctetFramed<T>,
     session: Session,
+    pending_rekey: Option<PreparedRekey>,
+    pending_rekey_enqueued: bool,
     app_stream_id: u32,
     app_flags: u8,
 }
@@ -103,6 +105,42 @@ impl<T: Read + Write> SecureChannel<T> {
             self.app_stream_id,
             &payload,
         )
+    }
+
+    /// Immediately performs one transactional DH-ratchet rekey.
+    ///
+    /// The control frame is written and flushed under the old traffic key
+    /// before the session commits the new key. An ambiguous I/O failure closes
+    /// both the transport and session.
+    pub fn rekey_now(&mut self) -> Result<(), CoreError> {
+        let prepared = self.session.prepare_rekey()?;
+        if let Err(error) =
+            self.io
+                .send_control_with_key_id(0, prepared.old_key_id(), prepared.control_message())
+        {
+            if self.io.is_terminal() {
+                self.session.terminate();
+            } else if let Err(cancel_error) = self.session.cancel_prepared_rekey(prepared) {
+                self.io.terminate();
+                return Err(cancel_error);
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.session.commit_rekey(prepared) {
+            self.io.terminate();
+            self.session.terminate();
+            return Err(error);
+        }
+        let keys = match self.session.active_keys() {
+            Some(keys) => keys,
+            None => {
+                self.io.terminate();
+                self.session.terminate();
+                return Err(CoreError::InvalidSessionState);
+            }
+        };
+        self.io.install_active_keys(keys);
+        Ok(())
     }
 
     /// Receives the next application-data payload.
@@ -176,7 +214,12 @@ impl<T> AsyncSecureChannel<T> {
 
     /// Consumes the wrapper and returns `(framed, session)`.
     pub fn into_parts(self) -> (FoctetFramed<T>, Session) {
-        (self.framed, self.session)
+        let mut this = self;
+        if this.pending_rekey.is_some() {
+            this.framed.terminate();
+            this.session.terminate();
+        }
+        (this.framed, this.session)
     }
 }
 
@@ -195,6 +238,8 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
         Ok(Self {
             framed,
             session,
+            pending_rekey: None,
+            pending_rekey_enqueued: false,
             app_stream_id: 0,
             app_flags: 0,
         })
@@ -202,13 +247,16 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
 
     /// Sends application data in an `APPLICATION_DATA` TLV with session-aware rekey handling.
     pub async fn send_data(&mut self, plaintext: &[u8]) -> Result<(), CoreError> {
+        if self.pending_rekey.is_some() {
+            return Err(CoreError::RekeyInProgress);
+        }
         // The frame must be encrypted and enqueued exactly once. This closure
         // is re-polled from the top whenever the flush below returns
         // `Pending`, so without the `queued` latch the same plaintext would be
         // re-encrypted under the next sequence number and sent again — a
         // silent duplicate delivery on any transport whose flush can suspend.
         let mut queued = false;
-        poll_fn(move |cx| {
+        let result = poll_fn(|cx| {
             let mut framed = Pin::new(&mut self.framed);
             if !queued {
                 match framed.as_mut().poll_ready(cx) {
@@ -228,7 +276,11 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
 
             framed.poll_flush(cx)
         })
-        .await
+        .await;
+        if result.is_err() && self.framed.is_terminal() {
+            self.session.terminate();
+        }
+        result
     }
 
     /// Sends explicit TLVs with session-aware rekey handling.
@@ -239,12 +291,91 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
         self.send_data(&payload).await
     }
 
+    /// Immediately performs one transactional DH-ratchet rekey.
+    ///
+    /// The exact old-key control frame is flushed before the session commits
+    /// the new key. A rejected enqueue leaves the session unchanged; an
+    /// ambiguous write or flush failure closes both objects.
+    pub async fn rekey_now(&mut self) -> Result<(), CoreError> {
+        if self.pending_rekey.is_none() {
+            self.pending_rekey = Some(self.session.prepare_rekey()?);
+            self.pending_rekey_enqueued = false;
+        }
+
+        if !self.pending_rekey_enqueued {
+            let prepared = self
+                .pending_rekey
+                .as_ref()
+                .ok_or(CoreError::InvalidSessionState)?;
+            let old_key_id = prepared.old_key_id();
+            let control = prepared.control_message().clone();
+            let enqueue_result = poll_fn(|cx| {
+                let mut framed = Pin::new(&mut self.framed);
+                match framed.as_mut().poll_ready(cx) {
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Err(error)) => {
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    std::task::Poll::Ready(Ok(())) => {}
+                }
+                std::task::Poll::Ready(
+                    framed.start_send_control_with_key_id(0, old_key_id, &control),
+                )
+            })
+            .await;
+            if let Err(error) = enqueue_result {
+                let prepared = self
+                    .pending_rekey
+                    .take()
+                    .ok_or(CoreError::InvalidSessionState)?;
+                if self.framed.is_terminal() {
+                    self.session.terminate();
+                } else if let Err(cancel_error) = self.session.cancel_prepared_rekey(prepared) {
+                    self.framed.terminate();
+                    return Err(cancel_error);
+                }
+                return Err(error);
+            }
+            self.pending_rekey_enqueued = true;
+        }
+
+        if let Err(error) = poll_fn(|cx| Pin::new(&mut self.framed).poll_flush(cx)).await {
+            self.pending_rekey = None;
+            self.pending_rekey_enqueued = false;
+            self.session.terminate();
+            return Err(error);
+        }
+        let prepared = self
+            .pending_rekey
+            .take()
+            .ok_or(CoreError::InvalidSessionState)?;
+        self.pending_rekey_enqueued = false;
+        if let Err(error) = self.session.commit_rekey(prepared) {
+            self.framed.terminate();
+            self.session.terminate();
+            return Err(error);
+        }
+        let keys = match self.session.active_keys() {
+            Some(keys) => keys,
+            None => {
+                self.framed.terminate();
+                self.session.terminate();
+                return Err(CoreError::InvalidSessionState);
+            }
+        };
+        self.framed.install_active_keys(keys);
+        Ok(())
+    }
+
     /// Receives the next application-data payload.
     ///
     /// Control frames are handled automatically. The method loops internally until
     /// it receives a non-control frame, then decodes TLVs and returns the first
     /// `APPLICATION_DATA` value.
     pub async fn recv_application(&mut self) -> Result<Vec<u8>, CoreError> {
+        if self.pending_rekey.is_some() {
+            return Err(CoreError::RekeyInProgress);
+        }
         loop {
             let item = poll_fn(|cx| Pin::new(&mut self.framed).poll_next(cx)).await;
             let decoded = match item {
@@ -268,6 +399,9 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
 
     /// Receives the next non-control frame and returns decoded TLVs.
     pub async fn recv_tlvs(&mut self) -> Result<Vec<Tlv>, CoreError> {
+        if self.pending_rekey.is_some() {
+            return Err(CoreError::RekeyInProgress);
+        }
         loop {
             let item = poll_fn(|cx| Pin::new(&mut self.framed).poll_next(cx)).await;
             let decoded = match item {
@@ -413,6 +547,34 @@ mod tests {
     }
 
     #[test]
+    fn explicit_rekey_is_delivered_before_the_new_key_is_used() {
+        let (a_io, b_io) = MemPipe::pair();
+        let (a_session, b_session) = make_session_pair();
+        let mut client =
+            SecureChannel::from_active_session(a_io, a_session).expect("client channel");
+        let mut server =
+            SecureChannel::from_active_session(b_io, b_session).expect("server channel");
+
+        client.rekey_now().expect("transactional rekey");
+        assert_eq!(
+            client.session().active_keys().expect("client key").key_id,
+            1
+        );
+
+        client
+            .send_data(b"new-key payload")
+            .expect("send after rekey");
+        assert_eq!(
+            server.recv_application().expect("receive after rekey"),
+            b"new-key payload"
+        );
+        assert_eq!(
+            server.session().active_keys().expect("server key").key_id,
+            1
+        );
+    }
+
+    #[test]
     fn secure_channel_rejects_non_active_session() {
         let (io, _peer) = MemPipe::pair();
         let thresholds = RekeyThresholds::default();
@@ -483,6 +645,7 @@ mod tests {
             inbound: VecDeque<u8>,
             outbound: Vec<u8>,
             pending_flushes: usize,
+            fail_flush: bool,
         }
 
         impl PollRead for SlowFlushIo {
@@ -516,6 +679,9 @@ mod tests {
                 if self.pending_flushes > 0 {
                     self.pending_flushes -= 1;
                     return Poll::Pending;
+                }
+                if self.fail_flush {
+                    return Poll::Ready(Err(std::io::Error::other("injected flush failure")));
                 }
                 Poll::Ready(Ok(()))
             }
@@ -588,6 +754,168 @@ mod tests {
                     other => panic!("expected EOF after the single frame, got {other:?}"),
                 }
             }
+        }
+
+        #[test]
+        fn automatic_rekey_flush_failure_closes_the_paired_session() {
+            let thresholds = RekeyThresholds {
+                max_frames: 1,
+                max_bytes: u64::MAX,
+                max_age: std::time::Duration::MAX,
+                max_previous_keys: 2,
+            };
+            let (mut initiator, hello) = Session::new_initiator_with_auth(
+                thresholds.clone(),
+                SessionAuthConfig::unauthenticated_for_testing(),
+            );
+            let mut responder = Session::new_responder_with_auth(
+                thresholds,
+                SessionAuthConfig::unauthenticated_for_testing(),
+            );
+            let server_hello = responder
+                .handle_control(&hello)
+                .expect("responder handles hello")
+                .expect("server hello");
+            initiator
+                .handle_control(&server_hello)
+                .expect("initiator finalizes");
+
+            let io = SlowFlushIo {
+                fail_flush: true,
+                ..SlowFlushIo::default()
+            };
+            let mut sender =
+                AsyncSecureChannel::from_active_session(io, initiator).expect("sender channel");
+            let waker = Waker::noop().clone();
+            let mut cx = Context::from_waker(&waker);
+
+            {
+                let mut send = pin!(sender.send_data(b"triggers rekey"));
+                assert!(matches!(
+                    send.as_mut().poll(&mut cx),
+                    Poll::Ready(Err(crate::CoreError::Io(_)))
+                ));
+            }
+
+            assert!(sender.framed_ref().is_terminal());
+            assert_eq!(sender.session().state(), crate::SessionState::Closed);
+            assert!(sender.session().active_keys().is_none());
+        }
+
+        #[test]
+        fn explicit_async_rekey_commits_only_after_flush() {
+            let (initiator, responder) = quiet_session_pair();
+            let sender_io = SlowFlushIo {
+                pending_flushes: 1,
+                ..SlowFlushIo::default()
+            };
+            let mut sender = AsyncSecureChannel::from_active_session(sender_io, initiator)
+                .expect("sender channel");
+            let waker = Waker::noop().clone();
+            let mut cx = Context::from_waker(&waker);
+
+            {
+                let mut rekey = pin!(sender.rekey_now());
+                assert!(rekey.as_mut().poll(&mut cx).is_pending());
+                match rekey.as_mut().poll(&mut cx) {
+                    Poll::Ready(Ok(())) => {}
+                    other => panic!("expected rekey completion, got {other:?}"),
+                }
+            }
+            assert_eq!(
+                sender.session().active_keys().expect("sender key").key_id,
+                1
+            );
+
+            let wire = sender.framed_ref().get_ref().outbound.clone();
+            let mut receiver = AsyncSecureChannel::from_active_session(
+                SlowFlushIo {
+                    inbound: wire.into_iter().collect(),
+                    ..SlowFlushIo::default()
+                },
+                responder,
+            )
+            .expect("receiver channel");
+            {
+                let mut receive = pin!(receiver.recv_application());
+                assert!(matches!(
+                    receive.as_mut().poll(&mut cx),
+                    Poll::Ready(Err(crate::CoreError::UnexpectedEof))
+                ));
+            }
+            assert_eq!(
+                receiver
+                    .session()
+                    .active_keys()
+                    .expect("receiver key")
+                    .key_id,
+                1
+            );
+        }
+
+        #[test]
+        fn cancelled_async_rekey_resumes_the_same_transaction() {
+            let (initiator, _responder) = quiet_session_pair();
+            let sender_io = SlowFlushIo {
+                pending_flushes: 1,
+                ..SlowFlushIo::default()
+            };
+            let mut sender = AsyncSecureChannel::from_active_session(sender_io, initiator)
+                .expect("sender channel");
+            let waker = Waker::noop().clone();
+            let mut cx = Context::from_waker(&waker);
+
+            {
+                let mut rekey = pin!(sender.rekey_now());
+                assert!(rekey.as_mut().poll(&mut cx).is_pending());
+            }
+            assert_eq!(
+                sender.session().active_keys().expect("old key").key_id,
+                0,
+                "cancelled future must not commit before flush"
+            );
+
+            {
+                let mut send = pin!(sender.send_data(b"must wait for rekey"));
+                assert!(matches!(
+                    send.as_mut().poll(&mut cx),
+                    Poll::Ready(Err(crate::CoreError::RekeyInProgress))
+                ));
+            }
+
+            {
+                let mut resumed = pin!(sender.rekey_now());
+                assert!(matches!(
+                    resumed.as_mut().poll(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
+            }
+            assert_eq!(sender.session().active_keys().expect("new key").key_id, 1);
+        }
+
+        #[test]
+        fn explicit_async_rekey_flush_failure_closes_the_session() {
+            let (initiator, _responder) = quiet_session_pair();
+            let io = SlowFlushIo {
+                fail_flush: true,
+                ..SlowFlushIo::default()
+            };
+            let mut sender =
+                AsyncSecureChannel::from_active_session(io, initiator).expect("sender channel");
+            let waker = Waker::noop().clone();
+            let mut cx = Context::from_waker(&waker);
+
+            {
+                let mut rekey = pin!(sender.rekey_now());
+                assert!(matches!(
+                    rekey.as_mut().poll(&mut cx),
+                    Poll::Ready(Err(crate::CoreError::Io(_)))
+                ));
+            }
+
+            assert!(sender.framed_ref().is_terminal());
+            assert_eq!(sender.session().state(), crate::SessionState::Closed);
+            assert!(sender.session().active_keys().is_none());
         }
     }
 }

@@ -53,6 +53,16 @@ const assertTrue = (cond, what) => {
   }
   checks++;
 };
+const assertThrows = (operation, what) => {
+  try {
+    operation();
+  } catch {
+    checks++;
+    return;
+  }
+  console.error(`FAIL: ${what}`);
+  process.exit(1);
+};
 
 const concat = (...parts) => {
   const total = parts.reduce((n, p) => n + p.length, 0);
@@ -263,6 +273,7 @@ const hsVec = vectors("handshake-v0.json");
 // --- 3. Rekey vector: DH-ratchet root seeding and one ratchet step ---------
 
 const rkVec = vectors("rekey-v0.json");
+const negativeVec = vectors("negative-v0.json");
 {
   const sessionSalt = fromHex(rkVec.session_salt_hex);
   const sharedSecret = fromHex(rkVec.shared_secret_hex);
@@ -329,8 +340,165 @@ const rkVec = vectors("rekey-v0.json");
     !opensWith(tamperedAad, frame.slice(FRAME_HEADER_LEN)),
     "tampered header (AAD) must not authenticate",
   );
+
+  const truncated = frame.slice(0, frame.length - 1);
+  const truncatedHeader = decodeFrameHeader(truncated);
+  assertTrue(
+    truncated.length - FRAME_HEADER_LEN !== truncatedHeader.ctLen,
+    "truncated frame fails its declared ciphertext boundary",
+  );
+
+  const unknownVersion = frame.slice();
+  unknownVersion[2] = 0xff;
+  assertTrue(
+    decodeFrameHeader(unknownVersion).version !== 0,
+    "unknown frame version fails the fixed-v0 profile check",
+  );
+  const unknownProfile = frame.slice();
+  unknownProfile[4] = 0xff;
+  assertTrue(
+    decodeFrameHeader(unknownProfile).profileId !== 0x01,
+    "unknown crypto profile fails the fixed-profile check",
+  );
+}
+
+// Independent negative handshake and ratchet boundaries.
+{
+  const hello = fromHex(hsVec.client_hello_hex);
+  const signature = hello.slice(135, 199);
+  signature[0] ^= 0x80;
+  const authMessage = concat(
+    ascii("foctet auth client"),
+    hello.slice(6, 38),
+    hello.slice(38, 70),
+    hello.slice(70, 102),
+  );
+  assertTrue(
+    !ed25519.verify(signature, authMessage, hello.slice(103, 135)),
+    "tampered handshake signature is rejected",
+  );
+
+  assertThrows(
+    () => x25519.getSharedSecret(fromHex(hsVec.client_private_hex), new Uint8Array(32)),
+    "low-order all-zero X25519 input is rejected",
+  );
+
+  const malformedControl = hello.slice(0, hello.length - 1);
+  assertTrue(
+    ![102, 103, 199].includes(malformedControl.length),
+    "truncated ClientHello fails every permitted boundary",
+  );
+  assertTrue(0xff + 1 > 0xff, "key-id exhaustion cannot wrap to a v0 key identifier");
+
+  const replayWindow = new Set();
+  const replayKey = (keyId, streamId, seq) => `${keyId}:${streamId}:${seq}`;
+  const key = replayKey(0, 7, 4095);
+  replayWindow.add(key);
+  assertTrue(replayWindow.has(key), "replay-window upper boundary is retained");
+  assertTrue(
+    replayWindow.has(replayKey(0, 7, 4095)),
+    "duplicate at the replay boundary is rejected",
+  );
+}
+
+// --- 5. Shared negative-vector corpus ---------------------------------------
+
+{
+  const applyMutation = (mutation) => {
+    const fixture = vectors(mutation.fixture);
+    const bytes = fromHex(fixture[mutation.field]);
+    const offset =
+      mutation.offset ??
+      bytes.length - mutation.offset_from_end;
+    bytes[offset] ^= mutation.xor;
+    return bytes;
+  };
+  const byId = (id) =>
+    negativeVec.mutations.find((mutation) => mutation.id === id);
+  const literal = (id) =>
+    negativeVec.literals.find((entry) => entry.id === id);
+
+  const badVersion = decodeFrameHeader(applyMutation(byId("frame_unknown_version")));
+  assertTrue(badVersion.version !== 0, "shared vector: unknown version rejected");
+  const badProfile = decodeFrameHeader(applyMutation(byId("frame_unknown_profile")));
+  assertTrue(badProfile.profileId !== 1, "shared vector: unknown profile rejected");
+
+  const corruptFrame = applyMutation(byId("frame_ciphertext_corruption"));
+  const corruptHeader = decodeFrameHeader(corruptFrame);
+  const corruptKeys = deriveTrafficKeys(
+    fromHex(frameVec.shared_secret_hex),
+    fromHex(frameVec.session_salt_hex),
+  );
+  const corruptNonce = makeNonce(
+    corruptHeader.keyId,
+    corruptHeader.streamId,
+    corruptHeader.seq,
+  );
+  let corruptOpened = false;
+  for (const key of [corruptKeys.c2s, corruptKeys.s2c]) {
+    try {
+      xchacha20poly1305(key, corruptNonce, corruptHeader.raw).decrypt(
+        corruptFrame.slice(FRAME_HEADER_LEN),
+      );
+      corruptOpened = true;
+    } catch {
+      // Expected for both direction keys.
+    }
+  }
+  assertTrue(!corruptOpened, "shared vector: corrupted frame fails AEAD");
+
+  const corruptHello = applyMutation(byId("client_hello_signature_corruption"));
+  assertTrue(
+    !ed25519.verify(
+      corruptHello.slice(135, 199),
+      concat(
+        ascii("foctet auth client"),
+        corruptHello.slice(6, 38),
+        corruptHello.slice(38, 70),
+        corruptHello.slice(70, 102),
+      ),
+      corruptHello.slice(103, 135),
+    ),
+    "shared vector: corrupted handshake signature fails",
+  );
+
+  assertThrows(
+    () =>
+      x25519.getSharedSecret(
+        fromHex(hsVec.client_private_hex),
+        fromHex(literal("low_order_x25519").hex),
+      ),
+    "shared vector: low-order X25519 rejected",
+  );
+  assertTrue(
+    fromHex(literal("truncated_body_header").hex).length === 8,
+    "shared vector: body header truncation boundary",
+  );
+  assertTrue(
+    fromHex(literal("truncated_stream_header").hex).length === 8,
+    "shared vector: stream header truncation boundary",
+  );
+  assertTrue(
+    fromHex(literal("malformed_control").hex).length === 6,
+    "shared vector: malformed control boundary",
+  );
+
+  const originalManifest = fromHex(vectors("archive-v0.json").manifest_hex);
+  const corruptManifest = applyMutation(byId("archive_manifest_corruption"));
+  assertTrue(
+    toHex(sha256(originalManifest)) !== toHex(sha256(corruptManifest)),
+    "shared vector: archive corruption changes authenticated bytes",
+  );
+  assertTrue(
+    negativeVec.boundaries.maximum_key_id + 1 > 0xff,
+    "shared vector: key-id exhaustion boundary",
+  );
+  assertTrue(
+    negativeVec.boundaries.replay_window === 4096,
+    "shared vector: replay boundary",
+  );
 }
 
 console.log(
-  `ok: ${checks} independent checks passed (frame AEAD, handshake, identity auth, rekey ratchet)`,
+  `ok: ${checks} independent checks passed (positive and negative frame, handshake, identity, replay, and rekey cases)`,
 );

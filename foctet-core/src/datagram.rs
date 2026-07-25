@@ -16,6 +16,9 @@
 //!   dropped or reordered datagrams do not break the channel.
 //! - **Replay state is committed only after AEAD authentication**, so a forged
 //!   datagram cannot advance the window (matching the stream paths).
+//! - **Fail-closed endpoint lifetime.** Authentication, parsing, replay, key,
+//!   or sequence failures make an endpoint terminal; applications must create
+//!   a fresh authenticated session rather than continue on a diverged channel.
 //! - **Anti-amplification** (not sending many bytes to an unverified peer) is a
 //!   transport-layer responsibility and is documented for adapters; this codec
 //!   does not itself send data.
@@ -29,6 +32,7 @@ use crate::{
     CoreError,
     crypto::{Direction, KeyHandle, decrypt_frame_with_key, encrypt_frame},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
+    limits::{DEFAULT_MAX_OUTBOUND_STREAMS, MAX_OUTBOUND_STREAMS, MAX_RETAINED_KEYS},
     replay::{DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector},
     sequence::OutboundSequence,
 };
@@ -54,6 +58,8 @@ pub struct DatagramConfig {
     pub replay_window: u64,
     /// Maximum number of distinct replay windows tracked simultaneously.
     pub max_replay_windows: usize,
+    /// Maximum number of distinct stream IDs tracked for outbound sequencing.
+    pub max_outbound_streams: usize,
     /// Number of previous keys retained for inbound decryption after rekey.
     pub max_retained_keys: usize,
 }
@@ -64,6 +70,7 @@ impl Default for DatagramConfig {
             max_datagram_size: DEFAULT_MAX_DATAGRAM_SIZE,
             replay_window: DEFAULT_REPLAY_WINDOW,
             max_replay_windows: DEFAULT_MAX_REPLAY_WINDOWS,
+            max_outbound_streams: DEFAULT_MAX_OUTBOUND_STREAMS,
             max_retained_keys: 2,
         }
     }
@@ -92,15 +99,51 @@ pub struct DatagramEndpoint {
     next_seq: HashMap<(u8, u32), OutboundSequence>,
     replay: ReplayProtector,
     max_datagram_size: usize,
+    max_outbound_streams: usize,
+    terminal: bool,
 }
 
 impl DatagramEndpoint {
-    /// Creates a datagram endpoint with default configuration.
-    pub fn new(
+    /// Constructs an endpoint from shared traffic keys without a session lease.
+    ///
+    /// # Danger: nonce-domain ownership
+    ///
+    /// The caller must prove that no other outbound endpoint can use the same
+    /// `(direction, key_id, stream_id)` nonce domain. Prefer
+    /// [`Session::claim_datagram_endpoint`](crate::Session::claim_datagram_endpoint).
+    pub fn dangerously_from_shared_keys_without_nonce_ownership(
         keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
+        Self::new(keys, inbound_direction, outbound_direction)
+    }
+
+    /// Creates a nonce-owning endpoint from a single-use session lease.
+    pub fn from_session_lease(lease: crate::DatagramEndpointKeyLease) -> Self {
+        Self::with_config(
+            lease.keys,
+            lease.inbound_direction,
+            lease.outbound_direction,
+            DatagramConfig::default(),
+        )
+    }
+
+    /// Creates a nonce-owning endpoint from a lease with explicit limits.
+    pub fn from_session_lease_with_config(
+        lease: crate::DatagramEndpointKeyLease,
+        config: DatagramConfig,
+    ) -> Self {
+        Self::with_config(
+            lease.keys,
+            lease.inbound_direction,
+            lease.outbound_direction,
+            config,
+        )
+    }
+
+    /// Creates a datagram endpoint with default configuration.
+    fn new(keys: KeyHandle, inbound_direction: Direction, outbound_direction: Direction) -> Self {
         Self::with_config(
             keys,
             inbound_direction,
@@ -110,7 +153,7 @@ impl DatagramEndpoint {
     }
 
     /// Creates a datagram endpoint with explicit configuration.
-    pub fn with_config(
+    pub(crate) fn with_config(
         keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
@@ -119,13 +162,15 @@ impl DatagramEndpoint {
         Self {
             active_key_id: keys.key_id,
             keys: vec![keys],
-            max_retained_keys: config.max_retained_keys.max(1),
+            max_retained_keys: config.max_retained_keys.clamp(1, MAX_RETAINED_KEYS),
             inbound_direction,
             outbound_direction,
             next_seq: HashMap::new(),
             replay: ReplayProtector::new(config.replay_window)
                 .with_max_windows(config.max_replay_windows),
             max_datagram_size: config.max_datagram_size.max(DATAGRAM_FRAME_OVERHEAD + 1),
+            max_outbound_streams: config.max_outbound_streams.clamp(1, MAX_OUTBOUND_STREAMS),
+            terminal: false,
         }
     }
 
@@ -152,6 +197,11 @@ impl DatagramEndpoint {
         self.replay.rejections()
     }
 
+    /// Returns whether a protocol failure made this endpoint terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
     /// Returns known key IDs, active first.
     pub fn known_key_ids(&self) -> Vec<u8> {
         self.keys.iter().map(|k| k.key_id).collect()
@@ -159,6 +209,9 @@ impl DatagramEndpoint {
 
     /// Installs new active keys and retains a bounded set of previous keys.
     pub fn install_active_keys(&mut self, keys: KeyHandle) {
+        if self.active_key_id != keys.key_id {
+            self.next_seq.clear();
+        }
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -191,8 +244,16 @@ impl DatagramEndpoint {
         flags: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
         let keys = self.active_keys()?.clone();
         let key_id = keys.key_id;
+        if !self.next_seq.contains_key(&(key_id, stream_id))
+            && self.next_seq.len() >= self.max_outbound_streams
+        {
+            return Err(CoreError::OutboundStreamCapacityExceeded);
+        }
         let sequence = self
             .next_seq
             .get(&(key_id, stream_id))
@@ -215,7 +276,13 @@ impl DatagramEndpoint {
 
         // Reserve the next sequence only after the datagram is known to be
         // emittable, so a rejected datagram never consumes a nonce.
-        let next = sequence.prepared_next()?;
+        let next = match sequence.prepared_next() {
+            Ok(next) => next,
+            Err(error) => {
+                self.terminal = true;
+                return Err(error);
+            }
+        };
         self.next_seq.insert((key_id, stream_id), next);
         Ok(bytes)
     }
@@ -225,6 +292,17 @@ impl DatagramEndpoint {
     /// The datagram MUST contain exactly one complete frame and no trailing
     /// bytes. The ciphertext is authenticated before replay state is committed.
     pub fn open(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let result = self.open_inner(datagram);
+        if result.is_err() {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn open_inner(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
         if datagram.len() > self.max_datagram_size {
             return Err(CoreError::FrameTooLarge);
         }
@@ -300,6 +378,36 @@ mod tests {
         // A duplicate is rejected as a replay.
         let err = server.open(&d1).expect_err("duplicate rejected");
         assert!(matches!(err, CoreError::Replay));
+        assert!(server.is_terminal());
+        assert!(matches!(
+            server.open(&d0),
+            Err(CoreError::TransportTerminal)
+        ));
+    }
+
+    #[test]
+    fn outbound_stream_count_is_bounded_before_encryption() {
+        let (client, _server) = endpoints();
+        let config = DatagramConfig {
+            max_outbound_streams: 2,
+            ..DatagramConfig::default()
+        };
+        let mut endpoint = DatagramEndpoint::with_config(
+            client.active_keys().expect("active keys").clone(),
+            Direction::S2C,
+            Direction::C2S,
+            config,
+        );
+        endpoint.seal(1, 0, b"one").expect("first stream");
+        endpoint.seal(2, 0, b"two").expect("second stream");
+        let err = endpoint
+            .seal(3, 0, b"three")
+            .expect_err("third stream must exceed the cap");
+        assert!(matches!(err, CoreError::OutboundStreamCapacityExceeded));
+        assert!(!endpoint.is_terminal());
+        endpoint
+            .seal(1, 0, b"existing")
+            .expect("an existing stream remains usable");
     }
 
     #[test]
@@ -329,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_state_committed_only_after_auth() {
+    fn authentication_failure_makes_datagram_endpoint_terminal() {
         let (mut client, mut server) = endpoints();
         // Forge a high-sequence datagram by corrupting an authentic one.
         let _warm = client.seal(0, 0, b"warm");
@@ -339,11 +447,13 @@ mod tests {
 
         let err = server.open(&forged).expect_err("forged must fail auth");
         assert!(matches!(err, CoreError::Aead));
+        assert!(server.is_terminal());
 
-        // The forged datagram must not have advanced the replay window, so the
-        // genuine low-sequence datagrams are still accepted.
         let d0 = client.seal(1, 0, b"genuine").expect("seal new stream");
-        assert_eq!(server.open(&d0).expect("genuine").plaintext, b"genuine");
+        assert!(matches!(
+            server.open(&d0),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]

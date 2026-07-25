@@ -3,6 +3,7 @@ name = "foctet-fuzz"
 version = "0.1.0"
 publish = false
 edition = "2024"
+license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
@@ -11,6 +12,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 foctet-core = { path = "../foctet-core" }
 foctet-archive = { path = "../foctet-archive" }
+foctet-http = { path = "../foctet-http" }
+x25519-dalek = { workspace = true }
 
 [[bin]]
 name = "frame_parser"
@@ -57,6 +60,34 @@ bench = false
 [[bin]]
 name = "datagram_message"
 path = "fuzz_targets/datagram_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rekey_transaction"
+path = "fuzz_targets/rekey_transaction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_context"
+path = "fuzz_targets/http_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "workers_replay_adapter"
+path = "fuzz_targets/workers_replay_adapter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_encoder"
+path = "fuzz_targets/archive_encoder.rs"
 test = false
 doc = false
 bench = false

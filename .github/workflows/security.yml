@@ -1,0 +1,27 @@
+name: Security audit
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check advisory exception review dates
+        run: bash scripts/check-advisory-exceptions.sh
+      - name: Check dependency advisories
+        run: cargo audit --db "$RUNNER_TEMP/foctet-cargo-audit-db" --deny warnings --ignore RUSTSEC-2025-0134

@@ -1,10 +1,11 @@
 use blake3::Hasher as Blake3;
-use rand_core::{OsRng, RngCore};
+use getrandom::SysRng;
+use rand_core::TryRng;
 use rkyv::rancor::Error as RkyvError;
 
 use crate::{
     ArchiveBuildSecrets, ArchiveError, ArchiveLimits, ArchiveOptions, EncryptedHeader,
-    FileManifest,
+    FileManifest, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_RECIPIENTS,
     crypto::{
         aead_decrypt, aead_encrypt, chunk_nonce, header_nonce, wrap_dek,
         wrap_dek_with_ephemeral_secret,
@@ -26,7 +27,7 @@ pub(crate) fn build_encrypted_materials_with_secrets(
     options: ArchiveOptions,
     secrets: Option<&ArchiveBuildSecrets>,
 ) -> Result<BuiltArchive, ArchiveError> {
-    validate_inputs(recipient_public_keys, &options)?;
+    validate_inputs(plaintext, recipient_public_keys, &options)?;
     validate_build_secrets(recipient_public_keys, secrets)?;
 
     let (archive_id, file_id, dek) = match secrets {
@@ -34,11 +35,17 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         None => {
             let mut archive_id = [0u8; 16];
             let mut file_id = [0u8; 16];
-            OsRng.fill_bytes(&mut archive_id);
-            OsRng.fill_bytes(&mut file_id);
+            SysRng
+                .try_fill_bytes(&mut archive_id)
+                .expect("OS random number generator is unavailable");
+            SysRng
+                .try_fill_bytes(&mut file_id)
+                .expect("OS random number generator is unavailable");
 
             let mut dek = [0u8; 32];
-            OsRng.fill_bytes(&mut dek);
+            SysRng
+                .try_fill_bytes(&mut dek)
+                .expect("OS random number generator is unavailable");
             (archive_id, file_id, dek)
         }
     };
@@ -47,7 +54,7 @@ pub(crate) fn build_encrypted_materials_with_secrets(
     hasher.update(plaintext);
     let overall_hash = *hasher.finalize().as_bytes();
 
-    let total_chunks = plaintext.len().div_ceil(options.chunk_size) as u32;
+    let total_chunks = checked_total_chunks(plaintext.len(), options.chunk_size)?;
 
     let wrapped = recipient_public_keys
         .iter()
@@ -88,16 +95,19 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         chunk_hasher.update(chunk);
         let chunk_record = ChunkPlain {
             chunk_index: idx as u32,
-            plain_len: chunk.len() as u32,
+            plain_len: u32::try_from(chunk.len())
+                .map_err(|_| ArchiveError::InvalidInput("chunk length exceeds u32 max"))?,
             payload_hash: *chunk_hasher.finalize().as_bytes(),
             payload: chunk.to_vec(),
         };
         let chunk_plain =
             rkyv::to_bytes::<RkyvError>(&chunk_record).map_err(|_| ArchiveError::Serialize)?;
-        let nonce = chunk_nonce(archive_id, idx as u32);
+        let chunk_index = u32::try_from(idx)
+            .map_err(|_| ArchiveError::InvalidInput("chunk index exceeds u32 max"))?;
+        let nonce = chunk_nonce(archive_id, chunk_index);
         let chunk_ct = aead_encrypt(&dek, &nonce, &[], &chunk_plain)?;
         chunks.push(EncryptedChunkRecord {
-            chunk_index: idx as u32,
+            chunk_index,
             chunk_ct,
         });
     }
@@ -152,7 +162,7 @@ pub(crate) fn decrypt_chunk_records_with_limits(
     if records.len() != header.manifest.total_chunks as usize {
         return Err(ArchiveError::Parse);
     }
-    if records.len() > limits.max_total_chunks {
+    if records.len() > limits.total_chunks() {
         return Err(ArchiveError::LimitExceeded("total_chunks"));
     }
     let file_size = usize::try_from(header.manifest.file_size)
@@ -215,9 +225,9 @@ pub(crate) fn decrypt_chunk_records_with_limits(
 pub(crate) fn partition_chunks(
     chunks: &[EncryptedChunkRecord],
     target_part_size: usize,
-) -> Vec<Vec<EncryptedChunkRecord>> {
+) -> Result<Vec<Vec<EncryptedChunkRecord>>, ArchiveError> {
     if chunks.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut out = Vec::new();
@@ -226,26 +236,37 @@ pub(crate) fn partition_chunks(
 
     for rec in chunks {
         let record_size = 4 + rec.chunk_ct.len();
-        if !current.is_empty() && current_size + record_size > target_part_size {
+        let next_size = current_size
+            .checked_add(record_size)
+            .ok_or(ArchiveError::InvalidInput("part size overflow"))?;
+        if !current.is_empty() && next_size > target_part_size {
             out.push(current);
             current = Vec::new();
             current_size = 0;
         }
         current.push(rec.clone());
-        current_size += record_size;
+        current_size = current_size
+            .checked_add(record_size)
+            .ok_or(ArchiveError::InvalidInput("part size overflow"))?;
     }
 
     if !current.is_empty() {
         out.push(current);
     }
 
-    out
+    Ok(out)
 }
 
 pub(crate) fn validate_inputs(
+    plaintext: &[u8],
     recipient_public_keys: &[[u8; 32]],
     options: &ArchiveOptions,
 ) -> Result<(), ArchiveError> {
+    if plaintext.len() > crate::MAX_IN_MEMORY_PLAINTEXT_BYTES {
+        return Err(ArchiveError::InvalidInput(
+            "plaintext exceeds in-memory archive limit",
+        ));
+    }
     if recipient_public_keys.is_empty() {
         return Err(ArchiveError::InvalidInput(
             "at least one recipient key is required",
@@ -259,10 +280,32 @@ pub(crate) fn validate_inputs(
     if options.chunk_size > u32::MAX as usize {
         return Err(ArchiveError::InvalidInput("chunk_size exceeds u32 max"));
     }
-    if recipient_public_keys.len() > u16::MAX as usize {
+    if recipient_public_keys.len() > MAX_ARCHIVE_RECIPIENTS {
         return Err(ArchiveError::InvalidInput("too many recipients"));
     }
+    if options
+        .file_name
+        .as_ref()
+        .map_or(0, String::len)
+        .saturating_add(options.content_type.as_ref().map_or(0, String::len))
+        > ArchiveLimits::default().max_header_ciphertext_len
+    {
+        return Err(ArchiveError::InvalidInput(
+            "archive metadata exceeds header limit",
+        ));
+    }
+    let total_chunks = checked_total_chunks(plaintext.len(), options.chunk_size)?;
+    if total_chunks as usize > MAX_ARCHIVE_CHUNKS {
+        return Err(ArchiveError::InvalidInput(
+            "total chunks exceeds archive build limit",
+        ));
+    }
     Ok(())
+}
+
+fn checked_total_chunks(plaintext_len: usize, chunk_size: usize) -> Result<u32, ArchiveError> {
+    let count = plaintext_len.div_ceil(chunk_size);
+    u32::try_from(count).map_err(|_| ArchiveError::InvalidInput("total chunks exceeds u32 max"))
 }
 
 pub(crate) fn ensure_version(version: u8, expected: u8) -> Result<(), ArchiveError> {
@@ -277,4 +320,44 @@ pub(crate) fn ensure_profile(profile: u8, expected: u8) -> Result<(), ArchiveErr
         return Err(ArchiveError::UnsupportedProfile(profile));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_total_chunks, validate_inputs};
+    use crate::{ArchiveError, ArchiveOptions, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_RECIPIENTS};
+
+    #[test]
+    fn total_chunks_rejects_values_that_would_repeat_a_nonce() {
+        assert!(matches!(
+            checked_total_chunks(usize::MAX, 1),
+            Err(ArchiveError::InvalidInput("total chunks exceeds u32 max"))
+        ));
+    }
+
+    #[test]
+    fn build_rejects_excess_chunks_before_hashing_or_allocating_records() {
+        let plaintext = vec![0u8; MAX_ARCHIVE_CHUNKS + 1];
+        let options = ArchiveOptions {
+            chunk_size: 1,
+            ..ArchiveOptions::default()
+        };
+        let err = validate_inputs(&plaintext, &[[7u8; 32]], &options)
+            .expect_err("chunk budget must be bounded");
+        assert!(matches!(
+            err,
+            ArchiveError::InvalidInput("total chunks exceeds archive build limit")
+        ));
+    }
+
+    #[test]
+    fn build_rejects_excess_recipients_before_key_agreement() {
+        let recipients = vec![[7u8; 32]; MAX_ARCHIVE_RECIPIENTS + 1];
+        let err = validate_inputs(b"payload", &recipients, &ArchiveOptions::default())
+            .expect_err("recipient budget must be bounded");
+        assert!(matches!(
+            err,
+            ArchiveError::InvalidInput("too many recipients")
+        ));
+    }
 }

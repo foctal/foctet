@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand_core::OsRng;
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -62,7 +63,7 @@ impl Eq for IdentityKeyPair {}
 impl IdentityKeyPair {
     /// Generates a fresh Ed25519 identity key pair.
     pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
         Self::from_secret_key_bytes(signing_key.to_bytes())
     }
 
@@ -122,25 +123,32 @@ impl HandshakeSigner for IdentityKeyPair {
 /// channel substitute for Foctet identity authentication.
 ///
 /// The binding is **not** secret; it is authenticated context, not key
-/// material. An empty binding is treated as "no binding" and leaves the
-/// transcript byte-identical to a handshake configured without one.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// material.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChannelBinding(Vec<u8>);
+
+/// Maximum outer-channel binding length accepted by a session.
+pub const MAX_CHANNEL_BINDING_LEN: usize = 1024;
 
 impl ChannelBinding {
     /// Creates a channel binding from the outer channel's binding bytes.
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        Self(bytes.into())
+    ///
+    /// Empty bindings are rejected because they provide no authentication, and
+    /// oversized bindings are rejected before copying or hashing them.
+    pub fn new(bytes: impl AsRef<[u8]>) -> Result<Self, CoreError> {
+        let bytes = bytes.as_ref();
+        if bytes.is_empty() {
+            return Err(CoreError::InvalidChannelBinding);
+        }
+        if bytes.len() > MAX_CHANNEL_BINDING_LEN {
+            return Err(CoreError::ChannelBindingTooLarge);
+        }
+        Ok(Self(bytes.to_vec()))
     }
 
     /// Returns the binding bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
-    }
-
-    /// Returns whether the binding carries no bytes (treated as "no binding").
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 }
 
@@ -239,7 +247,7 @@ impl HandshakeAuth {
 /// for example inside an already-authenticated outer channel such as mutually
 /// authenticated TLS, or in tests — you must explicitly opt in with
 /// [`SessionAuthConfig::unauthenticated_for_testing`] (or
-/// [`SessionAuthConfig::allow_unauthenticated`]). This makes the active
+/// [`SessionAuthConfig::dangerously_allow_unauthenticated`]). This makes the active
 /// man-in-the-middle exposure of an unauthenticated ephemeral handshake an
 /// explicit, auditable choice rather than a silent default.
 #[derive(Clone, Default)]
@@ -249,6 +257,61 @@ pub struct SessionAuthConfig {
     require_peer_authentication: bool,
     allow_unauthenticated: bool,
     channel_binding: Option<ChannelBinding>,
+}
+
+/// Authentication configuration accepted by production handshake constructors.
+///
+/// This type can only be built with a pinned Foctet identity or a non-empty,
+/// bounded authenticated-channel binding. The explicitly unauthenticated test
+/// configuration cannot be converted into this type.
+///
+/// ```compile_fail
+/// use foctet_core::{ProductionSessionAuth, SessionAuthConfig};
+///
+/// let test_only = SessionAuthConfig::unauthenticated_for_testing();
+/// let production: ProductionSessionAuth = test_only.into();
+/// # let _ = production;
+/// ```
+#[derive(Clone, Debug)]
+pub struct ProductionSessionAuth(SessionAuthConfig);
+
+impl ProductionSessionAuth {
+    /// Requires mutual Foctet identity authentication with an in-process key.
+    pub fn pinned_identity(local: IdentityKeyPair, peer: PeerIdentity) -> Self {
+        Self(
+            SessionAuthConfig::new()
+                .with_local_identity(local)
+                .with_peer_identity(peer)
+                .require_peer_authentication(true),
+        )
+    }
+
+    /// Requires mutual Foctet identity authentication with an external signer.
+    pub fn pinned_signer<S: HandshakeSigner + 'static>(local: S, peer: PeerIdentity) -> Self {
+        Self(
+            SessionAuthConfig::new()
+                .with_local_signer(local)
+                .with_peer_identity(peer)
+                .require_peer_authentication(true),
+        )
+    }
+
+    /// Authenticates the handshake through a trusted outer-channel binding.
+    pub fn authenticated_channel(binding: ChannelBinding) -> Self {
+        Self(SessionAuthConfig::bound_to_channel(binding))
+    }
+
+    /// Additionally binds an identity-authenticated handshake to an outer channel.
+    #[must_use]
+    pub fn with_channel_binding(mut self, binding: ChannelBinding) -> Self {
+        self.0 = self.0.with_channel_binding(binding);
+        self
+    }
+
+    /// Converts into the lower-level session authentication configuration.
+    pub fn into_session_auth(self) -> SessionAuthConfig {
+        self.0
+    }
 }
 
 impl core::fmt::Debug for SessionAuthConfig {
@@ -275,7 +338,7 @@ impl SessionAuthConfig {
     /// Creates an empty, fail-closed authentication configuration.
     ///
     /// Without a pinned [`PeerIdentity`] or an explicit
-    /// [`SessionAuthConfig::allow_unauthenticated`] opt-in, the handshake will
+    /// [`SessionAuthConfig::dangerously_allow_unauthenticated`] opt-in, the handshake will
     /// reject a peer that does not authenticate.
     pub fn new() -> Self {
         Self::default()
@@ -335,8 +398,7 @@ impl SessionAuthConfig {
     /// Binds the handshake transcript to an outer-channel [`ChannelBinding`].
     ///
     /// Additive to any identity configuration: both peers must supply the same
-    /// binding or the handshake fails. An empty binding leaves the transcript
-    /// byte-identical to a handshake configured without one.
+    /// binding or the handshake fails.
     pub fn with_channel_binding(mut self, binding: ChannelBinding) -> Self {
         self.channel_binding = Some(binding);
         self
@@ -359,7 +421,7 @@ impl SessionAuthConfig {
     /// See [`SessionAuthConfig::unauthenticated_for_testing`] for the safety
     /// implications. This is ignored when peer authentication is required or a
     /// peer identity is pinned (those always demand authentication).
-    pub fn allow_unauthenticated(mut self, allow: bool) -> Self {
+    pub fn dangerously_allow_unauthenticated(mut self, allow: bool) -> Self {
         self.allow_unauthenticated = allow;
         self
     }
@@ -390,7 +452,7 @@ impl SessionAuthConfig {
     }
 
     /// Returns the configured outer-channel binding bytes, or an empty slice
-    /// when none is set. An empty binding leaves the transcript unchanged.
+    /// when none is set.
     pub fn channel_binding_bytes(&self) -> &[u8] {
         match &self.channel_binding {
             Some(binding) => binding.as_bytes(),
@@ -433,5 +495,25 @@ mod tests {
         assert_eq!(*exposed, secret);
         // Rebuilding from the exposed bytes yields the same identity.
         assert_eq!(IdentityKeyPair::from_secret_key_bytes(*exposed), identity);
+    }
+
+    #[test]
+    fn channel_binding_rejects_empty_and_oversized_inputs_before_copying() {
+        assert!(matches!(
+            ChannelBinding::new([]),
+            Err(CoreError::InvalidChannelBinding)
+        ));
+        let oversized = [0xA5; MAX_CHANNEL_BINDING_LEN + 1];
+        assert!(matches!(
+            ChannelBinding::new(oversized),
+            Err(CoreError::ChannelBindingTooLarge)
+        ));
+        let maximum = [0x5A; MAX_CHANNEL_BINDING_LEN];
+        assert_eq!(
+            ChannelBinding::new(maximum)
+                .expect("maximum channel binding")
+                .as_bytes(),
+            maximum
+        );
     }
 }

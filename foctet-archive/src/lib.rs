@@ -26,6 +26,10 @@
 //!   tests only. Production archive creation should keep the default randomized
 //!   builders so archive identifiers, DEKs, and wrapping ephemeral keys remain
 //!   unique per build.
+//! - The current byte-vector builders are deliberately capped at
+//!   [`MAX_IN_MEMORY_PLAINTEXT_BYTES`]. They are not a general large-file
+//!   streaming API; callers needing larger files must split at an application
+//!   boundary or wait for an authenticated streaming archive format.
 
 mod build;
 mod codec;
@@ -37,7 +41,10 @@ mod split;
 mod types;
 
 pub use error::ArchiveError;
-pub use limits::ArchiveLimits;
+pub use limits::{
+    ArchiveLimits, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_PART_CHUNKS, MAX_ARCHIVE_PARTS,
+    MAX_ARCHIVE_RECIPIENTS,
+};
 pub use single::{
     create_archive_from_bytes, create_archive_from_bytes_with_secrets, decrypt_archive_to_bytes,
     decrypt_archive_to_bytes_with_limits,
@@ -48,13 +55,14 @@ pub use split::{
 };
 pub use types::{
     ARCHIVE_MAGIC, ArchiveBuildResult, ArchiveBuildSecrets, ArchiveOptions, DEFAULT_CHUNK_SIZE,
-    EncryptedHeader, FileManifest, MANIFEST_MAGIC, PART_MAGIC,
+    EncryptedHeader, FileManifest, MANIFEST_MAGIC, MAX_IN_MEMORY_PLAINTEXT_BYTES, PART_MAGIC,
     PROFILE_X25519_HKDF_XCHACHA20POLY1305, SplitArchive, WIRE_VERSION_V0, WrappedDek,
 };
 
 #[cfg(test)]
 mod tests {
-    use rand_core::{OsRng, RngCore};
+    use getrandom::SysRng;
+    use rand_core::{TryRng, UnwrapErr};
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::*;
@@ -62,11 +70,13 @@ mod tests {
 
     #[test]
     fn wrap_and_unwrap_dek_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let mut dek = [0u8; 32];
-        OsRng.fill_bytes(&mut dek);
+        SysRng
+            .try_fill_bytes(&mut dek)
+            .expect("OS random number generator is unavailable");
 
         let wrapped = wrap_dek(&dek, recipient_pub).expect("wrap");
         let unwrapped =
@@ -75,8 +85,23 @@ mod tests {
     }
 
     #[test]
+    fn wrapping_rejects_low_order_recipient_public_keys() {
+        let dek = [0xA5; 32];
+        for recipient_public in [[0u8; 32], {
+            let mut low_order = [0u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert!(matches!(
+                wrap_dek(&dek, recipient_public),
+                Err(ArchiveError::InvalidRecipientKey)
+            ));
+        }
+    }
+
+    #[test]
     fn archive_encrypt_decrypt_roundtrip() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let payload = vec![0xAB; 2 * 1024 * 1024 + 17];
@@ -98,7 +123,7 @@ mod tests {
 
     #[test]
     fn split_archive_roundtrip_with_reordered_parts() {
-        let recipient_priv = StaticSecret::random_from_rng(OsRng);
+        let recipient_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();
 
         let payload = vec![0xCD; 3 * 1024 * 1024 + 333];

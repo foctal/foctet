@@ -23,20 +23,35 @@
 //!
 //! # Handshake Example
 //!
-//! ```rust,ignore
+//! ```rust
 //! use foctet_core::{
-//!     IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
+//!     IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig, SessionState,
 //! };
 //!
-//! let auth = SessionAuthConfig::new()
-//!     .with_local_identity(IdentityKeyPair::generate())
-//!     .with_peer_identity(PeerIdentity::new(peer_identity_public_key))
+//! let client_identity = IdentityKeyPair::from_secret_key_bytes([0x11; 32]);
+//! let server_identity = IdentityKeyPair::from_secret_key_bytes([0x22; 32]);
+//! let client_auth = SessionAuthConfig::new()
+//!     .with_local_identity(client_identity.clone())
+//!     .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
+//!     .require_peer_authentication(true);
+//! let server_auth = SessionAuthConfig::new()
+//!     .with_local_identity(server_identity)
+//!     .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
 //!     .require_peer_authentication(true);
 //!
-//! let mut initiator = Session::new_initiator_with_auth(RekeyThresholds::default(), auth);
-//! let client_hello = initiator.start_handshake()?;
-//! # let _ = client_hello;
-//! # Ok::<(), foctet_core::CoreError>(())
+//! let (mut initiator, client_hello) =
+//!     Session::new_initiator_with_auth(RekeyThresholds::default(), client_auth);
+//! let mut responder =
+//!     Session::new_responder_with_auth(RekeyThresholds::default(), server_auth);
+//! let server_hello = responder
+//!     .handle_control(&client_hello)
+//!     .expect("authenticated client hello")
+//!     .expect("server hello");
+//! initiator
+//!     .handle_control(&server_hello)
+//!     .expect("authenticated server hello");
+//! assert_eq!(initiator.state(), SessionState::Active);
+//! assert_eq!(responder.state(), SessionState::Active);
 //! ```
 
 /// Handshake authentication helpers and identity-key types.
@@ -77,7 +92,8 @@ pub mod storage;
 
 pub use auth::{
     AuthenticatedPeer, ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth,
-    HandshakeSigner, IdentityKeyPair, PeerIdentity, SessionAuthConfig,
+    HandshakeSigner, IdentityKeyPair, MAX_CHANNEL_BINDING_LEN, PeerIdentity, ProductionSessionAuth,
+    SessionAuthConfig,
 };
 pub use body::{
     BODY_MAGIC, BODY_PROFILE_V0, BODY_VERSION_V0, BodyEnvelopeError, BodyEnvelopeLimits, open_body,
@@ -93,7 +109,7 @@ pub use control::{ControlMessage, ControlMessageKind, MAX_CONTROL_MESSAGE_LEN};
 pub use crypto::{
     Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
     derive_ratchet_root, derive_traffic_keys, dh_ratchet_step, encrypt_frame, make_nonce,
-    random_session_salt,
+    random_session_salt, x25519_shared_secret,
 };
 pub use datagram::{
     DATAGRAM_FRAME_OVERHEAD, DEFAULT_MAX_DATAGRAM_SIZE, DatagramConfig, DatagramEndpoint,
@@ -105,25 +121,41 @@ pub use frame::{
 };
 pub use limits::{
     DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_MAX_BUFFERED_TX_BYTES, DEFAULT_MAX_CIPHERTEXT_LEN,
-    DEFAULT_MAX_PLAINTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS, ProtocolLimits,
+    DEFAULT_MAX_OUTBOUND_STREAMS, DEFAULT_MAX_PLAINTEXT_LEN, DEFAULT_MAX_RETAINED_KEYS,
+    MAX_OUTBOUND_STREAMS, MAX_RETAINED_KEYS, ProtocolLimits,
 };
 pub use message::{
     DEFAULT_MAX_MESSAGE_SIZE, DecodedMessage, MESSAGE_FRAME_OVERHEAD, MessageConfig,
     MessageEndpoint,
 };
-pub use observe::{SessionEvent, SessionObserver};
+pub use observe::{SecurityMetric, SessionEvent, SessionObserver};
 pub use payload::{Tlv, decode_tlvs, encode_tlvs, tlv_type};
 pub use replay::{
-    DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector, ReplayWindow,
+    DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, MAX_REPLAY_WINDOW, MAX_REPLAY_WINDOWS,
+    ReplayProtector, ReplayWindow,
 };
 pub use secure_channel::{AsyncSecureChannel, SecureChannel};
-pub use session::{HandshakeRole, RekeyThresholds, Session, SessionState};
+pub use session::{
+    DatagramEndpointKeyLease, HandshakeRole, MessageEndpointKeyLease, PreparedRekey,
+    RekeyThresholds, Session, SessionState,
+};
 pub use storage::{
     StorageRecord, open_storage_record, open_storage_record_with_limits, seal_storage_record,
     seal_storage_record_with_limits,
 };
 
 use thiserror::Error;
+
+/// Required action after a [`CoreError`] on a stateful protocol endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoreErrorDisposition {
+    /// The operation was rejected before state changed; the endpoint may be
+    /// used again with corrected input or after backpressure is relieved.
+    Recoverable,
+    /// The endpoint/session must be discarded and a fresh authenticated
+    /// session established. Continuing could conceal state divergence.
+    Terminal,
+}
 
 /// Core protocol error type.
 #[derive(Debug, Error)]
@@ -181,6 +213,10 @@ pub enum CoreError {
     /// peers; only the side whose turn it is may initiate the next rekey).
     #[error("rekey not permitted: it is the peer's turn to ratchet")]
     RekeyNotPermitted,
+    /// A prepared rekey must be resumed, committed, or safely cancelled before
+    /// other channel operations can proceed.
+    #[error("rekey transaction is already in progress")]
+    RekeyInProgress,
     /// Session/shared secret is not available.
     #[error("missing session secret")]
     MissingSessionSecret,
@@ -199,6 +235,9 @@ pub enum CoreError {
     /// Too many distinct `(key_id, stream_id)` replay windows are being tracked.
     #[error("replay window capacity exceeded")]
     ReplayCapacityExceeded,
+    /// Too many distinct outbound stream IDs are being tracked.
+    #[error("outbound stream capacity exceeded")]
+    OutboundStreamCapacityExceeded,
     /// Frame exceeds configured size limits.
     #[error("frame exceeds configured limit")]
     FrameTooLarge,
@@ -206,12 +245,20 @@ pub enum CoreError {
     /// underlying I/O drained it; flush pending frames and retry.
     #[error("outbound buffer limit exceeded")]
     OutboundBufferLimitExceeded,
+    /// A fallible allocation was rejected before outbound delivery began.
+    #[error("resource allocation failed before delivery")]
+    ResourceExhausted,
     /// Unexpected EOF while reading/writing frame bytes.
     #[error("unexpected eof")]
     UnexpectedEof,
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The transport entered a terminal state after an ambiguous outbound I/O
+    /// failure. It must not be reused because the peer may have received a
+    /// frame whose delivery outcome cannot be determined locally.
+    #[error("transport is terminal after an ambiguous outbound send failure")]
+    TransportTerminal,
     /// X25519 produced a forbidden all-zero shared secret.
     #[error("invalid shared secret")]
     InvalidSharedSecret,
@@ -230,6 +277,12 @@ pub enum CoreError {
     /// Peer identity did not match the pinned expectation.
     #[error("peer identity mismatch")]
     PeerIdentityMismatch,
+    /// An authenticated outer-channel binding was empty.
+    #[error("channel binding must not be empty")]
+    InvalidChannelBinding,
+    /// An authenticated outer-channel binding exceeded its fixed resource limit.
+    #[error("channel binding exceeds configured limit")]
+    ChannelBindingTooLarge,
     /// The handshake did not complete within the configured deadline.
     #[error("handshake timed out")]
     HandshakeTimeout,
@@ -237,4 +290,129 @@ pub enum CoreError {
     /// (rate limiting); retry later or drop the connection.
     #[error("handshake rate limited")]
     HandshakeRateLimited,
+    /// The configured concurrent handshake/session admission cap was reached.
+    #[error("handshake concurrency limit reached")]
+    HandshakeConcurrencyLimited,
+    /// A nonce-owning endpoint of this shape was already created for the session.
+    #[error("session endpoint nonce domain already claimed")]
+    EndpointAlreadyClaimed,
+}
+
+impl CoreError {
+    /// Returns a low-cardinality, secret-free metric category when this error
+    /// represents an operational security signal.
+    pub const fn security_metric(&self) -> Option<SecurityMetric> {
+        match self {
+            Self::Aead => Some(SecurityMetric::AeadFailure),
+            Self::Replay | Self::ReplayWindowExceeded => Some(SecurityMetric::ReplayRejected),
+            Self::TlvTooLarge
+            | Self::ReplayCapacityExceeded
+            | Self::OutboundStreamCapacityExceeded
+            | Self::FrameTooLarge
+            | Self::OutboundBufferLimitExceeded
+            | Self::ResourceExhausted
+            | Self::ChannelBindingTooLarge
+            | Self::HandshakeRateLimited
+            | Self::HandshakeConcurrencyLimited => Some(SecurityMetric::LimitHit),
+            Self::TransportTerminal => Some(SecurityMetric::AmbiguousSend),
+            Self::MissingPeerAuthentication
+            | Self::InvalidPeerAuthentication
+            | Self::PeerIdentityMismatch
+            | Self::HandshakeTimeout => Some(SecurityMetric::HandshakeFailed),
+            _ => None,
+        }
+    }
+
+    /// Classifies whether a stateful endpoint may safely continue after this
+    /// error. Stateless helpers may surface the same errors without retaining
+    /// protocol state; callers of those helpers should apply their own scope.
+    pub const fn disposition(&self) -> CoreErrorDisposition {
+        match self {
+            Self::FrameTooLarge
+            | Self::OutboundBufferLimitExceeded
+            | Self::ResourceExhausted
+            | Self::TlvTooLarge
+            | Self::RekeyInProgress
+            | Self::InvalidChannelBinding
+            | Self::ChannelBindingTooLarge
+            | Self::OutboundStreamCapacityExceeded
+            | Self::HandshakeRateLimited
+            | Self::HandshakeConcurrencyLimited
+            | Self::EndpointAlreadyClaimed => CoreErrorDisposition::Recoverable,
+            Self::InvalidHeaderLength(_)
+            | Self::InvalidMagic
+            | Self::UnsupportedVersion(_)
+            | Self::UnsupportedProfile(_)
+            | Self::UnknownFlags(_)
+            | Self::CiphertextLengthMismatch { .. }
+            | Self::Aead
+            | Self::Hkdf
+            | Self::InvalidKeyLength
+            | Self::UnexpectedKeyId { .. }
+            | Self::InvalidControlMessage
+            | Self::UnexpectedControlMessage
+            | Self::InvalidSessionState
+            | Self::RekeyNotPermitted
+            | Self::MissingSessionSecret
+            | Self::InvalidTlv
+            | Self::Replay
+            | Self::ReplayWindowExceeded
+            | Self::ReplayCapacityExceeded
+            | Self::UnexpectedEof
+            | Self::Io(_)
+            | Self::TransportTerminal
+            | Self::InvalidSharedSecret
+            | Self::SequenceExhausted
+            | Self::KeyIdExhausted
+            | Self::MissingPeerAuthentication
+            | Self::InvalidPeerAuthentication
+            | Self::PeerIdentityMismatch
+            | Self::HandshakeTimeout => CoreErrorDisposition::Terminal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_disposition_tests {
+    use super::{CoreError, CoreErrorDisposition, SecurityMetric};
+
+    #[test]
+    fn classifies_backpressure_as_recoverable_and_protocol_failures_as_terminal() {
+        assert_eq!(
+            CoreError::OutboundBufferLimitExceeded.disposition(),
+            CoreErrorDisposition::Recoverable
+        );
+        assert_eq!(
+            CoreError::RekeyInProgress.disposition(),
+            CoreErrorDisposition::Recoverable
+        );
+        assert_eq!(
+            CoreError::ResourceExhausted.disposition(),
+            CoreErrorDisposition::Recoverable
+        );
+        assert_eq!(
+            CoreError::Aead.disposition(),
+            CoreErrorDisposition::Terminal
+        );
+        assert_eq!(
+            CoreError::SequenceExhausted.disposition(),
+            CoreErrorDisposition::Terminal
+        );
+    }
+
+    #[test]
+    fn security_metrics_are_stable_and_low_cardinality() {
+        assert_eq!(
+            CoreError::Aead.security_metric(),
+            Some(SecurityMetric::AeadFailure)
+        );
+        assert_eq!(
+            CoreError::TransportTerminal.security_metric(),
+            Some(SecurityMetric::AmbiguousSend)
+        );
+        assert_eq!(
+            SecurityMetric::AmbiguousSend.as_str(),
+            "foctet.send.ambiguous"
+        );
+    }
 }

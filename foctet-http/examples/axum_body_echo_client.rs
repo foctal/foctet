@@ -131,6 +131,7 @@ async fn main() {
     let decrypted_response = opener
         .open_response_with_context(
             response_builder.body(body).expect("build response"),
+            request_message_id,
             unix_now_secs(),
             DEFAULT_MAX_CLOCK_SKEW_SECS,
         )

@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::{
     AsyncReplayStore, BODY_ONLY_SCOPE, CONTENT_TYPE, ContextBinding, ContextCarrier, HttpError,
-    HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayCheck, ReplayStore,
-    ReplayStoreError, SCOPE_HEADER,
+    HttpErrorDisposition, HttpOpenOptions, HttpOpener, HttpSealOptions, HttpSealer, ReplayCheck,
+    ReplayStore, ReplayStoreError, SCOPE_HEADER,
 };
 
 /// Durable Object path used by [`DurableObjectReplayStore`] and
@@ -181,6 +181,18 @@ pub enum WorkersError {
 }
 
 impl WorkersError {
+    /// Classifies the required handling of this request-scoped adapter error.
+    ///
+    /// A Workers runtime failure has an unknown request-delivery outcome. Do
+    /// not retry the same protected payload; create a new request only under
+    /// application idempotency policy.
+    pub const fn disposition(&self) -> HttpErrorDisposition {
+        match self {
+            Self::Worker(_) => HttpErrorDisposition::Reject,
+            Self::Http(error) => error.disposition(),
+        }
+    }
+
     /// Maps this error to the HTTP status code a Worker should return.
     ///
     /// The mapping mirrors the axum adapter (`AxumError::into_response`) so both
@@ -198,9 +210,12 @@ impl WorkersError {
                 | HttpError::InvalidContentType
                 | HttpError::MissingContext(_)
                 | HttpError::InvalidContext(_)
+                | HttpError::DuplicateContext(_)
+                | HttpError::ResponseRequestMismatch
                 | HttpError::ContextTimestampInFuture
                 | HttpError::StreamIncomplete,
             ) => 400,
+            WorkersError::Http(HttpError::LimitExceeded(_)) => 413,
             WorkersError::Http(HttpError::ContextExpired | HttpError::OpenFailed(_)) => 401,
             WorkersError::Http(HttpError::Replayed) => 409,
             WorkersError::Http(HttpError::SealFailed(_) | HttpError::ReplayStore(_)) => 500,
@@ -253,6 +268,7 @@ impl WorkersOpener {
     ///
     /// Body-only; no replay protection or HTTP-context binding. Prefer
     /// [`WorkersOpener::open_request_with_context`] for production.
+    #[cfg(feature = "dangerous-stateless-http")]
     #[deprecated(
         since = "0.3.0",
         note = "stateless full-request protection has no replay defense or HTTP-context \
@@ -275,8 +291,9 @@ impl WorkersOpener {
     /// context, freshness, and single use against `store`.
     ///
     /// This is the recommended path for production Workers deployments: pair
-    /// it with a durable [`AsyncReplayStore`] (e.g. Cloudflare KV) when more
-    /// than one Worker instance may see the same request.
+    /// it with an atomic durable [`AsyncReplayStore`] when more than one Worker
+    /// instance may see the same request. Cloudflare KV is not a valid replay
+    /// backend because its check and write cannot be atomic.
     pub async fn open_request_with_context<S>(
         &self,
         mut request: worker::Request,
@@ -296,8 +313,9 @@ impl WorkersOpener {
             .map_err(WorkersError::Http)
     }
 
-    /// Opens an encrypted Workers request using a durable [`AsyncReplayStore`]
-    /// (Cloudflare KV, a Durable Object, or any other shared backend).
+    /// Opens an encrypted Workers request using an atomic durable
+    /// [`AsyncReplayStore`] (normally [`DurableObjectReplayStore`]). Cloudflare
+    /// KV alone does not satisfy the replay-store contract.
     pub async fn open_request_with_async_store<S>(
         &self,
         mut request: worker::Request,
@@ -394,6 +412,7 @@ pub async fn open_worker_request_body_with_limits(
 }
 
 /// Opens an encrypted Workers request into metadata and plaintext body bytes.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -411,6 +430,7 @@ pub async fn open_worker_request(
 }
 
 /// Opens an encrypted Workers request into metadata and plaintext bytes with explicit limits.
+#[cfg(feature = "dangerous-stateless-http")]
 #[deprecated(
     since = "0.3.0",
     note = "stateless full-request protection has no replay defense or HTTP-context binding \
@@ -438,6 +458,7 @@ pub fn seal_worker_response_body(
         .seal_response_body(plaintext)
 }
 
+#[cfg(feature = "dangerous-stateless-http")]
 fn extract_worker_request_metadata(
     request: &worker::Request,
 ) -> Result<WorkerRequestMetadata, WorkersError> {

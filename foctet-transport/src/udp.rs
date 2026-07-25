@@ -49,6 +49,69 @@ struct AmplificationLimiter {
     validated: AtomicBool,
 }
 
+struct AmplificationReservation {
+    limiter: Arc<AmplificationLimiter>,
+    bytes: u64,
+    committed: bool,
+}
+
+impl AmplificationReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AmplificationReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.limiter.sent.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
+}
+
+impl AmplificationLimiter {
+    /// Atomically reserves an unvalidated send budget across transport clones.
+    ///
+    /// The returned guard releases the reservation if the send fails or its
+    /// future is cancelled. Once the peer is validated no reservation is needed.
+    fn reserve_send(
+        self: &Arc<Self>,
+        bytes: u64,
+    ) -> std::io::Result<Option<AmplificationReservation>> {
+        loop {
+            if self.validated.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+
+            let budget = self
+                .received
+                .load(Ordering::Acquire)
+                .saturating_mul(self.factor);
+            let sent = self.sent.load(Ordering::Acquire);
+            let projected = sent.saturating_add(bytes);
+            if projected > budget {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "anti-amplification limit reached: cannot send more until the peer is \
+                     validated or has sent more",
+                ));
+            }
+
+            if self
+                .sent
+                .compare_exchange_weak(sent, projected, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(Some(AmplificationReservation {
+                    limiter: self.clone(),
+                    bytes,
+                    committed: false,
+                }));
+            }
+        }
+    }
+}
+
 /// [`DatagramTransport`] over a connected `tokio::net::UdpSocket`.
 #[derive(Clone, Debug)]
 pub struct UdpDatagramTransport {
@@ -63,15 +126,26 @@ impl UdpDatagramTransport {
     /// Internet paths without path-MTU discovery).
     ///
     /// The socket must already be connected to the single intended peer (see
-    /// the module docs); this constructor does not call `connect` for you.
+    /// the module docs); an unconnected socket is rejected.
     /// Anti-amplification is **off** by default; opt in with
     /// [`UdpDatagramTransport::with_anti_amplification`].
-    pub fn new(socket: UdpSocket) -> Self {
-        Self {
+    pub fn new(socket: UdpSocket) -> std::io::Result<Self> {
+        socket.peer_addr()?;
+        Ok(Self {
             socket: Arc::new(socket),
             max_datagram_size: DEFAULT_MAX_DATAGRAM_SIZE,
             limiter: None,
-        }
+        })
+    }
+
+    /// Wraps a connected socket for an address that has not yet been validated.
+    ///
+    /// This is the safe server/listener constructor: the standard 3x
+    /// anti-amplification budget is mandatory until
+    /// [`Self::mark_peer_validated`] is called.
+    pub fn new_unvalidated_peer(socket: UdpSocket) -> std::io::Result<Self> {
+        Self::new(socket)
+            .map(|transport| transport.with_anti_amplification(DEFAULT_AMPLIFICATION_FACTOR))
     }
 
     /// Overrides the reported max datagram size, e.g. after path-MTU
@@ -130,39 +204,49 @@ impl DatagramTransport for UdpDatagramTransport {
     type Error = std::io::Error;
 
     async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
-        if let Some(limiter) = &self.limiter
-            && !limiter.validated.load(Ordering::Acquire)
-        {
-            let budget = limiter
-                .received
-                .load(Ordering::Acquire)
-                .saturating_mul(limiter.factor);
-            let projected = limiter
-                .sent
-                .load(Ordering::Acquire)
-                .saturating_add(datagram.len() as u64);
-            if projected > budget {
+        if datagram.len() > self.max_datagram_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "datagram exceeds configured path maximum",
+            ));
+        }
+        let datagram_len = datagram.len() as u64;
+        let reservation = match &self.limiter {
+            Some(limiter) => limiter.reserve_send(datagram_len)?,
+            None => None,
+        };
+
+        match self.socket.send(&datagram).await {
+            Ok(sent) if sent == datagram.len() => {}
+            Ok(_) => {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "anti-amplification limit reached: cannot send more until the peer is \
-                     validated or has sent more",
+                    std::io::ErrorKind::WriteZero,
+                    "UDP socket accepted only part of a datagram",
                 ));
             }
+            Err(error) => return Err(error),
         }
 
-        self.socket.send(&datagram).await?;
-
-        if let Some(limiter) = &self.limiter {
-            limiter
-                .sent
-                .fetch_add(datagram.len() as u64, Ordering::AcqRel);
+        match reservation {
+            Some(reservation) => reservation.commit(),
+            None => {
+                if let Some(limiter) = &self.limiter {
+                    limiter.sent.fetch_add(datagram_len, Ordering::AcqRel);
+                }
+            }
         }
         Ok(())
     }
 
     async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
-        let mut buf = vec![0u8; self.max_datagram_size];
+        let mut buf = vec![0u8; self.max_datagram_size.saturating_add(1)];
         let n = self.socket.recv(&mut buf).await?;
+        if n > self.max_datagram_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "received datagram exceeds configured path maximum",
+            ));
+        }
         buf.truncate(n);
         if let Some(limiter) = &self.limiter {
             limiter.received.fetch_add(n as u64, Ordering::AcqRel);
@@ -179,7 +263,7 @@ impl DatagramTransport for UdpDatagramTransport {
 mod tests {
     use super::*;
     use crate::SecureDatagramChannel;
-    use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
+    use foctet_core::{DatagramEndpoint, RekeyThresholds, Session, SessionAuthConfig};
 
     async fn connected_pair() -> (UdpSocket, UdpSocket) {
         let a = UdpSocket::bind("127.0.0.1:0").await.expect("bind a");
@@ -221,12 +305,12 @@ mod tests {
         // Directions mirror the QUIC datagram adapter test: each side seals
         // with its own outbound direction and opens with the peer's.
         let mut channel_a = SecureDatagramChannel::from_active_session(
-            UdpDatagramTransport::new(sock_a),
+            UdpDatagramTransport::new(sock_a).expect("connected"),
             &session_a,
         )
         .expect("channel a");
         let mut channel_b = SecureDatagramChannel::from_active_session(
-            UdpDatagramTransport::new(sock_b),
+            UdpDatagramTransport::new(sock_b).expect("connected"),
             &session_b,
         )
         .expect("channel b");
@@ -243,7 +327,9 @@ mod tests {
     #[tokio::test]
     async fn max_datagram_size_override_is_reported() {
         let (sock_a, _sock_b) = connected_pair().await;
-        let transport = UdpDatagramTransport::new(sock_a).with_max_datagram_size(500);
+        let transport = UdpDatagramTransport::new(sock_a)
+            .expect("connected")
+            .with_max_datagram_size(500);
         assert_eq!(transport.max_datagram_size(), Some(500));
     }
 
@@ -253,8 +339,8 @@ mod tests {
 
         let (sock_a, sock_b) = connected_pair().await;
         // `a` is the responder enforcing a 3x anti-amplification budget.
-        let a = UdpDatagramTransport::new(sock_a).with_anti_amplification(3);
-        let b = UdpDatagramTransport::new(sock_b);
+        let a = UdpDatagramTransport::new_unvalidated_peer(sock_a).expect("connected");
+        let b = UdpDatagramTransport::new(sock_b).expect("connected");
         assert!(!a.is_peer_validated());
 
         // With nothing received yet, the budget is zero: any send is refused.
@@ -280,11 +366,160 @@ mod tests {
             .expect_err("over budget must be blocked");
         assert_eq!(err.kind(), ErrorKind::WouldBlock);
 
-        // Once the peer is validated the limit no longer applies.
+        // Once the peer is validated the amplification limit no longer applies;
+        // the configured path-size limit still does.
         a.mark_peer_validated();
         assert!(a.is_peer_validated());
-        a.send_datagram(vec![0u8; 4096])
+        a.send_datagram(vec![0u8; 1000])
             .await
-            .expect("validated peer is unlimited");
+            .expect("validated peer may use the full path limit");
+    }
+
+    #[test]
+    fn anti_amplification_reservation_is_atomic_across_clones() {
+        let limiter = Arc::new(AmplificationLimiter {
+            factor: 1,
+            received: AtomicU64::new(100),
+            sent: AtomicU64::new(0),
+            validated: AtomicBool::new(false),
+        });
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let limiter = limiter.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    limiter.reserve_send(100).ok().flatten()
+                })
+            })
+            .collect();
+
+        let reservations: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("reservation worker"))
+            .flatten()
+            .collect();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(limiter.sent.load(Ordering::Acquire), 100);
+        drop(reservations);
+        assert_eq!(limiter.sent.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_unconnected_socket() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        assert!(UdpDatagramTransport::new(socket).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_send_and_receive() {
+        let (sock_a, sock_b) = connected_pair().await;
+        let a = UdpDatagramTransport::new(sock_a)
+            .expect("connected")
+            .with_max_datagram_size(64);
+        assert_eq!(
+            a.send_datagram(vec![0u8; 65])
+                .await
+                .expect_err("oversized send")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+
+        sock_b.send(&[0u8; 65]).await.expect("peer sends");
+        assert_eq!(
+            a.recv_datagram()
+                .await
+                .expect_err("oversized receive")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_socket_ignores_spoofed_source() {
+        let (sock_a, sock_b) = connected_pair().await;
+        let attacker = UdpSocket::bind("127.0.0.1:0").await.expect("attacker bind");
+        let target = sock_a.local_addr().expect("target");
+        attacker
+            .send_to(b"spoofed", target)
+            .await
+            .expect("spoof send");
+        sock_b.send(b"peer").await.expect("peer send");
+
+        let a = UdpDatagramTransport::new(sock_a).expect("connected");
+        assert_eq!(a.recv_datagram().await.expect("receive"), b"peer");
+    }
+
+    #[tokio::test]
+    async fn real_socket_tolerates_loss_reordering_and_rekey_races() {
+        let (mut initiator, mut responder) = session_pair();
+        let mut sender = DatagramEndpoint::from_session_lease(
+            initiator.claim_datagram_endpoint().expect("sender lease"),
+        );
+        let mut receiver = DatagramEndpoint::from_session_lease(
+            responder.claim_datagram_endpoint().expect("receiver lease"),
+        );
+        let (sock_a, sock_b) = connected_pair().await;
+        let a = UdpDatagramTransport::new(sock_a).expect("connected");
+        let b = UdpDatagramTransport::new(sock_b).expect("connected");
+
+        let first = sender.seal(7, 0, b"first").expect("seal first");
+        let second = sender.seal(7, 0, b"second").expect("seal second");
+        a.send_datagram(second).await.expect("send second first");
+        a.send_datagram(first).await.expect("send first second");
+        assert_eq!(
+            receiver
+                .open(&b.recv_datagram().await.expect("recv second"))
+                .expect("open second")
+                .plaintext,
+            b"second"
+        );
+        assert_eq!(
+            receiver
+                .open(&b.recv_datagram().await.expect("recv first"))
+                .expect("open first")
+                .plaintext,
+            b"first"
+        );
+
+        let _lost = sender.seal(7, 0, b"lost").expect("seal lost");
+        let after_loss = sender.seal(7, 0, b"after loss").expect("seal after loss");
+        a.send_datagram(after_loss).await.expect("send after loss");
+        assert_eq!(
+            receiver
+                .open(&b.recv_datagram().await.expect("recv after loss"))
+                .expect("open after loss")
+                .plaintext,
+            b"after loss"
+        );
+
+        let delayed_old = sender.seal(7, 0, b"old key delayed").expect("old frame");
+        let prepared = initiator.prepare_rekey().expect("prepare rekey");
+        responder
+            .handle_control(prepared.control_message())
+            .expect("responder applies rekey");
+        initiator.commit_rekey(prepared).expect("initiator commits");
+        sender.install_active_keys(initiator.active_keys().expect("sender keys"));
+        receiver.install_active_keys(responder.active_keys().expect("receiver keys"));
+        let new_key = sender.seal(7, 0, b"new key first").expect("new frame");
+        a.send_datagram(new_key).await.expect("send new");
+        a.send_datagram(delayed_old)
+            .await
+            .expect("send delayed old");
+        assert_eq!(
+            receiver
+                .open(&b.recv_datagram().await.expect("recv new"))
+                .expect("open new")
+                .plaintext,
+            b"new key first"
+        );
+        assert_eq!(
+            receiver
+                .open(&b.recv_datagram().await.expect("recv old"))
+                .expect("open retained old")
+                .plaintext,
+            b"old key delayed"
+        );
     }
 }

@@ -128,8 +128,12 @@ fn in_session_rekey_in_the_browser() {
     assert!(client.can_rekey());
     assert!(!server.can_rekey());
 
-    let Ok(rekey) = client.force_rekey() else {
-        panic!("client forceRekey failed");
+    let Ok(rekey) = client.prepare_rekey() else {
+        panic!("client prepareRekey failed");
+    };
+    assert_eq!(client.active_key_id(), Some(key_before));
+    let Ok(()) = client.commit_rekey() else {
+        panic!("client commitRekey failed");
     };
     let Ok(none) = server.handle_control_message(&rekey) else {
         panic!("server rekey handling failed");

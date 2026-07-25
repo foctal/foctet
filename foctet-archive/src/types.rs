@@ -10,6 +10,13 @@ pub const MANIFEST_MAGIC: [u8; 8] = *b"FOCTETMF";
 pub const PART_MAGIC: [u8; 8] = *b"FOCTETPT";
 /// Default plaintext chunk size used during archive build.
 pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+/// Maximum plaintext size accepted by the in-memory archive builders.
+///
+/// The current archive API materializes both plaintext and encrypted chunks in
+/// memory. Larger files require a future authenticated streaming archive API;
+/// accepting them here would make resource use and `u32` chunk-index nonce
+/// bounds unclear.
+pub const MAX_IN_MEMORY_PLAINTEXT_BYTES: usize = 512 * 1024 * 1024;
 
 /// Options controlling archive metadata and chunking behavior.
 #[derive(Clone, Debug, Archive, RkyvSerialize, RkyvDeserialize)]

@@ -150,11 +150,12 @@ pub fn open_storage_record_with_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
+    use getrandom::SysRng;
+    use rand_core::UnwrapErr;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn keypair() -> ([u8; 32], [u8; 32]) {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&secret).to_bytes();
         (secret.to_bytes(), public)
     }

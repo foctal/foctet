@@ -1,5 +1,5 @@
 use foctet_core::{
-    Direction, Frame, FrameHeader, TrafficKeys, decrypt_frame, encrypt_frame,
+    Direction, Frame, FrameHeader, decrypt_frame, encrypt_frame,
     frame::{PROFILE_X25519_HKDF_XCHACHA20POLY1305, flags},
     payload::{Tlv, decode_tlvs, encode_tlvs, tlv_type},
 };
@@ -35,7 +35,8 @@ proptest! {
         seq in any::<u64>(),
         payload in proptest::collection::vec(any::<u8>(), 0..1024),
     ) {
-        let keys = TrafficKeys { key_id: 3, c2s: [0x11; 32], s2c: [0x22; 32] };
+        let keys = foctet_core::derive_traffic_keys(&[0x11; 32], &[0x22; 32], 3)
+            .expect("derive test traffic keys");
         let frame = encrypt_frame(&keys, Direction::C2S, 0, stream_id, seq, &payload).expect("encrypt");
         let plain = decrypt_frame(&keys, Direction::C2S, &frame).expect("decrypt");
         prop_assert_eq!(plain, payload);

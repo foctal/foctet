@@ -36,6 +36,7 @@ Security documentation:
 
 - [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — what Foctet defends against, residual risks, and explicit non-goals.
 - [`docs/POLICIES.md`](docs/POLICIES.md) — versioning/compatibility/deprecation, key lifecycle and rotation, incident response.
+- [`docs/error-handling.md`](docs/error-handling.md) — required action for core, HTTP, and transport errors.
 - [`SECURITY.md`](SECURITY.md) — current security posture, known limitations, vulnerability reporting.
 
 ## Examples
@@ -79,21 +80,34 @@ wasm32-only `BrowserWebTransportDatagrams` adapter.
 
 For async stream transports, the recommended path is `foctet-transport`:
 
-```rust,ignore
-use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
+```rust,no_run
+use foctet_core::{
+    IdentityKeyPair, PeerIdentity, ProductionSessionAuth, RekeyThresholds,
+};
 use foctet_transport::TokioTransportBuilder;
 
+async fn connect<T>(
+    stream: T,
+    local_identity: IdentityKeyPair,
+    peer_public_key: [u8; 32],
+) -> Result<(), foctet_core::CoreError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
 let builder = TokioTransportBuilder::new();
 let channel = builder
-    .establish_initiator_with_auth(
+    .establish_production_initiator(
         stream,
         RekeyThresholds::default(),
-        SessionAuthConfig::new()
-            .with_local_identity(IdentityKeyPair::generate())
-            .with_peer_identity(PeerIdentity::new(peer_public_key))
-            .require_peer_authentication(true),
+        ProductionSessionAuth::pinned_identity(
+            local_identity,
+            PeerIdentity::new(peer_public_key),
+        ),
     )
     .await?;
+let _ = channel;
+Ok(())
+}
 ```
 
 If you already derived or exchanged Foctet session state out of band, you can

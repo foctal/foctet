@@ -100,7 +100,7 @@ async fn run_server(
         }
     };
 
-    let request = server.accept().await.ok_or("server closed")?;
+    let request = server.accept().await.ok_or("server closed")??;
     let session = request.ok().await?;
     let config = TransportConfig::default().with_app_stream_id(1);
     let builder = TokioTransportBuilder::new().with_config(config);
