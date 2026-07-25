@@ -215,5 +215,5 @@ hold:
   explicitly excluded from the production promise.
 - The advertised transport matrix has real implementations and conformance tests.
 - WASM/TypeScript are either truly shipped and tested or excluded from the claim.
-- Dependency advisory/license checks, fuzzing, reproducible builds, CI coverage,
-  and a vulnerability-response process are active.
+- Dependency advisory monitoring, targeted hardening checks, CI coverage, and a
+  vulnerability-response process are active.

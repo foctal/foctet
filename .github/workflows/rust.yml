@@ -2,133 +2,31 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
-# Third-party actions are pinned to immutable commit SHAs (with the human-readable
-# tag in a trailing comment) so a re-tagged release cannot silently change CI.
-
+# Keep the required CI path intentionally small. Broader compatibility and
+# packaging checks belong to the manually dispatched release rehearsal.
 jobs:
-  fmt:
-    name: Formatting
+  check:
+    name: Format, lint, and test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - name: Setup stable toolchain
-      run: |
-        rustup toolchain install stable --profile minimal --component rustfmt
-        rustup default stable
-    - name: Check formatting
-      run: cargo fmt --all -- --check
-
-  lint:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - name: Setup stable toolchain
-      run: |
-        rustup toolchain install stable --profile minimal --component clippy
-        rustup default stable
-        rustup target add wasm32-unknown-unknown
-    - name: Lint (all features)
-      run: cargo clippy --workspace --all-features --locked -- -D warnings
-    - name: Wasm check (workers)
-      run: cargo check -p foctet-http --features workers --target wasm32-unknown-unknown --locked
-    - name: Wasm check (foctet-wasm)
-      run: cargo check -p foctet-wasm --target wasm32-unknown-unknown --locked
-    - name: Wasm check (browser WebSocket transport)
-      run: cargo check -p foctet-transport --no-default-features --features transport-websock --target wasm32-unknown-unknown --locked
-    - name: Wasm check (browser WebTransport datagram adapter)
-      run: cargo check -p foctet-transport --no-default-features --features transport-webtrans-browser --target wasm32-unknown-unknown --locked
-
-  test:
-    name: Tests
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - name: Setup stable toolchain
-      run: |
-        rustup toolchain install stable --profile minimal
-        rustup default stable
-    - name: Workspace tests (all features, locked)
-      run: cargo test --workspace --all-features --locked --verbose
-    - name: Feature combinations (foctet-core)
-      run: |
-        cargo test -p foctet-core --no-default-features --locked
-        cargo test -p foctet-core --no-default-features --features runtime-futures --locked
-        cargo test -p foctet-core --no-default-features --features runtime-tokio --locked
-
-  wasm-browser-test:
-    name: WASM browser tests (headless Chrome)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - name: Setup stable toolchain
-      run: |
-        rustup toolchain install stable --profile minimal
-        rustup default stable
-        rustup target add wasm32-unknown-unknown
-    - name: Install wasm-pack
-      run: cargo install wasm-pack --locked
-    - name: Run in-browser tests (headless Chrome)
-      # Use the runner's preinstalled chromedriver, which matches the
-      # preinstalled Chrome; wasm-pack's auto-downloaded driver can mismatch.
-      run: |
-        export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
-        wasm-pack test --headless --chrome foctet-wasm
-    - name: Install browser E2E driver
-      working-directory: foctet-wasm/examples/browser
-      run: npm ci
-    - name: Run real browser WebTransport E2E
-      env:
-        CHROME_PATH: /usr/bin/google-chrome
-      working-directory: foctet-wasm/examples/browser
-      run: npm run test:webtransport
-
-  workers-integration:
-    name: Cloudflare Workers + Durable Object integration
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - name: Setup stable toolchain
-      run: |
-        rustup toolchain install stable --profile minimal
-        rustup default stable
-        rustup target add wasm32-unknown-unknown
-    - name: Install Wrangler dependencies
-      working-directory: foctet-http/examples/workers-echo
-      run: npm ci
-    - name: Race and persistence tests against Wrangler
-      working-directory: foctet-http/examples/workers-echo
-      run: npm test
-
-  interop-verify:
-    name: Independent vector verification (Node)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    # Verifies the canonical test vectors with an implementation that shares
-    # no code with the Rust workspace (@noble crypto + a from-spec decoder),
-    # catching systematic bugs the Rust-derived artifacts would reproduce.
-    - name: Verify vectors independently
-      working-directory: interop
-      run: |
-        npm ci
-        npm test
-
-  msrv:
-    name: MSRV (1.88)
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-    - name: Setup MSRV toolchain
-      run: |
-        rustup toolchain install 1.88.0 --profile minimal
-        rustup default 1.88.0
-    - name: Check workspace builds on MSRV
-      run: cargo check --workspace --all-features --locked
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Setup stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-features --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-features --locked

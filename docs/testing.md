@@ -1,10 +1,11 @@
 # Test and hardening gates
 
-All required checks run in CI. `rust.yml` covers normal Rust, WASM/browser,
-Workers, and interoperability tests; `security.yml` covers Miri, dependency
-policy, SBOMs, and reproducibility; `fuzz.yml` runs retained corpora daily; and
-`release-rehearsal.yml` performs the maintainer-dispatched compatibility and
-artifact rehearsal. The commands below remain useful for reproducing failures.
+The required push and pull-request workflow is intentionally lightweight:
+`rust.yml` checks formatting, runs Clippy, and runs the workspace tests in one
+job. `security.yml` checks dependency advisories weekly and on demand.
+`release-rehearsal.yml` contains the broader maintainer-dispatched compatibility,
+WASM, interoperability, packaging, and artifact checks. The commands below are
+available for additional local verification.
 
 ## Miri
 

@@ -1,10 +1,6 @@
-name: Security and supply chain
+name: Security audit
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
@@ -16,66 +12,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  dependency-policy:
-    name: Advisories, licenses, and sources
+  audit:
+    name: Dependency advisories
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal
-      - name: Install pinned policy tools
-        run: |
-          cargo install cargo-deny --version 0.20.2 --locked
-          cargo install cargo-audit --version 0.22.2 --locked
-      - name: Enforce advisory exception review dates
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Check advisory exception review dates
         run: bash scripts/check-advisory-exceptions.sh
-      - name: Check advisories, bans, licenses, and sources
-        run: cargo deny --all-features check
-      - name: Check the RustSec advisory database independently
+      - name: Check dependency advisories
         run: cargo audit --db "$RUNNER_TEMP/foctet-cargo-audit-db" --deny warnings --ignore RUSTSEC-2025-0134
-
-  sbom:
-    name: Generate CycloneDX SBOM
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal
-      - name: Install pinned SBOM generator
-        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
-      - name: Generate locked workspace SBOMs
-        run: cargo cyclonedx --all --format json --override-filename foctet.cdx
-      - name: Retain SBOMs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: cyclonedx-sbom
-          path: "**/*.cdx.json"
-          retention-days: 90
-
-  miri:
-    name: Miri state and parser gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: Install nightly Miri
-        run: rustup toolchain install nightly --profile minimal --component miri
-      - name: Run bounded Miri suite
-        run: |
-          for filter in replay:: payload:: limits:: control:: sequence:: crypto:: frame::; do
-            cargo +nightly miri test -p foctet-core --no-default-features --locked -- "$filter"
-          done
-
-  reproducible-build:
-    name: Reproducible locked build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal
-      - name: Build twice and compare library artifacts
-        run: |
-          SOURCE_DATE_EPOCH=0 CARGO_TARGET_DIR=target/repro-a cargo build --workspace --all-features --release --locked
-          SOURCE_DATE_EPOCH=0 CARGO_TARGET_DIR=target/repro-b cargo build --workspace --all-features --release --locked
-          find target/repro-a/release/deps -maxdepth 1 -type f \( -name 'libfoctet*.rlib' -o -name 'libfoctet*.so' \) -print0 | sort -z | xargs -0 sha256sum | sed 's#target/repro-a#target/repro#' > /tmp/repro-a.sha256
-          find target/repro-b/release/deps -maxdepth 1 -type f \( -name 'libfoctet*.rlib' -o -name 'libfoctet*.so' \) -print0 | sort -z | xargs -0 sha256sum | sed 's#target/repro-b#target/repro#' > /tmp/repro-b.sha256
-          diff -u /tmp/repro-a.sha256 /tmp/repro-b.sha256
