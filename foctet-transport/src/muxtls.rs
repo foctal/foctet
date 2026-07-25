@@ -1,6 +1,8 @@
 //! High-level Foctet integration helpers for `muxtls`.
 
-use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
+#[cfg(feature = "dangerous-unauthenticated")]
+use foctet_core::Session;
+use foctet_core::{RekeyThresholds, SessionAuthConfig};
 
 use crate::{
     TokioTransportBuilder, TokioTransportChannel, TransportChannelError, TransportConfig,

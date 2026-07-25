@@ -1492,20 +1492,17 @@ dependencies = [
 
 [[package]]
 name = "muxtls"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26cf8e8e15c55241f01a4754a48e7548e5c4b93bdd9cd810c434c4187c668e0c"
+checksum = "5f51769569c34c6a702d10556c26d7cd84f64e69a6897c5710d59eb5aa30582d"
 dependencies = [
  "bytes",
- "futures-core",
- "futures-sink",
  "futures-util",
  "muxtls-proto",
  "rcgen",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
- "socket2",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -1515,9 +1512,9 @@ dependencies = [
 
 [[package]]
 name = "muxtls-proto"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d50b748ace085c3949a11263a1204c83f8b7f7fe45d733c581631496343688a"
+checksum = "79b4eb7355e6521e60c5d8ebdd5a8e6b14aa0ae7c9e2ac2787a89ae9bf607c88"
 dependencies = [
  "bytes",
  "thiserror",
@@ -3017,9 +3014,9 @@ dependencies = [
 
 [[package]]
 name = "websock"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b507c598f4cd1cc519b218a7bfe958589d556c51185884883f7e81e3676f0f03"
+checksum = "3eb586e168958ac3cef8a2479e08762770f3e77941e66267b632f4d7305b49d6"
 dependencies = [
  "websock-proto",
  "websock-tungstenite",
@@ -3028,9 +3025,9 @@ dependencies = [
 
 [[package]]
 name = "websock-mux-proto"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5915f793883d8b536429a9775d5d6b14e8b38e900fccb9e342365352e21de501"
+checksum = "17d7a811528a9859b11aa36f6bf634657701b373420913fe335290b963349178"
 dependencies = [
  "bytes",
  "thiserror",
@@ -3040,9 +3037,9 @@ dependencies = [
 
 [[package]]
 name = "websock-proto"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95122d211b3764bfb58d8bcc343ea5c468d961f24112ce5fefad78394e2e7aaa"
+checksum = "638ffa570b91fc1a7df3297b6f619513b381b2977865515e26b6789828d4126a"
 dependencies = [
  "bytes",
  "futures-core",
@@ -3052,9 +3049,9 @@ dependencies = [
 
 [[package]]
 name = "websock-tungstenite"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd26871a3ebbd625512ece41b16b3a279e2e18ca331b2f975fc894808c28e661"
+checksum = "aed1f5c93acfec975cf989361d95965a5e801c1eebd0ffd054bc17daa889225e"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -3062,7 +3059,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-native-certs",
- "rustls-pemfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -3072,33 +3068,29 @@ dependencies = [
 
 [[package]]
 name = "websock-tungstenite-mux"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "113c9fcd7e65a8ece955b37c69127bb7a4a7c1e024252bf34deb3d81692ee67a"
+checksum = "e71a6892dd869daef158f4c6940d9b6afebb5a6dd67f87715461b1e9dfe9fae9"
 dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
  "futures-util",
- "rcgen",
  "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
- "tracing",
  "websock-mux-proto",
  "websock-proto",
+ "websock-tungstenite",
 ]
 
 [[package]]
 name = "websock-wasm"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07d681bc453f0ca6004101c2856799ea28cd59116ecbdd3c9b1de6c92e8c7985"
+checksum = "3083c74eec2eb924630614d8b33869eda73a75b46d6669180edb18cfb24f061f"
 dependencies = [
  "futures-channel",
  "futures-core",
@@ -3113,9 +3105,9 @@ dependencies = [
 
 [[package]]
 name = "webtrans"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53d7e53744bee3d9f19163867eaf329855433f15880b47597484e18ab25b6e5a"
+checksum = "8e946b41f77f1db2f177bdc725d61420bffd1b6448282ff0ce0e54272922e767"
 dependencies = [
  "webtrans-proto",
  "webtrans-quinn",
@@ -3124,9 +3116,9 @@ dependencies = [
 
 [[package]]
 name = "webtrans-proto"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df16c74383649323cb5f46da8d06e73b21afdfaf5d6294c114645bb2a04d5b6d"
+checksum = "0e36c72cc11597d91741ae20bac034872c550ec4f29baa1db8b4afccb16e0f27"
 dependencies = [
  "bytes",
  "http",
@@ -3137,9 +3129,9 @@ dependencies = [
 
 [[package]]
 name = "webtrans-quinn"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "252323fb2c01cbfb07d2987baeca0b5d8a6e7b5444ed124f648820119083b92a"
+checksum = "c51591e446d824a5300c3a91bbcea5a2262f8c29ec512598c7848f18f1168e32"
 dependencies = [
  "bytes",
  "futures",
@@ -3149,7 +3141,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-native-certs",
- "rustls-pemfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -3160,20 +3151,21 @@ dependencies = [
 
 [[package]]
 name = "webtrans-trait"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3455ff781075f00143c91fbff0fa6b772a1296f8f25075cdb5fd9746ce61353a"
+checksum = "154abaf8ea5e8cbad509be09ac639e1060819c421003b48f989818195f3ea9a5"
 dependencies = [
  "bytes",
 ]
 
 [[package]]
 name = "webtrans-wasm"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b3f40dfe8abdb7892fd780b84a97d4416cce9dbfba9a0127588800f96d78441"
+checksum = "2ff1926532eed6476aef42ad74092854f33e5f96b8926012bd8444af171fbd55"
 dependencies = [
  "bytes",
+ "futures",
  "futures-io",
  "js-sys",
  "thiserror",

@@ -334,7 +334,11 @@ async fn run_server_role(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>
     println!("demo keys are hardcoded for local examples only. do not use in production.");
     loop {
         let request = match server.accept().await {
-            Some(request) => request,
+            Some(Ok(request)) => request,
+            Some(Err(err)) => {
+                eprintln!("request setup failed: {err}");
+                continue;
+            }
             None => break,
         };
         let session = match request.ok().await {
@@ -366,7 +370,7 @@ async fn run_loopback(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
         .with_addr(addr)
         .with_certificate(cert_chain.clone(), key)?;
     let server_side = async move {
-        let request = server.accept().await.ok_or("server closed")?;
+        let request = server.accept().await.ok_or("server closed")??;
         let session = request.ok().await?;
         serve(session, false, false).await
     };

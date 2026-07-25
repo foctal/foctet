@@ -229,9 +229,8 @@ mod quinn_byte_stream {
 mod muxtls_byte_stream {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-    use foctet_core::RekeyThresholds;
-
     use super::run_conformance;
+    use foctet_core::RekeyThresholds;
 
     #[tokio::test]
     async fn muxtls_byte_stream_conformance() {
@@ -279,6 +278,7 @@ mod webtrans_byte_stream {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     use foctet_core::RekeyThresholds;
+    use foctet_transport::SecureDatagramChannel;
 
     use super::run_conformance;
 
@@ -306,7 +306,11 @@ mod webtrans_byte_stream {
             .with_certificate(cert_chain.clone(), key)
             .expect("server");
         let server_task = tokio::spawn(async move {
-            let request = server.accept().await.expect("server closed");
+            let request = server
+                .accept()
+                .await
+                .expect("server closed")
+                .expect("server request");
             let session = request.ok().await.expect("server session");
             (server, session)
         });
@@ -332,6 +336,22 @@ mod webtrans_byte_stream {
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+
+        let mut client_datagrams =
+            SecureDatagramChannel::from_active_session(client_session, a.session())
+                .expect("client datagram channel");
+        let mut server_datagrams =
+            SecureDatagramChannel::from_active_session(server_session, b.session())
+                .expect("server datagram channel");
+        client_datagrams
+            .send_datagram(0, 0, b"webtransport datagram")
+            .await
+            .expect("client datagram send");
+        let received = server_datagrams
+            .recv_datagram()
+            .await
+            .expect("server datagram receive");
+        assert_eq!(received.plaintext, b"webtransport datagram");
     }
 }
 

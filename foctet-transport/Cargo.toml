@@ -20,14 +20,14 @@ default = []
 dangerous-unauthenticated = []
 runtime-tokio = ["dep:tokio", "foctet-core/runtime-tokio", "dep:futures-sink"]
 runtime-futures = ["dep:futures-io", "dep:futures-sink", "dep:futures-util", "foctet-core/runtime-futures"]
-transport-muxtls = ["dep:muxtls"]
-transport-webtrans = ["dep:webtrans"]
+transport-muxtls = ["runtime-tokio", "dep:muxtls"]
+transport-webtrans = ["runtime-tokio", "dep:webtrans", "dep:bytes"]
 # Cross-platform raw-WebSocket message transport (`WebsockMessageTransport`),
 # usable on native and in the browser (wasm) via the `websock` crate's backends.
 transport-websock = ["dep:websock", "dep:futures-util"]
 # Native multiplexed-WebSocket byte-stream helpers (require a Tokio runtime).
 transport-websock-mux = ["transport-websock", "runtime-tokio", "dep:websock-tungstenite-mux"]
-transport-quinn = ["dep:quinn", "dep:bytes"]
+transport-quinn = ["runtime-tokio", "dep:quinn", "dep:bytes"]
 # Browser WebTransport datagram adapter (wasm32 only): implements
 # `DatagramTransport` over a `WebTransport.datagrams` duplex handed in from JS.
 transport-webtrans-browser = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-bindgen-futures"]
@@ -38,12 +38,12 @@ pin-project-lite = "0.2"
 futures-io = { version = "0.3", optional = true }
 futures-sink = { version = "0.3", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["io", "std"], optional = true }
-tokio = { version = "1.48", features = ["io-util", "time", "sync"], optional = true }
-muxtls = { version = "0.1.0", default-features = false, optional = true }
-webtrans = { version = "0.4.0", default-features = false, optional = true }
-websock = { version = "0.4.0", default-features = false, optional = true }
-websock-tungstenite-mux = { version = "0.4.0", optional = true }
-quinn = { version = "0.11.9", default-features = false, optional = true }
+tokio = { version = "1.48", features = ["io-util", "net", "time", "sync"], optional = true }
+muxtls = { version = "0.3.1", default-features = false, optional = true }
+webtrans = { version = "0.5.0", default-features = false, optional = true }
+websock = { version = "0.5.0", default-features = false, optional = true }
+websock-tungstenite-mux = { version = "0.5.0", optional = true }
+quinn = { version = "0.11.11", default-features = false, optional = true }
 bytes = { version = "1", optional = true }
 thiserror = { workspace = true }
 
@@ -55,8 +55,8 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 [dev-dependencies]
 tokio = { version = "1.48", features = ["macros", "rt", "rt-multi-thread", "io-util", "time"] }
 foctet-core = { workspace = true, features = ["runtime-tokio"] }
-websock-tungstenite-mux = "0.4.0"
-quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+websock-tungstenite-mux = "0.5.0"
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rcgen = "0.14"
 url = "2"

@@ -1,5 +1,6 @@
 //! High-level Foctet integration helpers for `webtrans`.
 
+use bytes::Bytes;
 #[cfg(feature = "dangerous-unauthenticated")]
 use foctet_core::Session;
 use foctet_core::{RekeyThresholds, SessionAuthConfig};
@@ -8,6 +9,28 @@ use crate::{
     TokioTransportBuilder, TokioTransportChannel, TransportChannelError, TransportConfig,
     adapter::SplitIo,
 };
+
+/// Datagram-transport view of a native [`webtrans::Session`], usable with
+/// [`crate::SecureDatagramChannel`].
+///
+/// WebTransport adds and removes its session identifier internally, so each
+/// datagram exposed here contains exactly one Foctet frame.
+impl crate::DatagramTransport for webtrans::Session {
+    type Error = webtrans::quinn::SessionError;
+
+    async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
+        webtrans::Session::send_datagram(self, Bytes::from(datagram))
+    }
+
+    async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
+        let bytes = webtrans::Session::read_datagram(self).await?;
+        Ok(bytes.to_vec())
+    }
+
+    fn max_datagram_size(&self) -> Option<usize> {
+        Some(webtrans::Session::max_datagram_size(self))
+    }
+}
 
 /// Opens a bidirectional WebTransport stream and wraps it as a Foctet secure channel.
 #[cfg(feature = "dangerous-unauthenticated")]
