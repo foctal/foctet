@@ -152,46 +152,59 @@
         const wt = new WebTransport(url, {
           serverCertificateHashes: [{ algorithm: "sha-256", value: certHash }],
         });
-        await wt.ready;
+        try {
+          await wt.ready;
 
-        // 1) Authenticated handshake over one reliable bidi stream.
-        const stream = await wt.createBidirectionalStream();
-        const writer = stream.writable.getWriter();
-        const control = new ControlReader(stream.readable.getReader());
-        await writer.write(frameControl(session.initialHandshakeMessage()));
-        session.handleHandshakeMessage(await control.read());
-        assert(session.isEstablished(), "handshake did not establish");
-        assert(session.peerAuthenticated(), "server identity not authenticated");
+          // 1) Authenticated handshake over one reliable bidi stream.
+          const stream = await wt.createBidirectionalStream();
+          const writer = stream.writable.getWriter();
+          const control = new ControlReader(stream.readable.getReader());
+          await writer.write(frameControl(session.initialHandshakeMessage()));
+          session.handleHandshakeMessage(await control.read());
+          assert(session.isEstablished(), "handshake did not establish");
+          assert(session.peerAuthenticated(), "server identity not authenticated");
 
-        // 2) Application data as WebTransport datagrams (one frame each).
-        const dgramWriter = wt.datagrams.writable.getWriter();
-        const dgramReader = wt.datagrams.readable.getReader();
-        const echoes = [];
-        for (const [index, message] of MESSAGES.entries()) {
-          await dgramWriter.write(session.sealDatagram(0, 0, enc.encode(message)));
-          if (index === 15) {
-            const rekey = session.prepareRekey();
-            await writer.write(frameControl(rekey));
-            const ack = await control.read();
-            assert(ack.length === 1 && ack[0] === 0xac, "rekey adoption not acknowledged");
-            session.commitRekey();
-          }
+          // 2) Application data as WebTransport datagrams (one frame each).
+          const dgramWriter = wt.datagrams.writable.getWriter();
+          const dgramReader = wt.datagrams.readable.getReader();
+          const echoes = [];
+          // Drain replies concurrently with the burst. Browser datagram queues
+          // are bounded and may discard unread replies before the send completes.
+          // Keep the original loss/reordering checks below; avoid causing loss in
+          // the harness itself by leaving the browser receive queue unread.
+          const receiving = (async () => {
+            // The CI server deliberately drops reply 0 and reverses every
+            // subsequent pair. Receiving all remaining replies proves replay
+            // windows tolerate both loss and reordering on a real HTTP/3 path.
+            for (let index = 1; index < MESSAGES.length; index += 1) {
+              const received = await Promise.race([
+                dgramReader.read(),
+                new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 1000)),
+              ]);
+              if (received.timeout) break;
+              const { value, done } = received;
+              if (done) throw new Error("datagram stream closed early");
+              echoes.push(dec.decode(session.openDatagram(value).plaintext));
+            }
+          })();
+          const sending = (async () => {
+            for (const [index, message] of MESSAGES.entries()) {
+              await dgramWriter.write(session.sealDatagram(0, 0, enc.encode(message)));
+              if (index === 15) {
+                const rekey = session.prepareRekey();
+                await writer.write(frameControl(rekey));
+                const ack = await control.read();
+                assert(ack.length === 1 && ack[0] === 0xac, "rekey adoption not acknowledged");
+                session.commitRekey();
+              }
+            }
+          })();
+          await Promise.all([sending, receiving]);
+          return echoes;
+        } finally {
+          wt.close();
+          await wt.closed.catch(() => {});
         }
-        // The CI server deliberately drops reply 0 and reverses every
-        // subsequent pair. Receiving all remaining replies proves replay
-        // windows tolerate both loss and reordering on a real HTTP/3 path.
-        for (let index = 1; index < MESSAGES.length; index += 1) {
-          const received = await Promise.race([
-            dgramReader.read(),
-            new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 1000)),
-          ]);
-          if (received.timeout) break;
-          const { value, done } = received;
-          if (done) throw new Error("datagram stream closed early");
-          echoes.push(dec.decode(session.openDatagram(value).plaintext));
-        }
-        wt.close();
-        return echoes;
       }
 
       async function runTest() {

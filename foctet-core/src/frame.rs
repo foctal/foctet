@@ -216,6 +216,15 @@ pub struct FoctetFramed<T> {
     replay: ReplayProtector,
     eof: bool,
     terminal: bool,
+    write_state: WriteState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteState {
+    Open,
+    Flushing,
+    Closing,
+    Closed,
 }
 
 impl<T> FoctetFramed<T> {
@@ -242,6 +251,7 @@ impl<T> FoctetFramed<T> {
             limits,
             eof: false,
             terminal: false,
+            write_state: WriteState::Open,
         }
     }
 
@@ -394,7 +404,7 @@ impl<T> FoctetFramed<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
-        if self.terminal {
+        if self.terminal || self.write_state != WriteState::Open {
             return Err(CoreError::TransportTerminal);
         }
         if plaintext.len() > self.limits.max_plaintext_len {
@@ -706,7 +716,7 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        if this.terminal {
+        if this.terminal || this.write_state != WriteState::Open {
             return Poll::Ready(Err(CoreError::TransportTerminal));
         }
         if this.tx.is_empty() {
@@ -726,6 +736,9 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
         if this.terminal {
             return Poll::Ready(Err(CoreError::TransportTerminal));
         }
+        if matches!(this.write_state, WriteState::Closing | WriteState::Closed) {
+            return Poll::Ready(Ok(()));
+        }
         ready!(this.poll_drain_tx(cx))?;
         match Pin::new(&mut this.io).poll_flush(cx) {
             Poll::Pending => Poll::Pending,
@@ -742,17 +755,24 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
         if this.terminal {
             return Poll::Ready(Err(CoreError::TransportTerminal));
         }
-        ready!(this.poll_drain_tx(cx))?;
-        match ready!(Pin::new(&mut this.io).poll_flush(cx)) {
-            Ok(()) => {}
-            Err(error) => {
-                this.terminal = true;
-                return Poll::Ready(Err(CoreError::Io(error)));
-            }
+        if this.write_state == WriteState::Closed {
+            return Poll::Ready(Ok(()));
+        }
+        if this.write_state == WriteState::Open {
+            this.write_state = WriteState::Flushing;
+        }
+        if this.write_state == WriteState::Flushing {
+            ready!(Pin::new(&mut *this).poll_flush(cx))?;
+            // A pending close may own its own flush barrier. Re-entering the
+            // outer flush could consume that barrier and restart it forever.
+            this.write_state = WriteState::Closing;
         }
         match Pin::new(&mut this.io).poll_close(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Ok(())) => {
+                this.write_state = WriteState::Closed;
+                Poll::Ready(Ok(()))
+            }
             Poll::Ready(Err(error)) => {
                 this.terminal = true;
                 Poll::Ready(Err(CoreError::Io(error)))
@@ -985,6 +1005,91 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::noop().clone()
+    }
+
+    #[test]
+    fn pending_close_does_not_restart_the_underlying_flush_barrier() {
+        #[derive(Default)]
+        struct BarrierIo {
+            pending: bool,
+            flush_calls: usize,
+            close_calls: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl PollRead for BarrierIo {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut [u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Poll::Pending
+            }
+        }
+
+        impl PollWrite for BarrierIo {
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                self.bytes.extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            }
+
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.flush_calls += 1;
+                self.pending = !self.pending;
+                if self.pending {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+
+            fn poll_close(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.close_calls += 1;
+                self.poll_flush(cx)
+            }
+        }
+
+        let mut framed = FoctetFramed::new(
+            BarrierIo::default(),
+            fixed_test_keys(),
+            Direction::C2S,
+            Direction::C2S,
+        );
+        Pin::new(&mut framed)
+            .start_send(b"before close".to_vec())
+            .unwrap();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut framed).poll_close(&mut cx).is_pending());
+        assert!(!framed.get_ref().bytes.is_empty());
+        // Cancelling the caller's close future must not reopen the writer.
+        assert!(matches!(
+            Pin::new(&mut framed).start_send(b"after close".to_vec()),
+            Err(CoreError::TransportTerminal)
+        ));
+        assert!(Pin::new(&mut framed).poll_close(&mut cx).is_pending());
+        assert!(matches!(
+            Pin::new(&mut framed).poll_close(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(framed.get_ref().close_calls, 2);
+        assert_eq!(framed.get_ref().flush_calls, 4);
+        assert!(matches!(
+            Pin::new(&mut framed).poll_close(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(framed.get_ref().flush_calls, 4);
     }
 
     #[test]

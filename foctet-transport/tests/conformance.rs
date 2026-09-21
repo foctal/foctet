@@ -269,6 +269,13 @@ mod quinn_byte_stream {
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
         super::run_stream_stress(&mut a, &mut b).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
     }
 }
 
@@ -323,6 +330,13 @@ mod muxtls_byte_stream {
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
         super::run_stream_stress(&mut a, &mut b).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
     }
 }
 
@@ -395,6 +409,13 @@ mod webtrans_byte_stream {
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
         super::run_stream_stress(&mut a, &mut b).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
 
         let mut client_datagrams =
             SecureDatagramChannel::from_active_session(client_session, a.session())
@@ -491,5 +512,12 @@ mod websock_mux_byte_stream {
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
         super::run_stream_stress(&mut a, &mut b).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
     }
 }
