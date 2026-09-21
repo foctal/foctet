@@ -1,3 +1,4 @@
+use rustls::pki_types::pem::PemObject;
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
@@ -121,7 +122,8 @@ fn load_cert_chain(
         return Ok(vec![rustls::pki_types::CertificateDer::from(data)]);
     }
     let mut reader = std::io::BufReader::new(&data[..]);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let certs = rustls::pki_types::CertificateDer::pem_reader_iter(&mut reader)
+        .collect::<Result<Vec<_>, _>>()?;
     if certs.is_empty() {
         return Err("no certificate found in tls-cert".into());
     }

@@ -167,7 +167,8 @@ where
     }
 
     /// Initiates a transactional rekey over a reliable secure message channel,
-    /// then adopts the committed key for datagrams.
+    /// then adopts the committed key for datagrams. Cancellation terminates
+    /// both channels and the session once control delivery has started.
     pub async fn send_rekey<C>(
         &mut self,
         control: &mut SecureMessageChannel<C>,
@@ -179,10 +180,12 @@ where
         if self.is_terminal() {
             return Err(MessageChannelError::Core(CoreError::TransportTerminal));
         }
+        self.terminal = true;
         if let Err(error) = control.send_rekey(session).await {
             self.terminal = true;
             return Err(error);
         }
+        self.terminal = false;
         if let Err(error) = self.rekey_from_session(session) {
             self.terminal = true;
             session.terminate();
@@ -192,7 +195,8 @@ where
     }
 
     /// Receives a transactional rekey over a reliable secure message channel,
-    /// then adopts the applied key for datagrams.
+    /// then adopts the applied key for datagrams. Cancellation terminates
+    /// both channels and the session once control receive has started.
     pub async fn recv_rekey<C>(
         &mut self,
         control: &mut SecureMessageChannel<C>,
@@ -204,10 +208,12 @@ where
         if self.is_terminal() {
             return Err(MessageChannelError::Core(CoreError::TransportTerminal));
         }
+        self.terminal = true;
         if let Err(error) = control.recv_rekey(session).await {
             self.terminal = true;
             return Err(error);
         }
+        self.terminal = false;
         if let Err(error) = self.rekey_from_session(session) {
             self.terminal = true;
             session.terminate();
@@ -563,5 +569,54 @@ mod tests {
         assert!(control_b.is_terminal());
         assert_eq!(responder.state(), foctet_core::SessionState::Closed);
         assert!(responder.active_keys().is_none());
+    }
+    struct PendingControlTransport;
+
+    impl MessageTransport for PendingControlTransport {
+        type Error = MemoryError;
+        async fn send_message(&self, _: Vec<u8>) -> Result<(), MemoryError> {
+            std::future::pending().await
+        }
+        async fn recv_message(&self) -> Result<Vec<u8>, MemoryError> {
+            std::future::pending().await
+        }
+        fn max_message_size(&self) -> Option<usize> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_rekey_also_terminates_datagrams() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        for receive in [false, true] {
+            let (mut session, _) = session_pair();
+            let mut control =
+                SecureMessageChannel::from_active_session(PendingControlTransport, &session)
+                    .unwrap();
+            let (transport, _) = linked_pair();
+            let mut datagrams =
+                SecureDatagramChannel::from_active_session(transport, &session).unwrap();
+            {
+                let mut future: std::pin::Pin<Box<dyn Future<Output = _>>> = if receive {
+                    Box::pin(datagrams.recv_rekey(&mut control, &mut session))
+                } else {
+                    Box::pin(datagrams.send_rekey(&mut control, &mut session))
+                };
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+            }
+            assert!(datagrams.is_terminal());
+            assert!(control.is_terminal());
+            assert_eq!(session.state(), foctet_core::SessionState::Closed);
+            assert!(matches!(
+                datagrams.send_datagram(0, 0, b"rejected").await,
+                Err(DatagramChannelError::Core(CoreError::TransportTerminal))
+            ));
+        }
     }
 }

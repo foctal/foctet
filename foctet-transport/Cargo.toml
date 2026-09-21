@@ -57,11 +57,10 @@ tokio = { version = "1.48", features = ["macros", "rt", "rt-multi-thread", "io-u
 foctet-core = { workspace = true, features = ["runtime-tokio"] }
 websock-tungstenite-mux = "0.5.0"
 quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["std", "ring"] }
 rcgen = "0.14"
 url = "2"
 clap = { version = "4", features = ["derive"] }
-rustls-pemfile = "2"
 bytes = "1"
 
 [[example]]

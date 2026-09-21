@@ -160,6 +160,47 @@ async fn byte_stream_shape_conformance() {
     run_conformance(&mut a, &mut b).await;
 }
 
+/// Synthetic identities are generated for each connection and pinned out of band.
+#[cfg(feature = "runtime-tokio")]
+fn authenticated_pair() -> (SessionAuthConfig, SessionAuthConfig) {
+    use foctet_core::{IdentityKeyPair, PeerIdentity, ProductionSessionAuth};
+    let a = IdentityKeyPair::generate();
+    let b = IdentityKeyPair::generate();
+    (
+        ProductionSessionAuth::pinned_identity(a.clone(), PeerIdentity::new(b.public_key()))
+            .into_session_auth(),
+        ProductionSessionAuth::pinned_identity(b, PeerIdentity::new(a.public_key()))
+            .into_session_auth(),
+    )
+}
+
+#[cfg(feature = "runtime-tokio")]
+async fn run_stream_stress<A: SecureChannel, B: SecureChannel>(a: &mut A, b: &mut B) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let payload = vec![0xA5; 512 * 1024];
+        let (sent, received) = tokio::join!(a.send_payload(&payload), b.recv_payload());
+        sent.expect("large payload send");
+        assert_eq!(received.expect("large payload receive"), payload);
+        tokio::join!(
+            async {
+                for index in 0..64u8 {
+                    b.send_payload(&[index; 8192]).await.expect("ordered send");
+                }
+            },
+            async {
+                for index in 0..64u8 {
+                    assert_eq!(
+                        a.recv_payload().await.expect("ordered receive"),
+                        vec![index; 8192]
+                    );
+                }
+            }
+        );
+    })
+    .await
+    .expect("bounded stream stress");
+}
+
 // ---- Real-backend byte-stream conformance ----
 //
 // The same suite runs over a real loopback connection for every advertised
@@ -209,19 +250,25 @@ mod quinn_byte_stream {
             .expect("client connection");
         let (_server_ep, server_conn) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::quinn::open_secure_channel_with_handshake(
+            foctet_transport::quinn::open_secure_channel_with_handshake_and_auth_config(
                 &client_conn,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::quinn::accept_secure_channel_with_handshake(
+            foctet_transport::quinn::accept_secure_channel_with_handshake_and_auth_config(
                 &server_conn,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        super::run_stream_stress(&mut a, &mut b).await;
     }
 }
 
@@ -257,19 +304,25 @@ mod muxtls_byte_stream {
             .expect("client connection");
         let (_server_ep, server_conn) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::muxtls::open_secure_channel_with_handshake(
+            foctet_transport::muxtls::open_secure_channel_with_handshake_and_auth_config(
                 &client_conn,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::muxtls::accept_secure_channel_with_handshake(
+            foctet_transport::muxtls::accept_secure_channel_with_handshake_and_auth_config(
                 &server_conn,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        super::run_stream_stress(&mut a, &mut b).await;
     }
 }
 
@@ -323,19 +376,25 @@ mod webtrans_byte_stream {
         let client_session = client.connect(url).await.expect("client session");
         let (_server, server_session) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::webtrans::open_secure_channel_with_handshake(
+            foctet_transport::webtrans::open_secure_channel_with_handshake_and_auth_config(
                 &client_session,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::webtrans::accept_secure_channel_with_handshake(
+            foctet_transport::webtrans::accept_secure_channel_with_handshake_and_auth_config(
                 &server_session,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        super::run_stream_stress(&mut a, &mut b).await;
 
         let mut client_datagrams =
             SecureDatagramChannel::from_active_session(client_session, a.session())
@@ -413,18 +472,24 @@ mod websock_mux_byte_stream {
         let client_session = client.connect(&url).await.expect("client session");
         let (_server, server_session) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::websock::open_secure_channel_with_handshake(
+            foctet_transport::websock::open_secure_channel_with_handshake_and_auth_config(
                 &client_session,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::websock::accept_secure_channel_with_handshake(
+            foctet_transport::websock::accept_secure_channel_with_handshake_and_auth_config(
                 &server_session,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        super::run_stream_stress(&mut a, &mut b).await;
     }
 }

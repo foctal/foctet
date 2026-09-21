@@ -397,8 +397,7 @@ mod tests {
 
         let reservations: Vec<_> = workers
             .into_iter()
-            .map(|worker| worker.join().expect("reservation worker"))
-            .flatten()
+            .filter_map(|worker| worker.join().expect("reservation worker"))
             .collect();
         assert_eq!(reservations.len(), 1);
         assert_eq!(limiter.sent.load(Ordering::Acquire), 100);
