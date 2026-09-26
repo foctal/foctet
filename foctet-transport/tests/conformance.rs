@@ -161,7 +161,12 @@ async fn byte_stream_shape_conformance() {
 }
 
 /// Synthetic identities are generated for each connection and pinned out of band.
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(
+    feature = "transport-quinn",
+    feature = "transport-muxtls",
+    feature = "transport-webtrans",
+    feature = "transport-websock-mux"
+))]
 fn authenticated_pair() -> (SessionAuthConfig, SessionAuthConfig) {
     use foctet_core::{IdentityKeyPair, PeerIdentity, ProductionSessionAuth};
     let a = IdentityKeyPair::generate();
@@ -174,11 +179,21 @@ fn authenticated_pair() -> (SessionAuthConfig, SessionAuthConfig) {
     )
 }
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(
+    feature = "transport-quinn",
+    feature = "transport-muxtls",
+    feature = "transport-webtrans",
+    feature = "transport-websock-mux"
+))]
 async fn run_stream_stress<A: SecureChannel, B: SecureChannel>(a: &mut A, b: &mut B) {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let payload = vec![0xA5; 512 * 1024];
-        let (sent, received) = tokio::join!(a.send_payload(&payload), b.recv_payload());
+        let (sent, received) = tokio::join!(a.send_payload(&payload), async {
+            // A reader need not be scheduled immediately. The outer transport
+            // must backpressure a burst larger than its receive window.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            b.recv_payload().await
+        });
         sent.expect("large payload send");
         assert_eq!(received.expect("large payload receive"), payload);
         tokio::join!(
@@ -217,6 +232,7 @@ mod quinn_byte_stream {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
     use super::run_conformance;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn quinn_byte_stream_conformance() {
@@ -268,7 +284,15 @@ mod quinn_byte_stream {
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
         super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (left, right) = tokio::join!(a.close(), b.close());
             left.expect("client channel close");
@@ -285,6 +309,7 @@ mod muxtls_byte_stream {
 
     use super::run_conformance;
     use foctet_core::RekeyThresholds;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn muxtls_byte_stream_conformance() {
@@ -329,7 +354,15 @@ mod muxtls_byte_stream {
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
         super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (left, right) = tokio::join!(a.close(), b.close());
             left.expect("client channel close");
@@ -348,6 +381,7 @@ mod webtrans_byte_stream {
     use foctet_transport::SecureDatagramChannel;
 
     use super::run_conformance;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn webtransport_byte_stream_conformance() {
@@ -408,7 +442,15 @@ mod webtrans_byte_stream {
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
         super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (left, right) = tokio::join!(a.close(), b.close());
             left.expect("client channel close");
@@ -442,6 +484,7 @@ mod websock_mux_byte_stream {
     use foctet_core::RekeyThresholds;
 
     use super::run_conformance;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn websocket_mux_byte_stream_conformance() {
@@ -511,7 +554,15 @@ mod websock_mux_byte_stream {
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
         super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (left, right) = tokio::join!(a.close(), b.close());
             left.expect("client channel close");

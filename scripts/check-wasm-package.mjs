@@ -1,8 +1,8 @@
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const root = new URL("../foctet-wasm/", import.meta.url).pathname;
+const root = fileURLToPath(new URL("../foctet-wasm/", import.meta.url));
 const developmentManifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 for (const directory of ["pkg", "pkg-node", "pkg-web"]) {
   const packageRoot = join(root, directory);

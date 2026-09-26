@@ -239,8 +239,19 @@ impl DatagramTransport for UdpDatagramTransport {
     }
 
     async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
-        let mut buf = vec![0u8; self.max_datagram_size.saturating_add(1)];
-        let n = self.socket.recv(&mut buf).await?;
+        // Unix can truncate a datagram to the supplied buffer. Reserve an
+        // extra byte to detect that, but never allocate more than a UDP packet.
+        let capacity = self.max_datagram_size.saturating_add(1).min(65_536);
+        let mut buf = vec![0u8; capacity];
+        let n = match self.socket.recv(&mut buf).await {
+            Ok(n) => n,
+            // Winsock reports WSAEMSGSIZE instead of a truncated length.
+            // Reject it consistently, before crediting anti-amplification.
+            Err(error) if cfg!(windows) && error.raw_os_error() == Some(10040) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+            }
+            Err(error) => return Err(error),
+        };
         if n > self.max_datagram_size {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -433,6 +444,46 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[tokio::test]
+    async fn unlimited_size_does_not_cause_unbounded_receive_allocation() {
+        let (sock_a, sock_b) = connected_pair().await;
+        let a = UdpDatagramTransport::new(sock_a)
+            .expect("connected")
+            .with_max_datagram_size(usize::MAX);
+        sock_b.send(b"bounded").await.expect("send");
+        assert_eq!(a.recv_datagram().await.expect("receive"), b"bounded");
+    }
+
+    #[tokio::test]
+    async fn truncated_packets_do_not_credit_amplification_budget() {
+        let (sock_a, sock_b) = connected_pair().await;
+        let a = UdpDatagramTransport::new_unvalidated_peer(sock_a)
+            .expect("connected")
+            .with_max_datagram_size(64);
+        for size in [65, 66, 4096] {
+            sock_b.send(&vec![0; size]).await.expect("oversized send");
+            assert_eq!(
+                a.recv_datagram()
+                    .await
+                    .expect_err("reject oversized")
+                    .kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+        assert_eq!(
+            a.send_datagram(vec![1])
+                .await
+                .expect_err("no budget")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        sock_b.send(&[7; 64]).await.expect("valid send");
+        assert_eq!(a.recv_datagram().await.expect("valid receive"), [7; 64]);
+        a.send_datagram(vec![1])
+            .await
+            .expect("credited valid receive");
     }
 
     #[tokio::test]

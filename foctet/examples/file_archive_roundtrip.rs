@@ -20,7 +20,7 @@ fn output_file_name(input: &Path) -> String {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<_> = env::args_os().collect();
     if args.len() != 3 {
         eprintln!(
             "Usage: cargo run -p foctet --example file_archive_roundtrip -- <input_file> <output_dir>"
