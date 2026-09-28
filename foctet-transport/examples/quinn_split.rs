@@ -62,7 +62,7 @@ struct Args {
     messages: usize,
     /// Override `RekeyThresholds::max_frames` (frames sent before a rekey is
     /// triggered). Lower it (e.g. `--rekey-frames 4`) to force frequent rekeys
-    /// for testing; unset keeps the library default. See §7 of `tests.md`.
+    /// for testing; unset keeps the library default. See the transport examples README.
     #[arg(long)]
     rekey_frames: Option<u64>,
 }
@@ -191,7 +191,7 @@ fn rekey_thresholds(rekey_frames: Option<u64>) -> RekeyThresholds {
 }
 
 /// Prints DH-ratchet rekey events so a live run can confirm that both sides'
-/// keys actually rotate (see §7 of `tests.md`) — successful message delivery
+/// keys actually rotate (see the transport examples README) — successful message delivery
 /// alone would not distinguish a working ratchet from one that never fires.
 struct RekeyLogger {
     side: &'static str,

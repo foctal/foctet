@@ -1,5 +1,5 @@
 // Native raw-WebSocket message echo endpoint for the browser interop test
-// (tests.md §3.3). A browser page drives the WASM `FoctetSession` as the
+// (the transport examples README). A browser page drives the WASM `FoctetSession` as the
 // handshake *initiator* over a browser `WebSocket`; the `server` role here is
 // the *responder*. Each WebSocket binary message carries exactly one Foctet
 // frame: first the handshake control messages, then sealed application

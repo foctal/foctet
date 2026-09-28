@@ -1,4 +1,4 @@
-// Two-process raw-UDP datagram example (TODO §3.5, tests.md §3.6).
+// Raw-UDP datagram example with a reliable TCP control channel.
 //
 // Raw UDP has no handshake of its own, so this example follows the recommended
 // pattern: run the authenticated Foctet handshake over a *reliable* control

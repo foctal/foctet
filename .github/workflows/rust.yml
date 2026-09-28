@@ -28,5 +28,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-features --locked -- -D warnings
+      - name: Check transport features independently
+        run: |
+          for feature in transport-muxtls transport-websock transport-websock-mux transport-quinn transport-quion transport-webtrans transport-webtrans-quion; do
+            cargo check -p foctet --no-default-features --features "$feature" --locked
+          done
       - name: Test
         run: cargo test --workspace --all-features --locked

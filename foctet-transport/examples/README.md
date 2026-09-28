@@ -1,75 +1,101 @@
 # Transport examples
 
-These examples show the recommended Foctet transport-builder flow over real stream transports.
+Run commands from the workspace root. Each example requires the feature listed
+below. For examples with command-line options, use `-- --help` to list them.
 
-Start with:
+| Example | Feature | Description |
+| --- | --- | --- |
+| [`quinn_split`](quinn_split.rs) | `transport-quinn` | Authenticated multiplexed QUIC streams; loopback, server, and client roles |
+| [`quion_split`](quion_split.rs) | `transport-quion` | Authenticated QUIC stream and datagram round trips over loopback |
+| [`webtrans_split`](webtrans_split.rs) | `transport-webtrans` | Authenticated WebTransport streams over loopback |
+| [`websock_split`](websock_split.rs) | `transport-websock-mux` | Authenticated multiplexed WebSocket streams; loopback, server, and client roles |
+| [`muxtls_split`](muxtls_split.rs) | `transport-muxtls` | Loopback streams using Foctet sessions established in process |
+| [`udp_datagram_split`](udp_datagram_split.rs) | `runtime-tokio` | UDP datagrams with a TCP handshake/control channel |
+| [`websock_message_server`](websock_message_server.rs) | `runtime-tokio,transport-websock` | Raw WebSocket messages, including browser interoperability |
+| [`webtrans_datagram_split`](webtrans_datagram_split.rs) | `transport-webtrans` | WebTransport datagrams, including browser interoperability |
 
-- `quinn_split.rs`
-- `webtrans_split.rs`
-- `websock_split.rs`
-- `muxtls_split.rs`
+Start with an authenticated loopback connection:
 
-Common properties:
+```bash
+cargo run -p foctet-transport --example quion_split --features transport-quion
+```
 
-- They use `TokioTransportBuilder`.
-- They run the native Foctet handshake per stream.
-- They pin peer identities with `SessionAuthConfig`.
-- They assert `peer_authenticated()` before exchanging application data.
+`muxtls_split` is a lower-level I/O example: it exchanges Foctet handshake
+messages in process using the testing authentication configuration, then passes
+the active sessions to the transport builder. Its TLS client trusts the demo
+server certificate; it does not configure mutual TLS. For an authenticated
+Foctet handshake over muxtls, use the adapter's
+`open_secure_channel_with_handshake_and_auth_config` and
+`accept_secure_channel_with_handshake_and_auth_config` helpers with pinned
+identities or an authenticated outer-channel binding.
 
-## Running across two processes / two hosts
+## Separate server and client processes
 
-`quinn_split` and `websock_split` take a `--role`:
+`quinn_split` and `websock_split` accept `--role server` and `--role client`.
+Generate a development certificate first:
 
-- `--role loopback` (default): both peers in one process, ephemeral port — a
-  quick smoke test (`cargo run --example quinn_split ...` with no args).
-- `--role server --addr <ip:port> --tls-cert devcert/localhost.crt --tls-key devcert/localhost.key`
-- `--role client --addr <ip:port> --tls-cert devcert/localhost.crt`
+```bash
+./devcert/generate.sh
+```
 
-Generate the dev cert first with `devcert/generate.sh`. Add `--wrong-identity`
-to the client to see the server reject a mismatched pinned identity
-(`peer identity mismatch`). For two real hosts, copy `devcert/localhost.crt` to
-the client and dial the server's address; the client validates SNI `localhost`,
-which the cert's SAN covers. See `tests.md` (§3) for the full runbook.
+On Windows, use `devcert/generate.ps1`. For Quinn, start the server:
 
-`quinn_split` also takes `--messages <M>` (request/reply round-trips per stream)
-and `--rekey-frames <N>` (lower `RekeyThresholds::max_frames` to force frequent
-DH-ratchet rekeys); it prints each rekey so the alternating ratchet is
-observable. See `tests.md` (§7) for the rekey runbook.
+```bash
+cargo run -p foctet-transport --example quinn_split --features transport-quinn -- \
+  --role server --addr 127.0.0.1:4433 \
+  --tls-cert devcert/localhost.crt --tls-key devcert/localhost.key
+```
 
-`udp_datagram_split` is the raw-UDP two-process driver: it runs the Foctet
-handshake over a reliable TCP control channel, then exchanges sealed datagrams
-over a connected `UdpDatagramTransport`. The server enables
-`with_anti_amplification(3)` and refuses to send until the first client datagram
-validates the address. It takes `--role`, `--control-addr`, `--udp-addr`,
-`--datagrams`, and `--anti-amplification`. See `tests.md` (§3.6).
+Then run the client in another terminal:
 
-`websock_message_server` is the native raw-WebSocket **message** endpoint
-(`WebsockMessageTransport` + `SecureMessageChannel`, one Foctet frame per binary
-WebSocket message) — the counterpart the browser WASM SDK speaks with
-`sealMessage`/`openMessage`. `--role server` is the responder for the browser
-interop page (`foctet-wasm/examples/browser/websocket.html`); `--role client` /
-`--role loopback` drive the same wire format natively. Needs
-`--features "runtime-tokio transport-websock"`. See `tests.md` (§3.3).
+```bash
+cargo run -p foctet-transport --example quinn_split --features transport-quinn -- \
+  --role client --addr 127.0.0.1:4433 --tls-cert devcert/localhost.crt
+```
 
-`webtrans_datagram_split` is the native WebTransport **datagram** endpoint: the
-authenticated Foctet handshake runs over a reliable bidi stream, then sealed data
-flows as WebTransport datagrams (one Foctet datagram frame each — what the browser
-SDK's `sealDatagram`/`openDatagram` produce). `--role server` (with
-`--tls-cert`/`--tls-key`) is the responder for the browser page
-(`foctet-wasm/examples/browser/webtransport.html`, which pins the cert via
-`serverCertificateHashes`); `--role client` / `--role loopback` drive the same
-wire format natively. Needs `--features "runtime-tokio transport-webtrans"`. See
-`tests.md` (§3.5). (`webtrans_split` remains the streams-only loopback smoke
-test.)
+Add `--wrong-identity` to check rejection of an unexpected peer identity.
+`quinn_split` also accepts `--messages` and `--rekey-frames`; for example,
+`--messages 20 --rekey-frames 4` exercises repeated rekeys and logs the key changes.
 
-`muxtls_split` and `webtrans_split` are currently **loopback-only** smoke tests:
-muxtls pre-establishes its Foctet sessions in-process (mutual TLS is the peer
-authenticator), and WebTransport's meaningful real test is a browser client
-against a native server (see `tests.md` §3.5). A two-process muxtls variant
-(running the Foctet handshake over the muxtls stream) is future work.
+For two hosts, copy the certificate to the client and use the server's address.
+The default TLS server name is `localhost`, matching the development certificate.
+Use your own identities and certificates for application deployments.
 
-Notes:
+## Browser interoperability
 
-- Demo certificates and keys are for local development only.
-- Transport metadata remains visible to the underlying transport.
-- For a full cross-crate map of examples, see `docs/examples.md`.
+Build and serve the [WASM browser harness](../../foctet-wasm/README.md#browser-harness),
+then start the corresponding native server from the workspace root.
+
+For raw WebSocket messages:
+
+```bash
+cargo run -p foctet-transport --example websock_message_server \
+  --features runtime-tokio,transport-websock -- --role server
+```
+
+Open `http://localhost:8011/examples/browser/websocket.html`.
+
+For WebTransport, generate the development certificate as above, then run:
+
+```bash
+cargo run -p foctet-transport --example webtrans_datagram_split \
+  --features transport-webtrans -- --role server \
+  --tls-cert devcert/localhost.crt --tls-key devcert/localhost.key
+```
+
+Open `http://localhost:8011/examples/browser/webtransport.html` and paste the
+SHA-256 certificate hash from `devcert/localhost.hex`. The browser pins this
+hash through `serverCertificateHashes`. The Foctet handshake uses a reliable
+stream; application payloads use datagrams.
+
+## UDP datagrams
+
+`udp_datagram_split` supports loopback, server, and client roles. Its options
+include `--control-addr`, `--udp-addr`, `--datagrams`, and `--anti-amplification`.
+It demonstrates a pre-validation response budget and lifts that budget after
+receiving the first authenticated client datagram. Address validation for a
+shared UDP listener needs an application-specific protocol; see the
+[transport requirements](../../docs/transport-matrix.md#server-admission).
+
+Demo keys and certificates are for local testing. See the
+[example guide](../../docs/examples.md) for HTTP and archive examples.

@@ -27,8 +27,8 @@ struct Args {
 
 fn make_session_pair() -> Result<(Session, Session), foctet_core::CoreError> {
     let thresholds = RekeyThresholds::default();
-    // The mutually authenticated muxtls/TLS transport authenticates the peer,
-    // so the inner Foctet handshake runs in explicit unauthenticated mode.
+    // This loopback example exchanges the Foctet handshake in process.
+    // Network handshakes should use pinned identities or an authenticated binding.
     let (mut initiator, hello) = Session::new_initiator_with_auth(
         thresholds.clone(),
         SessionAuthConfig::unauthenticated_for_testing(),
