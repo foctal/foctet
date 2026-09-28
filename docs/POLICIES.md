@@ -1,14 +1,6 @@
 # Foctet Policies: Compatibility, Keys, and Incident Response
 
-**Document version:** 1.0 (2026-07-02) · applies to the Draft v0 wire format /
-the `0.x` release line.
-
-This document collects the operational policies referenced by `SPEC.md`,
-`SECURITY.md`, and `docs/THREAT_MODEL.md`: how versions and compatibility are
-managed, how keys should live and die, and what happens when something goes
-wrong.
-
----
+These policies apply to Draft v0 and the `0.x` release line.
 
 ## 1. Versioning and compatibility
 
@@ -32,8 +24,8 @@ Three things version independently:
   `test-vectors/` in the same change; CI regression tests pin the vectors.
 - Within `0.x`, API deprecations get at least **one minor release** of
   `#[deprecated]` warning before removal (e.g. the stateless HTTP
-  `seal_request`/`open_request` family, deprecated since 0.3.0, will be
-  removed or gated no earlier than the API-freeze release).
+  `seal_request`/`open_request` family is behind `dangerous-stateless-http`
+  and planned for removal at v1). Security fixes may require earlier removal.
 - Only the **latest published `0.x` release** receives fixes; there are no
   backport branches during draft.
 
@@ -56,9 +48,7 @@ When a v1 (or a second profile) exists, the following rules apply:
 
 ### 1.4 v1 commitment (future)
 
-Declaring v1 requires the release gates described in the project security and
-compatibility documentation (spec complete and matching code+vectors, stable
-compatibility policy, operational readiness, etc.). From v1 on:
+The planned v1 compatibility policy is:
 
 - the wire format is stable within a major version; frames, envelopes, and
   archives produced by any v1.x implementation are readable by any other;
@@ -122,7 +112,7 @@ Foctet uses four kinds of keys. Per-kind guidance:
 Follow `SECURITY.md`: private reporting (GitHub private vulnerability
 reporting or maintainer email), acknowledgement target 7 days, coordinated
 disclosure. Fixes land in the latest release line; wire-affecting fixes come
-with updated vectors and a CHANGELOG **Security** entry, and (post-v1) a
+with updated vectors and security release notes, and (post-v1) a
 RustSec advisory for the affected crates.
 
 ### 3.2 For a key compromise in a deployment
@@ -155,4 +145,5 @@ failures (active tampering or key mismatch), replay-store rejections above
 baseline (replay attempt), handshake timeouts/auth failures spikes (probing),
 and `SequenceExhausted`/`ReplayCapacityExceeded` errors (limits tuned too low
 or abuse). Foctet surfaces these as typed errors; wiring them to metrics is
-application-side (observability hooks are tracked in `TODO.md` §7).
+the application's responsibility; see [operations](operations.md#structured-metrics)
+for the available metrics.

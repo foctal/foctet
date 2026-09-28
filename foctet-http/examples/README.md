@@ -1,6 +1,6 @@
 # HTTP examples
 
-For a full cross-crate map of examples, see `docs/examples.md`.
+For a full cross-crate map of examples, see the [example guide](../../docs/examples.md).
 
 Run the server:
 
@@ -14,7 +14,7 @@ Run the client in another terminal:
 cargo run -p foctet-http --example axum_body_echo_client --features axum
 ```
 
-The client also has turn-key negative tests (each asserts the expected rejection
+The client also has options for testing request rejection (each asserts the expected rejection
 and exits non-zero otherwise):
 
 - `--replay` — re-sends the identical sealed request; the second is rejected with
@@ -23,7 +23,11 @@ and exits non-zero otherwise):
   rejected with **401** (the path is bound into the AEAD).
 - `--expired` — seals with an already-elapsed expiry; rejected with **401**.
 
-See `tests.md` (§4) for the full runbook.
+Append an option after `--`, for example:
+
+```bash
+cargo run -p foctet-http --example axum_body_echo_client --features axum -- --replay
+```
 
 Notes:
 

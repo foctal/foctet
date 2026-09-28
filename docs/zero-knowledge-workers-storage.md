@@ -78,8 +78,7 @@ Blind storage produces `Vec<u8>`, so it drops into any Cloudflare store:
 
 ## SQL schema pattern
 
-For relational databases, the safe shape is boring on purpose: split the
-server-visible routing metadata from the sealed user payload.
+Keep server-visible routing metadata separate from the sealed payload:
 
 ```sql
 CREATE TABLE vault_records (
@@ -118,7 +117,6 @@ application.
 
 When binary columns are unavailable or inconvenient, store `ciphertext` as
 base64 `TEXT` and decode it byte-for-byte before returning it to the client.
-Do not JSON-serialize the plaintext and call that zero knowledge.
 
 ## Turso / libSQL deployment patterns
 
@@ -138,8 +136,7 @@ sealed bytes.
   end-user client.
 
 Turso authentication tokens, database URLs, retry policy, migrations, and query
-builders are application concerns. They do not belong in foctet unless foctet
-itself starts owning a database service, which it intentionally does not.
+builders are application concerns. Foctet does not manage database connections or credentials.
 
 ## PostgreSQL, MySQL, and MariaDB
 
@@ -159,21 +156,11 @@ another native Rust backend, any DB library (`sqlx`, `diesel`, `tokio-postgres`,
 `mysql_async`, `turso`, `libsql`, or a project-specific adapter) can be used as
 long as it preserves the sealed bytes exactly.
 
-## What belongs in foctet vs the application
+## Application responsibilities
 
-foctet should provide the cryptographic storage envelope and the authenticated
-descriptor binding. It should not grow database-specific adapters for every
-storage engine.
+Foctet provides the encrypted envelope and descriptor binding. The application
+manages:
 
-foctet responsibilities:
-
-- `StorageRecord` descriptor binding.
-- `seal_storage_record` / `open_storage_record`.
-- archive formats for large sealed objects.
-- HTTP protected-context helpers for requests that the server must process.
-- documentation and test vectors for the wire formats.
-
-Application responsibilities:
 
 - database schema, migrations, pooling, retries, and credentials;
 - Cloudflare bindings, Turso tokens, Hyperdrive configuration, or native DB

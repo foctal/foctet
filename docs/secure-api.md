@@ -1,6 +1,6 @@
-# Secure Production API
+# Session authentication
 
-Production handshakes use `ProductionSessionAuth`. It can only be constructed
+Authenticated session constructors accept `ProductionSessionAuth`. It can only be constructed
 with one of these authentication roots:
 
 - a local Ed25519 identity plus a pinned peer identity; or
@@ -31,7 +31,3 @@ The advanced
 vector generation and integrations with an externally proven nonce-ownership
 scheme. Their caller must guarantee exclusive ownership of every outbound nonce
 domain and preserve sequence state for the lifetime of the traffic key.
-
-Compile-fail rustdoc tests verify that raw traffic-key literals are inaccessible
-and that an unauthenticated test configuration cannot satisfy a production
-constructor.

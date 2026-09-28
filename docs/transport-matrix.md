@@ -1,4 +1,4 @@
-# Transport security matrix
+# Transport support and requirements
 
 All production sessions require pinned peer identity or an explicitly
 authenticated outer-channel binding. Any terminal Foctet or backend error
@@ -10,8 +10,35 @@ closes the affected channel; retry requires a new authenticated session.
 | QUIC/WebTransport bidirectional stream | Reliable ordered bytes | Exact ordered stream per transport stream | Foctet frame limit plus the implementation's stream flow control | One authenticated handshake/control stream per session; reset, stop, or connection close is terminal | Authenticate the QUIC/TLS peer or use pinned Foctet identity |
 | Raw or browser WebSocket message | Reliable ordered messages | One binary WebSocket message per Foctet message; text is rejected | `MessageConfig::max_message_size`, clamped when the backend reports a lower limit | Rekey uses the same reliable ordered message channel; close or ambiguous send is terminal | Bound any application queue; one Foctet session per raw WebSocket |
 | Multiplexed WebSocket / muxtls | Reliable ordered bytes per mux stream | Independent ordered byte streams; mux owns fairness | Foctet frame limit and mux limits | Each mux stream carries one Foctet channel; session control must not use a lossy path | Configure bounded stream and connection queues |
-| QUIC/WebTransport datagram | Unreliable unordered datagrams | Loss and reorder allowed; duplicates rejected by replay windows | `DatagramConfig::max_datagram_size`, clamped to live backend maximum | Handshake and every rekey require a separate reliable ordered encrypted control channel; connection failure or rekey divergence is terminal | Rely on transport address validation and anti-amplification; reduce the configured size after path-MTU reduction |
+| QUIC/WebTransport datagram | Unreliable unordered datagrams | Loss and reorder allowed; duplicates rejected by replay windows | `DatagramConfig::max_datagram_size`, clamped to the backend maximum at construction | Handshake and every rekey require a separate reliable ordered encrypted control channel; connection failure or rekey divergence is terminal | Rely on transport address validation and anti-amplification; reduce the configured size after path-MTU reduction |
 | Raw connected UDP | Unreliable unordered datagrams | Loss and reorder allowed; connected socket filters other source addresses | Default `DEFAULT_MAX_DATAGRAM_SIZE`, configurable downward | No control channel is provided; use a separate authenticated reliable ordered channel for handshake/rekey | `new` rejects unconnected sockets. Server/listener handoff must use `new_unvalidated_peer`, which enforces a 3x budget until explicit validation |
+
+## Backend features
+
+All features below are available from both `foctet-transport` and the `foctet`
+facade. Native stream adapters use Tokio. No features are enabled by default.
+
+| Feature | Module | Backend | Shapes |
+| --- | --- | --- | --- |
+| `transport-muxtls` | `muxtls` | muxtls 0.4 | Byte stream |
+| `transport-websock` | `websock` | websock 0.6 | Native/browser messages |
+| `transport-websock-mux` | `websock` | websock-tungstenite-mux 0.6 | Native byte stream |
+| `transport-quinn` | `quinn` | Quinn 0.11 | Byte stream, datagram |
+| `transport-quion` | `quion` | Quion 0.2.1 | Byte stream, datagram |
+| `transport-webtrans` | `webtrans` | webtrans 0.6, Quinn backend | Native byte stream, datagram |
+| `transport-webtrans-quion` | `webtrans_quion` | webtrans 0.6, Quion backend | Native byte stream, datagram |
+| `transport-webtrans-browser` | `webtrans_browser` | Browser WebTransport API | Browser datagram |
+
+The two native WebTransport features are additive: enabling both keeps
+`webtrans` on Quinn and exposes Quion through `webtrans_quion`. Applications use
+`webtrans::quion::{ClientBuilder, ServerBuilder}` for Quion-backed sessions.
+
+For direct Quion connections, select `quion/rustls-ring` or
+`quion/rustls-aws-lc-rs` in the application's dependencies. Foctet enables
+Quion's Tokio runtime and datagrams. Keep Quion's server UDP driver alive while using the endpoint; the
+[quion_split](../foctet-transport/examples/quion_split.rs) example demonstrates its lifecycle. `QuionDatagramChannel` is an
+alias for `SecureDatagramChannel<quion::Connection>`, with async sends and the
+shared terminal-error and rekey handling.
 
 ## Datagram rules
 

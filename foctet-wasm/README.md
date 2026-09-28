@@ -8,7 +8,7 @@ the Rust implementation.
 > **Status: experimental (Draft v0).** Provides the one-shot body envelope **and**
 > a full framed session (authenticated handshake, ordered messages,
 > MTU-bounded datagrams, and in-session DH-ratchet rekey). See
-> [`SECURITY.md`](../SECURITY.md) for the security posture and limitations.
+> [`SECURITY.md`](../SECURITY.md) for the security status and limitations.
 
 ## API
 
@@ -257,7 +257,7 @@ and set `CHROMEDRIVER=/path/to/chromedriver`.
 
 ### Browser harness
 
-To exercise the SDK in a **real browser engine** (body envelope, context
+To test the SDK in a browser (body envelope, context
 binding, Rust→JS interop, and a full `FoctetSession` handshake + message
 roundtrip), run the harness page:
 
@@ -268,21 +268,20 @@ roundtrip), run the harness page:
 ```
 
 This builds `pkg-web/` and serves it with a dependency-free Node static server
-(`examples/browser/serve.mjs`) — no Python or editor-specific config required.
+(`examples/browser/serve.mjs`).
 The page reports `passed`/`failed` on screen and as `window.__FOCTET_RESULT__`
-for a headless runner. See [`../tests.md`](../tests.md) for the full
-real-environment test plan.
+for automated runners.
 
 A second page, `examples/browser/websocket.html`, drives the SDK as the
 handshake initiator over a real browser `WebSocket` against the native
-`websock_message_server` example (raw-message shape). Start that server first;
-see `tests.md` (§3.3).
+`websock_message_server` example (raw-message shape). Start that server first using the
+[transport example instructions](../foctet-transport/examples/README.md#browser-interoperability).
 
 A third page, `examples/browser/webtransport.html`, drives the SDK (datagram
 mode) over a real browser `WebTransport` against the native
 `webtrans_datagram_split` example — handshake over a stream, data over
-datagrams, with the dev cert pinned via `serverCertificateHashes`. See
-`tests.md` (§3.5).
+datagrams, with the dev cert pinned via `serverCertificateHashes`. See the
+[transport example instructions](../foctet-transport/examples/README.md#browser-interoperability).
 
 ## Scope and security
 
@@ -299,7 +298,6 @@ with a pinned peer identity so the handshake fails closed against an unexpected
 peer. The JS transport it runs over should still be carried by an authenticated
 outer channel (`wss://`, `https://`) unless you pin identities.
 
-`KeyPair` and `IdentityKeyPair` expose raw key bytes because WebCrypto has no
-portable non-extractable X25519/Ed25519 type; store secret keys in a platform
-keystore or Worker secret and never log them. Host-backed (non-extractable) key
-handling is not yet available across the WASM boundary.
+`KeyPair` and `IdentityKeyPair` expose raw key bytes. Store persistent secrets
+in an appropriate keystore or secrets manager and never log them. The WASM SDK
+does not implement host-backed, non-extractable key handling.
