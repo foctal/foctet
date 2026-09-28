@@ -109,20 +109,19 @@ where
     /// Builds a channel from a transport and an active [`Session`], clamping the
     /// datagram size to the transport's reported maximum when available.
     pub fn from_active_session(transport: T, session: &Session) -> Result<Self, CoreError> {
-        let mut config = DatagramConfig::default();
-        if let Some(max) = transport.max_datagram_size() {
-            config.max_datagram_size = config.max_datagram_size.min(max);
-        }
-        Self::from_active_session_with_config(transport, session, config)
+        Self::from_active_session_with_config(transport, session, DatagramConfig::default())
     }
 
     /// Builds a channel from a transport, an active [`Session`], and an explicit
-    /// datagram configuration.
+    /// datagram configuration, clamped to the transport's reported maximum.
     pub fn from_active_session_with_config(
         transport: T,
         session: &Session,
-        config: DatagramConfig,
+        mut config: DatagramConfig,
     ) -> Result<Self, CoreError> {
+        if let Some(max) = transport.max_datagram_size() {
+            config.max_datagram_size = config.max_datagram_size.min(max);
+        }
         let lease = session.claim_datagram_endpoint()?;
         let endpoint = DatagramEndpoint::from_session_lease_with_config(lease, config);
         Ok(Self {
@@ -385,6 +384,73 @@ mod tests {
             .handle_control(&server_hello)
             .expect("initiator finalizes");
         (initiator, responder)
+    }
+
+    #[tokio::test]
+    async fn explicit_config_respects_backend_limit_without_terminating_on_oversize() {
+        struct BoundedTransport(MemoryDatagramTransport);
+
+        impl DatagramTransport for BoundedTransport {
+            type Error = MemoryError;
+
+            async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
+                assert!(datagram.len() <= 512, "backend MTU must not be exceeded");
+                DatagramTransport::send_datagram(&self.0, datagram).await
+            }
+
+            async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
+                DatagramTransport::recv_datagram(&self.0).await
+            }
+
+            fn max_datagram_size(&self) -> Option<usize> {
+                Some(512)
+            }
+        }
+
+        // An explicit smaller limit is preserved; a larger one is clamped.
+        for configured in [256, 65_535] {
+            let (initiator, responder) = session_pair();
+            let (left, right) = linked_pair();
+            let mut sender = SecureDatagramChannel::from_active_session_with_config(
+                BoundedTransport(left),
+                &initiator,
+                DatagramConfig {
+                    max_datagram_size: configured,
+                    ..Default::default()
+                },
+            )
+            .expect("sender");
+            let mut receiver =
+                SecureDatagramChannel::from_active_session(BoundedTransport(right), &responder)
+                    .expect("receiver");
+            let max = sender.max_plaintext_len();
+            let payload = vec![0xAB; max];
+            assert!(sender.send_datagram(0, 0, &vec![0; max + 1]).await.is_err());
+            assert!(!sender.is_terminal());
+            sender
+                .send_datagram(0, 0, &payload)
+                .await
+                .expect("boundary send");
+            assert_eq!(
+                sender
+                    .transport()
+                    .0
+                    .outbox
+                    .borrow()
+                    .front()
+                    .expect("frame")
+                    .len(),
+                configured.min(512)
+            );
+            assert_eq!(
+                receiver
+                    .recv_datagram()
+                    .await
+                    .expect("boundary receive")
+                    .plaintext,
+                payload
+            );
+        }
     }
 
     #[tokio::test]
