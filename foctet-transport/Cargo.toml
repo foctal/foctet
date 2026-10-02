@@ -80,6 +80,7 @@ required-features = ["runtime-tokio", "transport-webtrans"]
 [[example]]
 name = "websock_split"
 path = "examples/websock_split.rs"
+test = true
 required-features = ["runtime-tokio", "transport-websock-mux"]
 
 [[example]]
@@ -90,6 +91,7 @@ required-features = ["runtime-tokio", "transport-quinn"]
 [[example]]
 name = "udp_datagram_split"
 path = "examples/udp_datagram_split.rs"
+test = true
 required-features = ["runtime-tokio"]
 
 [[example]]

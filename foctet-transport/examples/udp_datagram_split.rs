@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use clap::{Parser, ValueEnum};
 use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, SessionAuthConfig};
 use foctet_transport::udp::UdpDatagramTransport;
-use foctet_transport::{DatagramChannelError, SecureDatagramChannel, TokioTransportBuilder};
+use foctet_transport::{DatagramTransport, SecureDatagramChannel, TokioTransportBuilder};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 /// How to run the example.
@@ -102,17 +102,18 @@ async fn serve(
     udp.connect(peer_udp).await?;
 
     let transport = UdpDatagramTransport::new(udp)?.with_anti_amplification(factor);
-    let mut datagram = SecureDatagramChannel::from_active_session(transport, channel.session())?;
-
     // Anti-amplification: with zero bytes received the budget is zero, so an
     // unsolicited send is refused. Proves a spoofed peer cannot be amplified.
-    match datagram.send_datagram(0, 0, b"unsolicited probe").await {
-        Err(DatagramChannelError::Transport(err)) if err.kind() == ErrorKind::WouldBlock => {
+    // Probe the transport before creating the secure channel: any transport
+    // send error makes a SecureDatagramChannel terminal, including WouldBlock.
+    match transport.send_datagram(b"unsolicited probe".to_vec()).await {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {
             println!("anti-amplification: refused to send before validation (WouldBlock) — ok");
         }
         Ok(()) => return Err("anti-amplification failed: unsolicited send was allowed".into()),
         Err(err) => return Err(Box::new(err)),
     }
+    let mut datagram = SecureDatagramChannel::from_active_session(transport, channel.session())?;
 
     for idx in 0..datagrams {
         let incoming = datagram.recv_datagram().await?;
@@ -179,15 +180,17 @@ async fn run_loopback(args: &Args) -> Result<(), Box<dyn Error + Send + Sync>> {
     let factor = args.anti_amplification;
     let datagrams = args.datagrams;
 
-    let server_task = tokio::spawn(async move {
+    let server = async move {
         let (control, _peer) = control_listener.accept().await?;
         serve(control, server_udp, factor).await
-    });
+    };
 
-    let control = TcpStream::connect(control_addr).await?;
-    let client_udp = UdpSocket::bind("127.0.0.1:0").await?;
-    run_client(control, client_udp, datagrams).await?;
-    server_task.await??;
+    let client = async {
+        let control = TcpStream::connect(control_addr).await?;
+        let client_udp = UdpSocket::bind("127.0.0.1:0").await?;
+        run_client(control, client_udp, datagrams).await
+    };
+    tokio::try_join!(server, client)?;
     Ok(())
 }
 
@@ -235,4 +238,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Role::Client => run_client_role(&args).await?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn loopback_survives_anti_amplification_probe() {
+        let args = Args::parse_from(["udp_datagram_split"]);
+        tokio::time::timeout(std::time::Duration::from_secs(10), run_loopback(&args))
+            .await
+            .expect("UDP loopback completed by deadline")
+            .expect("UDP loopback succeeded");
+    }
 }
