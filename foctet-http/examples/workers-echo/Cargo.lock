@@ -224,7 +224,7 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "foctet-core"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "foctet-http"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "foctet-core",
  "http",
