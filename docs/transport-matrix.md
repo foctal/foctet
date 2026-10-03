@@ -24,7 +24,7 @@ facade. Native stream adapters use Tokio. No features are enabled by default.
 | `transport-websock` | `websock` | websock 0.6 | Native/browser messages |
 | `transport-websock-mux` | `websock` | websock-tungstenite-mux 0.6 | Native byte stream |
 | `transport-quinn` | `quinn` | Quinn 0.11 | Byte stream, datagram |
-| `transport-quion` | `quion` | Quion 0.2.1 | Byte stream, datagram |
+| `transport-quion` | `quion` | Quion 0.2.2 | Byte stream, datagram |
 | `transport-webtrans` | `webtrans` | webtrans 0.6, Quinn backend | Native byte stream, datagram |
 | `transport-webtrans-quion` | `webtrans_quion` | webtrans 0.6, Quion backend | Native byte stream, datagram |
 | `transport-webtrans-browser` | `webtrans_browser` | Browser WebTransport API | Browser datagram |
