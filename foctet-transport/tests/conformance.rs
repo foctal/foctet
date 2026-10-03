@@ -160,6 +160,66 @@ async fn byte_stream_shape_conformance() {
     run_conformance(&mut a, &mut b).await;
 }
 
+/// Synthetic identities are generated for each connection and pinned out of band.
+#[cfg(any(
+    feature = "transport-quinn",
+    feature = "transport-quion",
+    feature = "transport-webtrans-quion",
+    feature = "transport-muxtls",
+    feature = "transport-webtrans",
+    feature = "transport-websock-mux"
+))]
+fn authenticated_pair() -> (SessionAuthConfig, SessionAuthConfig) {
+    use foctet_core::{IdentityKeyPair, PeerIdentity, ProductionSessionAuth};
+    let a = IdentityKeyPair::generate();
+    let b = IdentityKeyPair::generate();
+    (
+        ProductionSessionAuth::pinned_identity(a.clone(), PeerIdentity::new(b.public_key()))
+            .into_session_auth(),
+        ProductionSessionAuth::pinned_identity(b, PeerIdentity::new(a.public_key()))
+            .into_session_auth(),
+    )
+}
+
+#[cfg(any(
+    feature = "transport-quinn",
+    feature = "transport-quion",
+    feature = "transport-webtrans-quion",
+    feature = "transport-muxtls",
+    feature = "transport-webtrans",
+    feature = "transport-websock-mux"
+))]
+async fn run_stream_stress<A: SecureChannel, B: SecureChannel>(a: &mut A, b: &mut B) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let payload = vec![0xA5; 512 * 1024];
+        let (sent, received) = tokio::join!(a.send_payload(&payload), async {
+            // A reader need not be scheduled immediately. The outer transport
+            // must backpressure a burst larger than its receive window.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            b.recv_payload().await
+        });
+        sent.expect("large payload send");
+        assert_eq!(received.expect("large payload receive"), payload);
+        tokio::join!(
+            async {
+                for index in 0..64u8 {
+                    b.send_payload(&[index; 8192]).await.expect("ordered send");
+                }
+            },
+            async {
+                for index in 0..64u8 {
+                    assert_eq!(
+                        a.recv_payload().await.expect("ordered receive"),
+                        vec![index; 8192]
+                    );
+                }
+            }
+        );
+    })
+    .await
+    .expect("bounded stream stress");
+}
+
 // ---- Real-backend byte-stream conformance ----
 //
 // The same suite runs over a real loopback connection for every advertised
@@ -176,6 +236,7 @@ mod quinn_byte_stream {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
     use super::run_conformance;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn quinn_byte_stream_conformance() {
@@ -209,19 +270,40 @@ mod quinn_byte_stream {
             .expect("client connection");
         let (_server_ep, server_conn) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::quinn::open_secure_channel_with_handshake(
+            foctet_transport::quinn::open_secure_channel_with_handshake_and_auth_config(
                 &client_conn,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::quinn::accept_secure_channel_with_handshake(
+            foctet_transport::quinn::accept_secure_channel_with_handshake_and_auth_config(
                 &server_conn,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
+        super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
     }
 }
 
@@ -231,6 +313,7 @@ mod muxtls_byte_stream {
 
     use super::run_conformance;
     use foctet_core::RekeyThresholds;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn muxtls_byte_stream_conformance() {
@@ -257,19 +340,40 @@ mod muxtls_byte_stream {
             .expect("client connection");
         let (_server_ep, server_conn) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::muxtls::open_secure_channel_with_handshake(
+            foctet_transport::muxtls::open_secure_channel_with_handshake_and_auth_config(
                 &client_conn,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::muxtls::accept_secure_channel_with_handshake(
+            foctet_transport::muxtls::accept_secure_channel_with_handshake_and_auth_config(
                 &server_conn,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
+        super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
     }
 }
 
@@ -281,6 +385,7 @@ mod webtrans_byte_stream {
     use foctet_transport::SecureDatagramChannel;
 
     use super::run_conformance;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn webtransport_byte_stream_conformance() {
@@ -323,19 +428,40 @@ mod webtrans_byte_stream {
         let client_session = client.connect(url).await.expect("client session");
         let (_server, server_session) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::webtrans::open_secure_channel_with_handshake(
+            foctet_transport::webtrans::open_secure_channel_with_handshake_and_auth_config(
                 &client_session,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::webtrans::accept_secure_channel_with_handshake(
+            foctet_transport::webtrans::accept_secure_channel_with_handshake_and_auth_config(
                 &server_session,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
+        super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
 
         let mut client_datagrams =
             SecureDatagramChannel::from_active_session(client_session, a.session())
@@ -362,6 +488,7 @@ mod websock_mux_byte_stream {
     use foctet_core::RekeyThresholds;
 
     use super::run_conformance;
+    use foctet_transport::SecureChannel;
 
     #[tokio::test]
     async fn websocket_mux_byte_stream_conformance() {
@@ -413,18 +540,348 @@ mod websock_mux_byte_stream {
         let client_session = client.connect(&url).await.expect("client session");
         let (_server, server_session) = server_task.await.expect("server join");
 
+        let (client_auth, server_auth) = super::authenticated_pair();
         let (client, server) = tokio::join!(
-            foctet_transport::websock::open_secure_channel_with_handshake(
+            foctet_transport::websock::open_secure_channel_with_handshake_and_auth_config(
                 &client_session,
                 RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
             ),
-            foctet_transport::websock::accept_secure_channel_with_handshake(
+            foctet_transport::websock::accept_secure_channel_with_handshake_and_auth_config(
                 &server_session,
                 RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
             ),
         );
         let mut a = client.expect("client channel");
         let mut b = server.expect("server channel");
         run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
+        super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
+    }
+}
+
+#[cfg(all(feature = "runtime-tokio", feature = "transport-quion"))]
+mod quion_byte_stream {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use foctet_core::RekeyThresholds;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    use super::run_conformance;
+    use foctet_transport::SecureChannel;
+
+    #[tokio::test]
+    async fn quion_byte_stream_conformance() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), exercise())
+            .await
+            .expect("bounded Quion conformance");
+    }
+
+    async fn exercise() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("self-signed cert");
+        let cert_der = CertificateDer::from(cert.cert);
+        let key_der =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+        let mut transport = quion::TransportConfig::default();
+        transport.set_max_datagram_frame_size(Some(quion::VarInt::from_u32(65_535)));
+        let server_config = quion::ServerConfig::builder()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .expect("server certificate")
+            .with_transport_config(transport.clone())
+            .build()
+            .expect("server config");
+        let bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let server_ep = quion::Endpoint::server(server_config, bind).expect("server endpoint");
+        let server_addr = server_ep.local_addr();
+        let server_driver = server_ep
+            .spawn_default_server_udp_driver(65_535)
+            .expect("server driver");
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der).expect("add root");
+        let client_config = quion::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .expect("client roots")
+            .with_transport_config(transport)
+            .build();
+        let client_ep = quion::Endpoint::client(bind).expect("client endpoint");
+        client_ep.set_default_client_config(client_config);
+
+        let server_task = tokio::spawn(async move {
+            let incoming = server_ep.accept().await.expect("incoming");
+            let conn = incoming.await.expect("server connection");
+            (server_ep, conn)
+        });
+        let client_conn = client_ep
+            .connect(server_addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("client connection");
+        let (_server_ep, server_conn) = server_task.await.expect("server join");
+
+        let (client_auth, server_auth) = super::authenticated_pair();
+        let (client, server) = tokio::join!(
+            foctet_transport::quion::open_secure_channel_with_handshake_and_auth_config(
+                &client_conn,
+                RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
+            ),
+            foctet_transport::quion::accept_secure_channel_with_handshake_and_auth_config(
+                &server_conn,
+                RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
+            ),
+        );
+        let mut a = client.expect("client channel");
+        let mut b = server.expect("server channel");
+        assert!(a.session().peer_authenticated());
+        assert!(b.session().peer_authenticated());
+        let mut client_datagrams =
+            foctet_transport::quion::QuionDatagramChannel::from_active_session_with_config(
+                client_conn.clone(),
+                a.session(),
+                foctet_core::DatagramConfig {
+                    max_datagram_size: 65_535,
+                    ..Default::default()
+                },
+            )
+            .expect("client datagrams");
+        let mut server_datagrams =
+            foctet_transport::quion::QuionDatagramChannel::from_active_session_with_config(
+                server_conn.clone(),
+                b.session(),
+                foctet_core::DatagramConfig {
+                    max_datagram_size: 65_535,
+                    ..Default::default()
+                },
+            )
+            .expect("server datagrams");
+        run_conformance(&mut a, &mut b).await;
+        client_datagrams
+            .send_datagram(7, 0, b"before rekey")
+            .await
+            .expect("datagram send");
+        let received = server_datagrams
+            .recv_datagram()
+            .await
+            .expect("datagram receive");
+        assert_eq!(received.plaintext, b"before rekey");
+        assert_eq!(received.header.stream_id, 7);
+        a.rekey_now().await.expect("client rekey");
+        super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
+        client_datagrams
+            .rekey_from_session(a.session())
+            .expect("client key adoption");
+        server_datagrams
+            .rekey_from_session(b.session())
+            .expect("server key adoption");
+        let max = server_datagrams.max_plaintext_len();
+        assert!(
+            max < server_conn
+                .max_datagram_size()
+                .expect("negotiated datagrams")
+        );
+        let oversized = vec![0; max + 1];
+        assert!(
+            server_datagrams
+                .send_datagram(0, 0, &oversized)
+                .await
+                .is_err()
+        );
+        assert!(!server_datagrams.is_terminal());
+        let payload = vec![0x42; max];
+        server_datagrams
+            .send_datagram(0, 0, &payload)
+            .await
+            .expect("maximum datagram");
+        assert_eq!(
+            client_datagrams
+                .recv_datagram()
+                .await
+                .expect("after rekey datagram")
+                .plaintext,
+            payload
+        );
+
+        // A second stream with an unexpected pinned identity must be rejected.
+        let (client_auth, _) = super::authenticated_pair();
+        let (_, server_auth) = super::authenticated_pair();
+        let (client, server) = tokio::join!(
+            foctet_transport::quion::open_secure_channel_with_handshake_and_auth_config(
+                &client_conn,
+                RekeyThresholds::default(),
+                client_auth,
+                Default::default()
+            ),
+            foctet_transport::quion::accept_secure_channel_with_handshake_and_auth_config(
+                &server_conn,
+                RekeyThresholds::default(),
+                server_auth,
+                Default::default()
+            ),
+        );
+        assert!(client.is_err());
+        assert!(server.is_err());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
+        client_conn.close(quion::VarInt::from_u32(0), b"test complete");
+        assert!(
+            client_datagrams
+                .send_datagram(0, 0, b"closed")
+                .await
+                .is_err()
+        );
+        assert!(client_datagrams.is_terminal());
+        assert!(matches!(
+            client_datagrams.recv_datagram().await,
+            Err(foctet_transport::DatagramChannelError::Core(
+                foctet_core::CoreError::TransportTerminal
+            ))
+        ));
+        server_driver.stop().await.expect("stop server driver");
+    }
+}
+
+#[cfg(all(feature = "runtime-tokio", feature = "transport-webtrans-quion"))]
+mod webtrans_quion_byte_stream {
+    use ::webtrans::quion as webtrans;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
+    use foctet_core::RekeyThresholds;
+    use foctet_transport::SecureDatagramChannel;
+
+    use super::run_conformance;
+    use foctet_transport::SecureChannel;
+
+    #[tokio::test]
+    async fn webtransport_byte_stream_conformance() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), exercise())
+            .await
+            .expect("bounded Quion WebTransport conformance");
+    }
+
+    async fn exercise() {
+        let (cert_chain, key) = webtrans::tls::generate_self_signed_pair_der(vec![
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+        ])
+        .expect("self-signed cert");
+
+        // Reserve a free UDP port for the server (bind-and-release; the tiny
+        // race is acceptable for a loopback test).
+        let addr = {
+            let sock = std::net::UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                0,
+            )))
+            .expect("probe socket");
+            sock.local_addr().expect("probe addr")
+        };
+
+        let mut server = webtrans::ServerBuilder::new()
+            .with_addr(addr)
+            .with_certificate(cert_chain.clone(), key)
+            .expect("server");
+        let server_task = tokio::spawn(async move {
+            let request = server
+                .accept()
+                .await
+                .expect("server closed")
+                .expect("server request");
+            let session = request.ok().await.expect("server session");
+            (server, session)
+        });
+
+        let client = webtrans::ClientBuilder::new()
+            .with_server_certificates(cert_chain)
+            .expect("client");
+        let url =
+            url::Url::parse(&format!("https://127.0.0.1:{}", addr.port())).expect("server url");
+        let client_session = client.connect(url).await.expect("client session");
+        let (_server, server_session) = server_task.await.expect("server join");
+
+        let (client_auth, server_auth) = super::authenticated_pair();
+        let (client, server) = tokio::join!(
+            foctet_transport::webtrans_quion::open_secure_channel_with_handshake_and_auth_config(
+                &client_session,
+                RekeyThresholds::default(),
+                client_auth,
+                Default::default(),
+            ),
+            foctet_transport::webtrans_quion::accept_secure_channel_with_handshake_and_auth_config(
+                &server_session,
+                RekeyThresholds::default(),
+                server_auth,
+                Default::default(),
+            ),
+        );
+        let mut a = client.expect("client channel");
+        let mut b = server.expect("server channel");
+        run_conformance(&mut a, &mut b).await;
+        a.rekey_now().await.expect("client rekey");
+        super::run_stream_stress(&mut a, &mut b).await;
+        b.rekey_now().await.expect("server rekey");
+        let (sent, received) = tokio::join!(b.send_payload(b"after rekey"), a.recv_payload());
+        sent.expect("send after server rekey");
+        assert_eq!(
+            received.expect("receive after server rekey"),
+            b"after rekey"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (left, right) = tokio::join!(a.close(), b.close());
+            left.expect("client channel close");
+            right.expect("server channel close");
+        })
+        .await
+        .expect("both channel writers close by deadline");
+
+        let mut client_datagrams =
+            SecureDatagramChannel::from_active_session(client_session, a.session())
+                .expect("client datagram channel");
+        let mut server_datagrams =
+            SecureDatagramChannel::from_active_session(server_session, b.session())
+                .expect("server datagram channel");
+        client_datagrams
+            .send_datagram(0, 0, b"webtransport datagram")
+            .await
+            .expect("client datagram send");
+        let received = server_datagrams
+            .recv_datagram()
+            .await
+            .expect("server datagram receive");
+        assert_eq!(received.plaintext, b"webtransport datagram");
     }
 }

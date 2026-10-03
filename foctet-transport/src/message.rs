@@ -78,6 +78,21 @@ where
     }
 }
 
+// A dropped rekey future cannot prove whether the peer observed the control
+// message. Never allow the session to continue with ambiguous traffic keys.
+struct RekeyGuard<'a> {
+    session: &'a mut Session,
+    committed: bool,
+}
+
+impl Drop for RekeyGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.session.terminate();
+        }
+    }
+}
+
 /// A secure Foctet message channel over any [`MessageTransport`].
 ///
 /// Negotiate keys with a normal Foctet handshake (for example over a control
@@ -158,6 +173,9 @@ where
     }
 
     /// Seals `plaintext` into one frame and sends it as a single message.
+    ///
+    /// Cancelling after transport submission makes the channel terminal because
+    /// the backend may already have accepted the message.
     pub async fn send_message(
         &mut self,
         stream_id: u32,
@@ -176,8 +194,12 @@ where
                 return Err(MessageChannelError::Core(error));
             }
         };
+        self.terminal = true;
         match self.transport.send_message(bytes).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.terminal = false;
+                Ok(())
+            }
             Err(error) => {
                 self.terminal = true;
                 Err(MessageChannelError::Transport(error))
@@ -190,6 +212,7 @@ where
     /// The control message is sealed under the old traffic key. A backend
     /// failure is ambiguous and closes both this channel and `session`; a seal
     /// rejection before transport delivery cancels the prepared transaction.
+    /// Cancelling during delivery terminates both the channel and the session.
     pub async fn send_rekey(
         &mut self,
         session: &mut Session,
@@ -215,6 +238,12 @@ where
                     return Err(MessageChannelError::Core(error));
                 }
             };
+        self.terminal = true;
+        let mut guard = RekeyGuard {
+            session,
+            committed: false,
+        };
+        let session = &mut *guard.session;
         if let Err(error) = self.transport.send_message(bytes).await {
             self.terminal = true;
             session.terminate();
@@ -234,14 +263,20 @@ where
             }
         };
         self.endpoint.install_active_keys(keys);
+        guard.committed = true;
+        self.terminal = false;
         Ok(())
     }
 
     /// Receives one message and opens it into a decrypted payload.
+    ///
+    /// Cancelling a pending receive terminates this channel: a generic backend
+    /// may have consumed a message before its future was dropped.
     pub async fn recv_message(&mut self) -> Result<DecodedMessage, MessageChannelError<T::Error>> {
         if self.is_terminal() {
             return Err(MessageChannelError::Core(CoreError::TransportTerminal));
         }
+        self.terminal = true;
         let bytes = match self.transport.recv_message().await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -249,6 +284,7 @@ where
                 return Err(MessageChannelError::Transport(error));
             }
         };
+        self.terminal = false;
         match self.endpoint.open(&bytes) {
             Ok(message) => Ok(message),
             Err(error) => {
@@ -261,10 +297,16 @@ where
     }
 
     /// Receives and applies one rekey from this reliable control channel.
+    /// Cancelling a pending receive terminates the channel and the session.
     pub async fn recv_rekey(
         &mut self,
         session: &mut Session,
     ) -> Result<(), MessageChannelError<T::Error>> {
+        let mut guard = RekeyGuard {
+            session,
+            committed: false,
+        };
+        let session = &mut *guard.session;
         let decoded = match self.recv_message().await {
             Ok(decoded) => decoded,
             Err(error) => {
@@ -302,6 +344,7 @@ where
             }
         };
         self.endpoint.install_active_keys(keys);
+        guard.committed = true;
         Ok(())
     }
 }
@@ -490,5 +533,63 @@ mod tests {
                 .await,
             Err(MessageChannelError::Core(CoreError::TransportTerminal))
         ));
+    }
+    struct PendingTransport;
+
+    impl MessageTransport for PendingTransport {
+        type Error = MemoryError;
+        async fn send_message(&self, _: Vec<u8>) -> Result<(), MemoryError> {
+            std::future::pending().await
+        }
+        async fn recv_message(&self) -> Result<Vec<u8>, MemoryError> {
+            std::future::pending().await
+        }
+        fn max_message_size(&self) -> Option<usize> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_message_operations_fail_closed() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        for receive in [false, true] {
+            let (session, _) = shared_session_keys();
+            let mut channel =
+                SecureMessageChannel::from_active_session(PendingTransport, &session).unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            if receive {
+                let mut future = Box::pin(channel.recv_message());
+                assert!(future.as_mut().poll(&mut cx).is_pending());
+            } else {
+                let mut future = Box::pin(channel.send_message(0, 0, b"payload"));
+                assert!(future.as_mut().poll(&mut cx).is_pending());
+            }
+            assert!(channel.is_terminal());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_rekey_terminates_the_session_and_channel() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        for receive in [false, true] {
+            let (mut session, _) = shared_session_keys();
+            let mut channel =
+                SecureMessageChannel::from_active_session(PendingTransport, &session).unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            {
+                let mut future = if receive {
+                    Box::pin(channel.recv_rekey(&mut session))
+                        as std::pin::Pin<Box<dyn Future<Output = _>>>
+                } else {
+                    Box::pin(channel.send_rekey(&mut session))
+                };
+                assert!(future.as_mut().poll(&mut cx).is_pending());
+            }
+            assert!(channel.is_terminal());
+            assert_eq!(session.state(), foctet_core::SessionState::Closed);
+            assert!(session.active_keys().is_none());
+        }
     }
 }

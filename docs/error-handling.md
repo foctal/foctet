@@ -1,9 +1,8 @@
 # Error handling and terminal-state policy
 
-This document defines the required caller action for every public Foctet error
-surface. It is part of the protocol safety contract: an error is not a license
-to retry the same ciphertext, plaintext, control message, or session on an
-arbitrary connection.
+Use the error disposition to decide whether an operation can be retried or
+whether the session must be discarded. Retrying after an ambiguous send can
+reuse protocol state or duplicate an application operation.
 
 ## Rules
 
@@ -55,7 +54,7 @@ secret-free diagnostics.
 
 `TransportChannelError`, `MessageChannelError`, `DatagramChannelError`, and
 feature-gated `QuinnDatagramError` expose `disposition()`. Underlying transport
-errors, including `QuinnDatagramTransportError`, are terminal because delivery
+errors, including `QuinnDatagramTransportError` and `QuionDatagramTransportError`, are terminal because delivery
 and peer state cannot be proven after an error.
 
 | Errors | Disposition | Required action |

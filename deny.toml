@@ -3,18 +3,19 @@
 # See https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# Check all targets the workspace can build for.
+# Enable all workspace features when constructing the dependency graph.
 all-features = true
 
 [advisories]
 version = 2
-# Fail the build on any security vulnerability.
+# Reject yanked crate versions.
 yanked = "deny"
 # Known accepted advisories (review and prune periodically):
 ignore = [
-    # rustls-pemfile is unmaintained (no safe upgrade) but only reachable through
-    # transport examples/tests (dev surface), not the published library API.
-    # Owner: maintainer. Review-by: 2026-10-01. Remove when the example stack upgrades.
+    # rustls-pemfile is unmaintained and remains a transitive dependency of
+    # muxtls 0.3.1 when the transport-muxtls feature is enabled.
+    # Remove this exception once the resolved dependency graph no longer
+    # includes rustls-pemfile.
     "RUSTSEC-2025-0134",
 ]
 

@@ -402,11 +402,25 @@ mod datagram_tests {
             .expect("client connection");
         let server_conn = server_task.await.expect("server join");
 
+        let a = foctet_core::IdentityKeyPair::generate();
+        let b = foctet_core::IdentityKeyPair::generate();
+        let client_auth = foctet_core::ProductionSessionAuth::pinned_identity(
+            a.clone(),
+            foctet_core::PeerIdentity::new(b.public_key()),
+        );
+        let server_auth = foctet_core::ProductionSessionAuth::pinned_identity(
+            b,
+            foctet_core::PeerIdentity::new(a.public_key()),
+        );
         let client_conn_hs = client_conn.clone();
         let client_hs = tokio::spawn(async move {
             let (send, recv) = client_conn_hs.open_bi().await.expect("open_bi");
             TokioTransportBuilder::new()
-                .establish_initiator_from_split(recv, send, RekeyThresholds::default())
+                .establish_production_initiator(
+                    crate::SplitIo::from_split(recv, send),
+                    RekeyThresholds::default(),
+                    client_auth,
+                )
                 .await
                 .expect("client handshake")
                 .into_transport_and_session()
@@ -414,7 +428,11 @@ mod datagram_tests {
 
         let (server_send, server_recv) = server_conn.accept_bi().await.expect("accept_bi");
         let server_channel = TokioTransportBuilder::new()
-            .establish_responder_from_split(server_recv, server_send, RekeyThresholds::default())
+            .establish_production_responder(
+                crate::SplitIo::from_split(server_recv, server_send),
+                RekeyThresholds::default(),
+                server_auth,
+            )
             .await
             .expect("server handshake");
         let (_server_io, server_session) = server_channel.into_transport_and_session();

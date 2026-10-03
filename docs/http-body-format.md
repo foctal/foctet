@@ -6,9 +6,11 @@ This document defines the first `application/foctet` envelope format for HTTP an
 
 - One-shot sealed message format.
 - Transport-agnostic binary body envelope.
-- Self-contained encrypted body (no external metadata required for decryption).
+- Decryption requires the recipient key and, for context-bound envelopes, the
+  same external context used when sealing.
 - Single-recipient in current API, with recipient-table structure designed for multi-recipient extension.
-- Body protection only: outer HTTP metadata is intentionally out of scope.
+- Encrypts the body; the protected-context APIs also authenticate selected HTTP
+  metadata without hiding it.
 
 ## Media Type
 
@@ -49,7 +51,10 @@ recipient =
 ```
 
 The payload ciphertext begins at `header_len`.
-The full `header` bytes are used as payload AEAD associated data (AAD).
+The payload AEAD associated data (AAD) is `header || context`. The low-level
+`seal_body` / `open_body` helpers use an empty context. Context bytes are not
+stored in the envelope; both endpoints must supply identical bytes. See
+[HTTP context rules](http-canonicalization.md) for the HTTP representation.
 
 ## Sealing Model
 
@@ -58,25 +63,29 @@ The full `header` bytes are used as payload AEAD associated data (AAD).
 3. Derive recipient wrapping key + wrap nonce from ECDH shared secret via HKDF.
 4. Wrap content key with XChaCha20-Poly1305 (`aad = key_id`).
 5. Build envelope header with ephemeral public key, recipient entry, and payload nonce.
-6. Encrypt plaintext body with content key (`aad = full header`).
+6. Encrypt plaintext body with content key (`aad = header || context`).
 
 ## Opening Model
 
 1. Parse and validate header with strict limits.
 2. For recipient entries, derive wrap material from recipient secret key and envelope ephemeral public key.
 3. Attempt content-key unwrap (`aad = entry key_id`).
-4. Decrypt payload ciphertext using unwrapped content key and full header as AAD.
+4. Decrypt payload ciphertext using the unwrapped content key and `header || context` as AAD.
 
 ## Security Boundaries
 
-`application/foctet` protects the HTTP body bytes and detects body tampering, but it does not hide or authenticate:
+The body envelope does not hide outer HTTP metadata:
 
 - HTTP method
 - URL / path / query
 - response status code
 - outer headers that are not embedded into the encrypted body by the application
 
-Production deployments should compose body envelopes with an authenticated outer channel such as HTTPS, authenticated WebTransport, or an already-authenticated Foctet transport session.
+The protected-context APIs authenticate selected metadata and use a replay store
+to reject repeated requests. The low-level body helpers alone provide neither
+HTTP metadata binding nor replay protection.
+
+Applications should compose body envelopes with an authenticated outer channel such as HTTPS, authenticated WebTransport, or an already-authenticated Foctet transport session.
 
 ## Hardening Requirements
 

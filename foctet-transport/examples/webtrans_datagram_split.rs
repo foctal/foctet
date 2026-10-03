@@ -1,4 +1,4 @@
-// WebTransport datagram example (tests.md §3.5). A browser page drives the WASM
+// WebTransport datagram example (the transport examples README). A browser page drives the WASM
 // `FoctetSession` against the `server` role here, over a real `WebTransport`.
 //
 // Raw datagrams have no handshake of their own, so this follows the documented

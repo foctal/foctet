@@ -18,4 +18,4 @@ Notes:
 
 - Demo keys in examples are fixed for readability and are not production-safe.
 - New production integrations should usually start with the authenticated `secure_channel_*` examples.
-- For a full cross-crate map of examples, see `docs/examples.md`.
+- For a full cross-crate map of examples, see the [example guide](../../docs/examples.md).

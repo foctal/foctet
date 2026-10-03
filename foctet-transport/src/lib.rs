@@ -8,7 +8,7 @@
 //!
 //! Start with `TokioTransportBuilder` or `FuturesTransportBuilder` when you
 //! already have split I/O halves. Use transport-specific modules such as
-//! `quinn`, `webtrans`, `websock`, or `muxtls` when you want convenience
+//! `quinn`, `quion`, `webtrans`, `webtrans_quion`, `websock`, or `muxtls` when you want convenience
 //! wrappers around those transports.
 //!
 //! For production use, prefer `establish_production_*` methods together with
@@ -60,6 +60,8 @@ mod tokio;
 pub mod muxtls;
 #[cfg(feature = "transport-quinn")]
 pub mod quinn;
+#[cfg(feature = "transport-quion")]
+pub mod quion;
 #[cfg(feature = "runtime-tokio")]
 pub mod udp;
 #[cfg(feature = "transport-websock")]
@@ -68,6 +70,8 @@ pub mod websock;
 pub mod webtrans;
 #[cfg(all(target_arch = "wasm32", feature = "transport-webtrans-browser"))]
 pub mod webtrans_browser;
+#[cfg(feature = "transport-webtrans-quion")]
+pub mod webtrans_quion;
 
 pub use adapter::SplitIo;
 pub use config::TransportConfig;

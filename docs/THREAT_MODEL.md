@@ -6,7 +6,7 @@ the `0.x` release line.
 This document describes what Foctet defends against, what it explicitly does
 not, and which residual risks an integrating application must handle itself.
 It complements `SPEC.md` (wire format, §3 summarizes the adversary),
-`SECURITY.md` (current posture, reporting), and
+`SECURITY.md` (security status, reporting), and
 `docs/recommended-deployments.md` (composition guidance). Where this document
 and the code disagree, that is a bug — please report it.
 
@@ -74,7 +74,7 @@ authentication. Two production mechanisms exist:
   handshake only completes inside that specific outer channel. Suitable when
   the outer channel already authenticates the peer (mutual TLS).
 
-Running unauthenticated requires the deliberately alarming
+Running unauthenticated requires the explicit
 `unauthenticated_for_testing()` opt-in.
 
 **Residual risk.** Identity distribution/pinning is the application's problem:

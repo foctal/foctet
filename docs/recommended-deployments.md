@@ -1,6 +1,7 @@
 # Recommended Deployment Patterns
 
-This guide summarizes the recommended production composition patterns for Foctet Draft v0.
+Choose a Foctet layer based on the lifetime and routing of your data. Foctet
+Draft v0 is experimental; see [SECURITY.md](../SECURITY.md) before deploying.
 
 ## Choosing the Right Foctet Layer
 
@@ -16,20 +17,17 @@ Use this when both endpoints actively exchange encrypted data over a live connec
 
 - Recommended crates: `foctet-transport` plus `foctet-core` identity types.
 - Recommended transports: QUIC streams, WebTransport streams, multiplexed WebSocket streams, `muxtls`, or any split send/recv byte stream.
-- Recommended setup:
-  - create a `SessionAuthConfig`
-  - attach a local Ed25519 identity
-  - pin the expected remote `PeerIdentity`
-  - call `require_peer_authentication(true)`
-  - use `establish_initiator_with_auth` / `establish_responder_with_auth`
-
-This is the primary production path when Foctet is the main secure channel.
+Use `ProductionSessionAuth::pinned_identity` with a local Ed25519 identity and
+the expected remote `PeerIdentity`, then call the transport builder's
+`establish_production_initiator` or `establish_production_responder`. If the
+outer channel already authenticates the peer, use
+`ProductionSessionAuth::authenticated_channel` with its `ChannelBinding`.
 
 ### When to choose it
 
 - You need bidirectional E2EE streams.
 - You need replay protection and rekey over a long-lived session.
-- You want one transport-agnostic secure channel abstraction across `quinn`, `webtrans`, `websock`, or custom split I/O.
+- You want one transport-agnostic secure channel abstraction across Quinn, Quion, WebTransport, WebSocket, or custom split I/O.
 
 ### What still remains outside Foctet
 
@@ -107,4 +105,3 @@ Do not use deterministic archive secrets for real user data because fixed archiv
 - Keep parser limits enabled for untrusted input.
 - Keep `x-foctet-scope: body-only` on HTTP body-envelope deployments unless you have a strong compatibility reason not to.
 - Use randomized archive builders in production.
-- Update `SPEC.md` and `test-vectors/` together for every wire-format change.

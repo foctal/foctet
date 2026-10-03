@@ -7,15 +7,15 @@ This guide collects the recommended Foctet examples by deployment style.
 | Goal | Recommended example | Why start here |
 | --- | --- | --- |
 | Authenticated end-to-end stream over a single connection | `foctet/examples/secure_channel_tokio.rs` | Smallest authenticated native-handshake example with pinned identities |
-| Runtime-agnostic transport integration over a real stream transport | `foctet-transport/examples/quinn_split.rs` | Shows the recommended `foctet-transport` builder flow with authenticated per-stream sessions |
-| HTTP body encryption with a Rust server | `foctet-http/examples/axum_body_echo_server.rs` and `foctet-http/examples/axum_body_echo_client.rs` | Demonstrates the production-recommended protected-context path (`*_with_context`) with replay defense |
+| QUIC stream integration with Tokio | `foctet-transport/examples/quinn_split.rs` | Shows the recommended `foctet-transport` builder flow with authenticated per-stream sessions |
+| HTTP body encryption with a Rust server | `foctet-http/examples/axum_body_echo_server.rs` and `foctet-http/examples/axum_body_echo_client.rs` | Demonstrates the protected-context API (`*_with_context`) with replay defense |
 | Context-bound HTTP encryption with Cloudflare Workers | `foctet-http/examples/workers-echo` plus `foctet-http/examples/workers_echo_client.rs` | Binds routes and request/response correlation and uses Durable Object replay protection |
 | Archive/file encryption and split archive roundtrip | `foctet/examples/file_archive_roundtrip.rs` | Shows single-file and split archive creation plus restore |
 | Deterministic interoperability fixtures | `foctet/examples/gen_vectors.rs` | Regenerates the repository test vectors |
 
 ## Transport E2EE Examples
 
-### Lowest-friction authenticated native handshake
+### Authenticated native handshake
 
 ```bash
 cargo run -p foctet --example secure_channel_tokio
@@ -33,6 +33,7 @@ cargo run -p foctet --example secure_channel_sync
 
 ### Transport-builder integrations
 
+- `foctet-transport/examples/quion_split.rs` (`--features transport-quion`)
 - `foctet-transport/examples/quinn_split.rs` (`--features transport-quinn`)
 - `foctet-transport/examples/webtrans_split.rs` (`--features transport-webtrans`)
 - `foctet-transport/examples/websock_split.rs` (`--features transport-websock-mux`)
@@ -46,9 +47,11 @@ cargo run -p foctet --example secure_channel_sync
   native WebTransport responder (handshake over a stream, data over datagrams);
   counterpart for the browser page (`foctet-wasm/examples/browser/webtransport.html`)
 
-These examples all use authenticated Foctet handshakes and `SessionAuthConfig`. They
-are the best reference when integrating Foctet with existing stream transports. Each
-needs its transport feature enabled, e.g.:
+Most examples use pinned identities and exchange the Foctet handshake over the
+transport. `muxtls_split` instead establishes test sessions in process before
+attaching them to streams. See the [transport examples](../foctet-transport/examples/README.md)
+for authentication details and server/client commands. Enable the example's
+transport feature when running it:
 
 ```bash
 cargo run -p foctet-transport --example websock_split --features transport-websock-mux

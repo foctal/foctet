@@ -1,3 +1,4 @@
+use rustls::pki_types::pem::PemObject;
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
@@ -121,7 +122,8 @@ fn load_cert_chain(
         return Ok(vec![rustls::pki_types::CertificateDer::from(data)]);
     }
     let mut reader = std::io::BufReader::new(&data[..]);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let certs = rustls::pki_types::CertificateDer::pem_reader_iter(&mut reader)
+        .collect::<Result<Vec<_>, _>>()?;
     if certs.is_empty() {
         return Err("no certificate found in tls-cert".into());
     }
@@ -234,7 +236,9 @@ async fn run_client(
     // session even if transport accept order differs from open order.
     for (idx, auth) in client_auth_configs.into_iter().enumerate() {
         let (mut send, recv) = session.open_bi().await?;
-        send.write_all(&(idx as u32).to_be_bytes()).await?;
+        // The inherent write_all selects the backend's direct API, which cannot
+        // be mixed with the AsyncWrite API used by flush and the Foctet channel.
+        AsyncWriteExt::write_all(&mut send, &(idx as u32).to_be_bytes()).await?;
         send.flush().await?;
         let channel = builder
             .establish_initiator_with_auth(
@@ -379,5 +383,19 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Role::Loopback => run_loopback(&args).await,
         Role::Server => run_server_role(&args).await,
         Role::Client => run_client_role(&args).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn loopback_tag_then_authenticated_channel() {
+        let args = Args::parse_from(["websock_split"]);
+        tokio::time::timeout(std::time::Duration::from_secs(10), run_loopback(&args))
+            .await
+            .expect("WebSocket loopback completed by deadline")
+            .expect("WebSocket loopback succeeded");
     }
 }

@@ -1,8 +1,7 @@
 # Operations, observability, and sizing
 
-This document defines the v1 operational contract. It complements the exact
-hard ceilings in `resource-limits.md` and transport requirements in
-`transport-matrix.md`.
+This guide covers resource sizing, metrics, and session lifecycle. See also
+[resource limits](resource-limits.md) and [transport requirements](transport-matrix.md).
 
 ## Safe defaults and sizing
 
@@ -19,17 +18,14 @@ the bounds. In particular:
 | Archives | 512 MiB in-memory plaintext maximum | Budget plaintext plus encrypted chunks and metadata; use an application-level smaller cap under constrained runtimes | No streaming archive format exists; input above the cap is rejected |
 | Workers replay | One Durable Object entry per message ID until expiry | TTL multiplied by peak accepted request rate determines retained state | Store failure rejects the request; never bypass replay protection |
 
-Every release candidate must run:
+To measure throughput and latency on your hardware, run:
 
 ```bash
 cargo run --release -p foctet --example release_benchmark --locked
-/usr/bin/time -l cargo run --release -p foctet --example release_benchmark --locked
 ```
 
-Record CPU, OS, Rust version, build profile, throughput, mean latency, and peak
-resident memory in the release evidence. Compare with the previous release; a
-greater than 10% regression requires an explanation or fix. These numbers are
-sizing evidence for that machine, not a universal performance promise.
+Record the CPU, OS, Rust version, and build profile when comparing results.
+Measure peak memory separately with your platform's profiling tools.
 
 ## Structured metrics
 
@@ -39,7 +35,7 @@ stable, secret-free, low-cardinality categories. Export counters using the
 returned labels. Never attach plaintext, ciphertext, key IDs, message IDs,
 identity keys, route strings, header values, or raw errors as metric labels.
 
-Required counters and alert signals:
+Available metrics and suggested alerts:
 
 | Label | Meaning | Suggested alert |
 | --- | --- | --- |

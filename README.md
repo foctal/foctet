@@ -30,14 +30,14 @@ Transport-agnostic end-to-end encryption layer for secure data transfer.
 
 ## Deployment Guide
 
-See [`docs/recommended-deployments.md`](docs/recommended-deployments.md) for the recommended production composition patterns across transport E2EE, HTTP body envelopes, and archive/file delivery.
+See [`docs/recommended-deployments.md`](docs/recommended-deployments.md) for the integration patterns across transport E2EE, HTTP body envelopes, and archive/file delivery.
 
 Security documentation:
 
 - [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — what Foctet defends against, residual risks, and explicit non-goals.
 - [`docs/POLICIES.md`](docs/POLICIES.md) — versioning/compatibility/deprecation, key lifecycle and rotation, incident response.
 - [`docs/error-handling.md`](docs/error-handling.md) — required action for core, HTTP, and transport errors.
-- [`SECURITY.md`](SECURITY.md) — current security posture, known limitations, vulnerability reporting.
+- [`SECURITY.md`](SECURITY.md) — security status, known limitations, vulnerability reporting.
 
 ## Examples
 
@@ -46,7 +46,7 @@ Security documentation:
 
 ## What Foctet Covers
 
-Implemented and tested today:
+Foctet provides:
 
 - **Byte-stream channels** over generic split I/O plus transport helpers for
   QUIC, WebTransport, WebSocket mux, and muxTLS.
@@ -69,16 +69,18 @@ Current gaps:
 Foctet exposes three transport shapes:
 
 - **byte stream**: `TokioTransportBuilder` / `FuturesTransportBuilder`, plus
-  feature-gated adapters such as `quinn`, `webtrans`, `websock`, and `muxtls`
+  feature-gated adapters for Quinn, Quion, WebTransport, WebSocket, and muxtls
+  (see the [feature table](docs/transport-matrix.md#backend-features))
 - **message**: `MessageTransport` + `SecureMessageChannel`
 - **datagram**: `DatagramTransport` + `SecureDatagramChannel`
 
-The browser-facing surface is `foctet-wasm` (`FoctetSession`) and the
+Browser support is provided by `foctet-wasm` (`FoctetSession`) and the
 wasm32-only `BrowserWebTransportDatagrams` adapter.
 
 ## Quick Start
 
-For async stream transports, the recommended path is `foctet-transport`:
+For async stream transports, enable the `runtime-tokio` feature on
+`foctet-transport`:
 
 ```rust,no_run
 use foctet_core::{
@@ -94,19 +96,19 @@ async fn connect<T>(
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-let builder = TokioTransportBuilder::new();
-let channel = builder
-    .establish_production_initiator(
-        stream,
-        RekeyThresholds::default(),
-        ProductionSessionAuth::pinned_identity(
-            local_identity,
-            PeerIdentity::new(peer_public_key),
-        ),
-    )
-    .await?;
-let _ = channel;
-Ok(())
+    let builder = TokioTransportBuilder::new();
+    let channel = builder
+        .establish_production_initiator(
+            stream,
+            RekeyThresholds::default(),
+            ProductionSessionAuth::pinned_identity(
+                local_identity,
+                PeerIdentity::new(peer_public_key),
+            ),
+        )
+        .await?;
+    let _ = channel;
+    Ok(())
 }
 ```
 
@@ -119,7 +121,7 @@ tests.
 
 ## Security Notes
 
-See [`SECURITY.md`](SECURITY.md) for the full posture, threat model, and
+See [`SECURITY.md`](SECURITY.md) for the security limitations, threat model, and
 reporting process.
 
 - Both the async (`FoctetFramed`) and synchronous (`SyncIo`) paths **fail
@@ -128,11 +130,11 @@ reporting process.
   yet; after a restart, establish a fresh session rather than reusing traffic keys
   with reset or uncertain outbound sequence state.
 - **Replay state is committed only after AEAD authentication**, so a forged frame
-  cannot desynchronize or DoS the receiver; the replay-window map is bounded.
+  cannot advance the replay window; the replay-window map is bounded.
 - The native handshake is **authenticated by default**: an unauthenticated handshake
   requires an explicit `SessionAuthConfig::unauthenticated_for_testing()` opt-in,
-  intended only for tests or for use inside an already-authenticated outer channel.
-  Prefer authenticated handshakes with pinned peer keys for production.
+  intended for tests. Use pinned peer keys or an explicit `ChannelBinding`
+  for authenticated sessions.
 - For HTTP, prefer the **protected-context APIs** (`HttpSealer::seal_request_with_context`
   / `HttpOpener::open_request_with_context`, plus the `axum` / Workers adapters):
   they bind request metadata (method/path/query/message-id/timestamp/expiry) into

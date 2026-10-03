@@ -21,12 +21,16 @@ runtime-futures = ["transport", "foctet-transport/runtime-futures"]
 transport-muxtls = ["transport", "foctet-transport/transport-muxtls"]
 transport-webtrans = ["transport", "foctet-transport/transport-webtrans"]
 transport-websock = ["transport", "foctet-transport/transport-websock"]
+transport-quion = ["transport", "foctet-transport/transport-quion"]
+transport-webtrans-quion = ["transport", "foctet-transport/transport-webtrans-quion"]
+transport-websock-mux = ["transport", "foctet-transport/transport-websock-mux"]
+transport-webtrans-browser = ["transport", "foctet-transport/transport-webtrans-browser"]
 transport-quinn = ["transport", "foctet-transport/transport-quinn"]
 
 [dependencies]
 foctet-core = { workspace = true }
 foctet-archive = { workspace = true }
-foctet-transport = { path = "../foctet-transport", version = "0.4.0", optional = true, default-features = false }
+foctet-transport = { path = "../foctet-transport", version = "0.5.0", optional = true, default-features = false }
 ed25519-dalek.workspace = true
 sha2.workspace = true
 x25519-dalek.workspace = true

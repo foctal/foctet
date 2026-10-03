@@ -109,20 +109,19 @@ where
     /// Builds a channel from a transport and an active [`Session`], clamping the
     /// datagram size to the transport's reported maximum when available.
     pub fn from_active_session(transport: T, session: &Session) -> Result<Self, CoreError> {
-        let mut config = DatagramConfig::default();
-        if let Some(max) = transport.max_datagram_size() {
-            config.max_datagram_size = config.max_datagram_size.min(max);
-        }
-        Self::from_active_session_with_config(transport, session, config)
+        Self::from_active_session_with_config(transport, session, DatagramConfig::default())
     }
 
     /// Builds a channel from a transport, an active [`Session`], and an explicit
-    /// datagram configuration.
+    /// datagram configuration, clamped to the transport's reported maximum.
     pub fn from_active_session_with_config(
         transport: T,
         session: &Session,
-        config: DatagramConfig,
+        mut config: DatagramConfig,
     ) -> Result<Self, CoreError> {
+        if let Some(max) = transport.max_datagram_size() {
+            config.max_datagram_size = config.max_datagram_size.min(max);
+        }
         let lease = session.claim_datagram_endpoint()?;
         let endpoint = DatagramEndpoint::from_session_lease_with_config(lease, config);
         Ok(Self {
@@ -167,7 +166,8 @@ where
     }
 
     /// Initiates a transactional rekey over a reliable secure message channel,
-    /// then adopts the committed key for datagrams.
+    /// then adopts the committed key for datagrams. Cancellation terminates
+    /// both channels and the session once control delivery has started.
     pub async fn send_rekey<C>(
         &mut self,
         control: &mut SecureMessageChannel<C>,
@@ -179,10 +179,12 @@ where
         if self.is_terminal() {
             return Err(MessageChannelError::Core(CoreError::TransportTerminal));
         }
+        self.terminal = true;
         if let Err(error) = control.send_rekey(session).await {
             self.terminal = true;
             return Err(error);
         }
+        self.terminal = false;
         if let Err(error) = self.rekey_from_session(session) {
             self.terminal = true;
             session.terminate();
@@ -192,7 +194,8 @@ where
     }
 
     /// Receives a transactional rekey over a reliable secure message channel,
-    /// then adopts the applied key for datagrams.
+    /// then adopts the applied key for datagrams. Cancellation terminates
+    /// both channels and the session once control receive has started.
     pub async fn recv_rekey<C>(
         &mut self,
         control: &mut SecureMessageChannel<C>,
@@ -204,10 +207,12 @@ where
         if self.is_terminal() {
             return Err(MessageChannelError::Core(CoreError::TransportTerminal));
         }
+        self.terminal = true;
         if let Err(error) = control.recv_rekey(session).await {
             self.terminal = true;
             return Err(error);
         }
+        self.terminal = false;
         if let Err(error) = self.rekey_from_session(session) {
             self.terminal = true;
             session.terminate();
@@ -379,6 +384,73 @@ mod tests {
             .handle_control(&server_hello)
             .expect("initiator finalizes");
         (initiator, responder)
+    }
+
+    #[tokio::test]
+    async fn explicit_config_respects_backend_limit_without_terminating_on_oversize() {
+        struct BoundedTransport(MemoryDatagramTransport);
+
+        impl DatagramTransport for BoundedTransport {
+            type Error = MemoryError;
+
+            async fn send_datagram(&self, datagram: Vec<u8>) -> Result<(), Self::Error> {
+                assert!(datagram.len() <= 512, "backend MTU must not be exceeded");
+                DatagramTransport::send_datagram(&self.0, datagram).await
+            }
+
+            async fn recv_datagram(&self) -> Result<Vec<u8>, Self::Error> {
+                DatagramTransport::recv_datagram(&self.0).await
+            }
+
+            fn max_datagram_size(&self) -> Option<usize> {
+                Some(512)
+            }
+        }
+
+        // An explicit smaller limit is preserved; a larger one is clamped.
+        for configured in [256, 65_535] {
+            let (initiator, responder) = session_pair();
+            let (left, right) = linked_pair();
+            let mut sender = SecureDatagramChannel::from_active_session_with_config(
+                BoundedTransport(left),
+                &initiator,
+                DatagramConfig {
+                    max_datagram_size: configured,
+                    ..Default::default()
+                },
+            )
+            .expect("sender");
+            let mut receiver =
+                SecureDatagramChannel::from_active_session(BoundedTransport(right), &responder)
+                    .expect("receiver");
+            let max = sender.max_plaintext_len();
+            let payload = vec![0xAB; max];
+            assert!(sender.send_datagram(0, 0, &vec![0; max + 1]).await.is_err());
+            assert!(!sender.is_terminal());
+            sender
+                .send_datagram(0, 0, &payload)
+                .await
+                .expect("boundary send");
+            assert_eq!(
+                sender
+                    .transport()
+                    .0
+                    .outbox
+                    .borrow()
+                    .front()
+                    .expect("frame")
+                    .len(),
+                configured.min(512)
+            );
+            assert_eq!(
+                receiver
+                    .recv_datagram()
+                    .await
+                    .expect("boundary receive")
+                    .plaintext,
+                payload
+            );
+        }
     }
 
     #[tokio::test]
@@ -563,5 +635,54 @@ mod tests {
         assert!(control_b.is_terminal());
         assert_eq!(responder.state(), foctet_core::SessionState::Closed);
         assert!(responder.active_keys().is_none());
+    }
+    struct PendingControlTransport;
+
+    impl MessageTransport for PendingControlTransport {
+        type Error = MemoryError;
+        async fn send_message(&self, _: Vec<u8>) -> Result<(), MemoryError> {
+            std::future::pending().await
+        }
+        async fn recv_message(&self) -> Result<Vec<u8>, MemoryError> {
+            std::future::pending().await
+        }
+        fn max_message_size(&self) -> Option<usize> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_rekey_also_terminates_datagrams() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        for receive in [false, true] {
+            let (mut session, _) = session_pair();
+            let mut control =
+                SecureMessageChannel::from_active_session(PendingControlTransport, &session)
+                    .unwrap();
+            let (transport, _) = linked_pair();
+            let mut datagrams =
+                SecureDatagramChannel::from_active_session(transport, &session).unwrap();
+            {
+                let mut future: std::pin::Pin<Box<dyn Future<Output = _>>> = if receive {
+                    Box::pin(datagrams.recv_rekey(&mut control, &mut session))
+                } else {
+                    Box::pin(datagrams.send_rekey(&mut control, &mut session))
+                };
+                assert!(
+                    future
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+            }
+            assert!(datagrams.is_terminal());
+            assert!(control.is_terminal());
+            assert_eq!(session.state(), foctet_core::SessionState::Closed);
+            assert!(matches!(
+                datagrams.send_datagram(0, 0, b"rejected").await,
+                Err(DatagramChannelError::Core(CoreError::TransportTerminal))
+            ));
+        }
     }
 }

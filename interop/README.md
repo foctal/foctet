@@ -2,29 +2,16 @@
 
 This directory contains non-Rust tooling for interoperability verification.
 
-## Which tool for which job
-
-- **Full seal/open from JavaScript/TypeScript — use the WASM SDK
-  (`foctet-wasm/`)**, not this directory. It exposes the body envelope
-  (`sealBody`/`openBody`, context-bound variants) and the framed session
-  (`FoctetSession` handshake + `sealMessage`/`openMessage`), with generated
-  `.d.ts` typings. Its Node interop test (`foctet-wasm/tests/node_interop.cjs`)
-  opens **Rust-produced** envelopes from `tests/interop_vector.json`, proving
-  cross-language wire compatibility, and `foctet-wasm/tests/browser.rs` runs
-  the same surface in a real headless browser.
-- **Independent verification of the canonical vectors — use
-  `verify_vectors.mjs`** (below). Unlike the WASM SDK, it is *not generated
-  from the Rust implementation*, so it provides a genuinely independent check
-  of the Draft v0 wire format and key schedule against the committed test
-  vectors. That independence is the point: it catches a systematic
-  encode/derive bug that a Rust-derived artifact would faithfully reproduce.
+Use the [WASM SDK](../foctet-wasm/README.md) to seal and open Foctet data from
+JavaScript or TypeScript. This directory contains a separate implementation
+for checking the wire format against the committed test vectors.
 
 ## `verify_vectors.mjs` — independent vector verification
 
-A from-spec re-implementation of the Draft v0 primitives on top of the
+An implementation of the Draft v0 primitives on top of the
 [@noble](https://paulmillr.com/noble/) cryptography libraries (pure-JS, zero
-shared code with this workspace). It verifies every canonical
-vector in `test-vectors/` end to end:
+shared code with this workspace). It verifies the frame, handshake, and rekey
+vectors in `test-vectors/` end to end:
 
 - **`frame-v0.json`** — HKDF-SHA-256 traffic-key derivation, frame-header
   decoding, nonce construction, and a **full XChaCha20-Poly1305 AEAD open**
