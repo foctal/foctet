@@ -78,12 +78,22 @@ impl HandshakeConcurrencyLimiter {
 
     /// Acquires one slot or fails before handshake allocation and cryptography.
     pub fn acquire(&self) -> Result<HandshakePermit, CoreError> {
-        self.inner
-            .active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < self.inner.max).then_some(active + 1)
-            })
-            .map_err(|_| CoreError::HandshakeConcurrencyLimited)?;
+        let mut active = self.inner.active.load(Ordering::Acquire);
+        loop {
+            if active >= self.inner.max {
+                return Err(CoreError::HandshakeConcurrencyLimited);
+            }
+            // Keep compatibility with Rust 1.88 without the deprecated fetch_update API.
+            match self.inner.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => active = current,
+            }
+        }
         Ok(HandshakePermit {
             inner: self.inner.clone(),
         })
@@ -238,6 +248,37 @@ mod tests {
         assert_eq!(limiter.active(), 2);
         drop((second, replacement));
         assert_eq!(limiter.active(), 0);
+    }
+
+    #[test]
+    fn concurrent_acquisitions_share_the_cap() {
+        let limiter = HandshakeConcurrencyLimiter::new(4);
+        let barrier = std::sync::Barrier::new(16);
+        let permits = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let limiter = limiter.clone();
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        limiter.acquire()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| match handle.join().expect("acquisition thread") {
+                    Ok(permit) => Some(permit),
+                    Err(CoreError::HandshakeConcurrencyLimited) => None,
+                    Err(err) => panic!("unexpected acquisition error: {err}"),
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(permits.len(), 4);
+        assert_eq!(limiter.active(), 4);
+        drop(permits);
+        assert_eq!(limiter.active(), 0);
+        assert!(limiter.acquire().is_ok());
     }
 
     #[test]
