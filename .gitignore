@@ -32,3 +32,6 @@ foctet-wasm/pkg/
 foctet-wasm/pkg-node/
 foctet-wasm/pkg-web/
 node_modules/
+
+# Local Cloudflare emulator state
+.wrangler/
