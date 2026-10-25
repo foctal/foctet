@@ -16,3 +16,7 @@ pub use foctet_archive as archive;
 pub use foctet_core as core;
 #[cfg(feature = "transport")]
 pub use foctet_transport as transport;
+
+/// Driver-free signed TEXT records and Worker SQL plans.
+#[cfg(feature = "storage-wire")]
+pub use foctet_storage_wire as storage_wire;

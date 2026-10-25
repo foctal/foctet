@@ -88,6 +88,8 @@ pub struct ContextBinding {
     /// order. Each header's presence and raw value bytes are authenticated,
     /// so adding, removing, or modifying a bound header fails authentication.
     /// A configured header occurring more than once is rejected as ambiguous.
+    /// Foctet carrier/signature headers and rewritten body framing/content-type
+    /// headers cannot be bound as additional headers.
     /// Empty by default — preserves the exact associated-data bytes of a
     /// [`ContextBinding`] that doesn't bind any headers, so this is purely
     /// opt-in. Currently applies to **requests only**; see
@@ -152,6 +154,13 @@ pub struct ContextCarrier {
 }
 
 impl ContextCarrier {
+    /// Exclusive retention deadline covering the inclusive freshness window.
+    pub fn replay_retention_deadline(&self, max_skew_secs: u64) -> u64 {
+        self.expiry_secs
+            .saturating_add(max_skew_secs)
+            .saturating_add(1)
+    }
+
     /// Builds a fresh carrier with a random message ID and `now + ttl` expiry.
     pub fn generate(now_secs: u64, ttl_secs: u64) -> Self {
         let salt = foctet_core::random_session_salt();
@@ -302,6 +311,15 @@ impl ProtectedContext {
             let name = name.as_ref();
             if name.len() > MAX_BOUND_HEADER_NAME_BYTES {
                 return Err(HttpError::LimitExceeded("bound_header_name_len"));
+            }
+            let lower = name.to_ascii_lowercase();
+            if lower.starts_with("x-foctet-")
+                || matches!(
+                    lower.as_str(),
+                    "content-type" | "content-length" | "transfer-encoding"
+                )
+            {
+                return Err(HttpError::InvalidContext("reserved bound header"));
             }
             let value = get_optional_dynamic(&parts.headers, name)?.map(|value| value.as_bytes());
             if value.is_some_and(|value| value.len() > MAX_BOUND_HEADER_VALUE_BYTES) {

@@ -86,9 +86,12 @@ pub mod secure_channel;
 mod sequence;
 /// Session handshake/rekey state and key lifecycle handling.
 pub mod session;
+/// Detached authentication of encrypted objects by a pinned writer.
+pub mod signature;
 /// At-rest storage envelopes that bind a record's identity (namespace / id /
 /// version) into the AEAD for zero-knowledge backends.
 pub mod storage;
+pub use signature::{sign_ciphertext, verify_ciphertext};
 
 pub use auth::{
     AuthenticatedPeer, ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth,
@@ -140,7 +143,8 @@ pub use session::{
     RekeyThresholds, Session, SessionState,
 };
 pub use storage::{
-    StorageRecord, open_storage_record, open_storage_record_with_limits, seal_storage_record,
+    StorageRecord, open_signed_storage_record, open_storage_record,
+    open_storage_record_with_limits, seal_signed_storage_record, seal_storage_record,
     seal_storage_record_with_limits,
 };
 

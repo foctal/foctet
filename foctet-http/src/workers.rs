@@ -129,11 +129,22 @@ pub async fn check_and_insert_in_durable_object(
 
 /// Removes the one replay entry held by a per-message Durable Object.
 ///
-/// Call this from the Durable Object's `alarm` handler. An alarm is at-least
-/// once, so deleting all state is intentionally idempotent.
+/// Call this from the Durable Object's `alarm` handler. Recheck the stored
+/// deadline because an old alarm may be retried after the entry was renewed.
 pub async fn expire_durable_object_replay_entry(
     storage: &worker::Storage,
 ) -> worker::Result<worker::Response> {
+    if let Some(expiry) = storage.get::<String>("foctet-replay-expiry").await? {
+        let expiry = expiry
+            .parse::<u64>()
+            .map_err(|_| worker::Error::RustError("invalid Durable Object replay expiry".into()))?;
+        if expiry > worker::Date::now().as_millis() / 1_000 {
+            storage
+                .set_alarm(expiry.saturating_mul(1_000).min(i64::MAX as u64) as i64)
+                .await?;
+            return worker::Response::empty();
+        }
+    }
     storage.delete_all().await?;
     worker::Response::empty()
 }

@@ -13,6 +13,7 @@ cargo install cargo-fuzz --locked
 
 ## Targets
 
+- `storage_formats`: authenticated recovery-share parser and signed streaming files
 - `frame_parser`: `foctet_core::Frame::from_bytes` (stream frame header/wire)
 - `archive_parser`: single- and split-archive decryption entry points
 - `control_message`: control-plane (`ControlMessage`) decoder
@@ -44,11 +45,10 @@ cargo run -p foctet --example gen_fuzz_seeds
 Sealing uses random ephemerals, so regenerated seeds differ byte-for-byte;
 they only need to be valid, not reproducible.
 
-The working corpus (`corpus/`, git-ignored) grows locally. CI uploads each
-corpus as a retained artifact and restores the latest cache on scheduled runs.
-`cargo fuzz` runs libFuzzer with AddressSanitizer on its supported native Linux
-runner; the daily ten-minute-per-target schedule and retained corpora provide
-continuous cumulative coverage comparable to a small dedicated fuzz service.
+The working corpus (`corpus/`, git-ignored) grows locally. Retain this corpus between local runs. `cargo fuzz` uses libFuzzer with
+AddressSanitizer on supported native targets. This repository does not currently
+run a scheduled fuzzing service; bounded local smoke runs do not replace
+continuous fuzzing or independent review.
 
 ## Triage and service level
 
@@ -66,3 +66,8 @@ mkdir -p fuzz/corpus/frame_parser
 cp fuzz/seeds/frame_parser/* fuzz/corpus/frame_parser/
 cargo +nightly fuzz run frame_parser -- -max_total_time=300
 ```
+
+The `storage_formats` target also parses bounded canonical Worker TEXT records;
+`signed-text-v1` is a public synthetic syntax seed, not an authenticated record.
+Copy seeds to a temporary corpus directory before fuzzing to keep generated cases
+out of the committed seed set.

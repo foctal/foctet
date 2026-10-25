@@ -71,13 +71,13 @@ try {
     EXPECTED_STATUS: "409",
   });
 
-  // The DO alarm removes the marker at protected-context expiry.
+  // Retention includes 30 seconds of skew and the inclusive final second.
   await client("/foctet", {
     FIXED_MESSAGE_ID_BYTE: "b6",
     CONTEXT_TTL_SECS: "1",
     EXPECTED_STATUS: "200",
   });
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 33000));
   await client("/foctet", {
     FIXED_MESSAGE_ID_BYTE: "b6",
     CONTEXT_TTL_SECS: "1",

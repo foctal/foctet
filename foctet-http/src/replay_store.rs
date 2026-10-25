@@ -8,7 +8,7 @@
 //! it if not. The store is consulted **after** the envelope authenticates, so
 //! unauthenticated input can never populate it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use thiserror::Error;
@@ -110,8 +110,14 @@ where
 /// durable backend implementing [`ReplayStore`] over shared storage.
 #[derive(Debug)]
 pub struct InMemoryReplayStore {
-    entries: Mutex<HashMap<[u8; MESSAGE_ID_LEN], u64>>,
+    entries: Mutex<ReplayEntries>,
     max_entries: usize,
+}
+
+#[derive(Debug, Default)]
+struct ReplayEntries {
+    ids: HashMap<[u8; MESSAGE_ID_LEN], u64>,
+    expirations: BTreeSet<(u64, [u8; MESSAGE_ID_LEN])>,
 }
 
 impl InMemoryReplayStore {
@@ -123,14 +129,14 @@ impl InMemoryReplayStore {
     /// Creates a store with an explicit capacity (`0` is treated as `1`).
     pub fn with_capacity(max_entries: usize) -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(ReplayEntries::default()),
             max_entries: max_entries.max(1),
         }
     }
 
     /// Returns the number of retained (not yet evicted) entries.
     pub fn len(&self) -> usize {
-        self.entries.lock().expect("replay store mutex").len()
+        self.entries.lock().expect("replay store mutex").ids.len()
     }
 
     /// Returns whether the store currently holds no entries.
@@ -154,16 +160,23 @@ impl ReplayStore for InMemoryReplayStore {
     ) -> Result<ReplayCheck, ReplayStoreError> {
         let mut entries = self.entries.lock().expect("replay store mutex");
 
-        // Drop expired entries so the cap reflects live, still-replayable IDs.
-        entries.retain(|_, &mut expiry| expiry > now_secs);
+        // Evict only expired IDs, rather than scanning all live entries.
+        while let Some(&(expiry, id)) = entries.expirations.first() {
+            if expiry > now_secs || expiry == u64::MAX {
+                break;
+            }
+            entries.expirations.pop_first();
+            entries.ids.remove(&id);
+        }
 
-        if entries.contains_key(message_id) {
+        if entries.ids.contains_key(message_id) {
             return Ok(ReplayCheck::Replay);
         }
-        if entries.len() >= self.max_entries {
+        if entries.ids.len() >= self.max_entries {
             return Err(ReplayStoreError::AtCapacity);
         }
-        entries.insert(*message_id, expires_at_secs);
+        entries.ids.insert(*message_id, expires_at_secs);
+        entries.expirations.insert((expires_at_secs, *message_id));
         Ok(ReplayCheck::Accepted)
     }
 }
@@ -263,6 +276,41 @@ impl AsyncReplayStore for RedisReplayStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn out_of_order_expirations_keep_live_entries() {
+        let store = InMemoryReplayStore::with_capacity(3);
+        for (id, expiry) in [(1, 300), (2, 100), (3, 200)] {
+            ReplayStore::check_and_insert(&store, &[id; MESSAGE_ID_LEN], expiry, 0).unwrap();
+        }
+        ReplayStore::check_and_insert(&store, &[4; MESSAGE_ID_LEN], 400, 100).unwrap();
+        assert_eq!(store.len(), 3);
+        assert_eq!(
+            ReplayStore::check_and_insert(&store, &[1; MESSAGE_ID_LEN], 300, 100).unwrap(),
+            ReplayCheck::Replay
+        );
+    }
+
+    #[test]
+    fn concurrent_duplicate_has_exactly_one_winner() {
+        let store = InMemoryReplayStore::new();
+        let winners = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        ReplayStore::check_and_insert(&store, &[1; MESSAGE_ID_LEN], 100, 0).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|r| *r == ReplayCheck::Accepted)
+                .count()
+        });
+        assert_eq!(winners, 1);
+        assert_eq!(store.len(), 1);
+    }
 
     #[test]
     fn replay_key_is_prefixed_hex() {

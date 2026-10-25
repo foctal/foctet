@@ -26,9 +26,9 @@ redis = { version = "1.3", optional = true, default-features = false, features =
 rand_core.workspace = true
 getrandom.workspace = true
 x25519-dalek.workspace = true
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 futures-util = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

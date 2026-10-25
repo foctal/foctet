@@ -7,7 +7,7 @@ use hkdf::Hkdf;
 use rand_core::UnwrapErr;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::{ArchiveError, WrappedDek};
 
@@ -56,7 +56,7 @@ pub(crate) fn wrap_dek_with_ephemeral_secret(
 pub(crate) fn unwrap_dek_from_recipients(
     recipients: &[WrappedDek],
     recipient_private: [u8; 32],
-) -> Result<[u8; 32], ArchiveError> {
+) -> Result<Zeroizing<[u8; 32]>, ArchiveError> {
     let priv_key = StaticSecret::from(recipient_private);
     let expected_public = PublicKey::from(&priv_key).to_bytes();
 
@@ -83,13 +83,13 @@ pub(crate) fn unwrap_dek_from_recipients(
         aad.extend_from_slice(&item.ephemeral_public);
 
         let dek = aead_decrypt(&wrap_key, &item.nonce, &aad, &item.ciphertext)?;
+        let dek = Zeroizing::new(dek);
         if dek.len() != 32 {
             return Err(ArchiveError::Parse);
         }
-        let mut out = [0u8; 32];
+        let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&dek);
-        let mut dek = dek;
-        dek.zeroize();
+
         return Ok(out);
     }
 

@@ -3,6 +3,12 @@ use thiserror::Error;
 /// Error type for Foctet archive encode/decode operations.
 #[derive(Debug, Error)]
 pub enum ArchiveError {
+    /// Streaming I/O failed; discard provisional output.
+    #[error("archive I/O failed")]
+    Io(#[from] std::io::Error),
+    /// The streaming encrypted body failed validation.
+    #[error("archive stream failed")]
+    Stream(#[from] foctet_core::BodyEnvelopeError),
     /// Container magic prefix does not match the expected format.
     #[error("invalid archive magic")]
     InvalidMagic,

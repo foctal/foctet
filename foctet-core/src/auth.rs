@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use getrandom::SysRng;
 use rand_core::UnwrapErr;
 use subtle::ConstantTimeEq;
@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::CoreError;
 
-/// Signs native handshake transcripts with a long-term Ed25519 identity.
+/// Signs domain-separated protocol transcripts with a long-term Ed25519 identity.
 ///
 /// This is the seam for **hardware-backed or otherwise non-extractable** identity
 /// keys: implement it for an HSM, a cloud KMS, a TPM, or an OS keystore so the
@@ -227,7 +227,7 @@ impl HandshakeAuth {
             .map_err(|_| CoreError::InvalidPeerAuthentication)?;
         let signature = Signature::from_bytes(&self.signature);
         verifying_key
-            .verify(message, &signature)
+            .verify_strict(message, &signature)
             .map_err(|_| CoreError::InvalidPeerAuthentication)
     }
 
@@ -464,6 +464,19 @@ impl SessionAuthConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weak_identity_point_cannot_authenticate_a_handshake() {
+        let mut identity_point = [0u8; 32];
+        identity_point[0] = 1;
+        let mut signature = [0u8; 64];
+        signature[0] = 1;
+        let auth = HandshakeAuth {
+            identity_public_key: identity_point,
+            signature,
+        };
+        assert!(auth.verify(b"arbitrary handshake transcript").is_err());
+    }
 
     #[test]
     fn identity_debug_redacts_secret_key() {

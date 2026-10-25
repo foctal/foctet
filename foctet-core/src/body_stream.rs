@@ -190,6 +190,14 @@ fn parse_stream_header(
     })
 }
 
+fn writer_context(header: &[u8], context: &[u8]) -> Vec<u8> {
+    let mut out = b"foctet signed stream chunk v1\0".to_vec();
+    out.extend_from_slice(&(header.len() as u64).to_be_bytes());
+    out.extend_from_slice(header);
+    out.extend_from_slice(context);
+    out
+}
+
 /// Seals a payload as an ordered sequence of authenticated chunks.
 ///
 /// Create one with [`StreamSealer::new`], send the returned header bytes first,
@@ -264,6 +272,20 @@ impl StreamSealer {
             max_chunk_plaintext: limits.max_payload_len.saturating_sub(TAG_LEN),
         };
         Ok((sealer, header))
+    }
+
+    /// Seals a chunk and authenticates its writer. The detached signature must
+    /// accompany the exact chunk. Receivers must require a pinned writer.
+    pub fn seal_signed_chunk(
+        &mut self,
+        plaintext: &[u8],
+        is_final: bool,
+        writer: &dyn crate::HandshakeSigner,
+    ) -> Result<(Vec<u8>, [u8; 64]), BodyEnvelopeError> {
+        let chunk = self.seal_chunk(plaintext, is_final)?;
+        let signature =
+            crate::sign_ciphertext(&chunk, &writer_context(&self.header, &self.context), writer);
+        Ok((chunk, signature))
     }
 
     /// Returns the stream header bytes (the prologue to send before chunks).
@@ -377,7 +399,7 @@ impl StreamOpener {
             recipient_secret_key,
             parsed.eph_pub,
         )?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&content_key)
+        let cipher = XChaCha20Poly1305::new_from_slice(&content_key[..])
             .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
 
         Ok(Self {
@@ -389,6 +411,25 @@ impl StreamOpener {
             finished: false,
             max_chunk_ct: limits.max_payload_len,
         })
+    }
+
+    /// Verifies the writer of a chunk before any decryption or state mutation.
+    pub fn verify_chunk_writer(
+        &self,
+        chunk: &[u8],
+        signature: [u8; 64],
+        writer: crate::PeerIdentity,
+    ) -> Result<(), BodyEnvelopeError> {
+        if chunk.len() > self.max_chunk_ct.saturating_add(STREAM_CHUNK_OVERHEAD) {
+            return Err(BodyEnvelopeError::LimitExceeded("chunk_ct_len"));
+        }
+        crate::verify_ciphertext(
+            chunk,
+            &writer_context(&self.header, &self.context),
+            signature,
+            writer,
+        )
+        .map_err(|_| BodyEnvelopeError::DecryptFailed)
     }
 
     /// Opens one received chunk into its plaintext.
@@ -591,6 +632,11 @@ impl StreamFrameDecoder {
         let chunk = self.buf[..total].to_vec();
         self.buf.advance(total);
         Ok(Some(StreamItem::Chunk(chunk)))
+    }
+
+    /// Returns whether no undecoded bytes remain in the buffer.
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
 
     /// Returns whether the header has been decoded yet.

@@ -43,7 +43,7 @@ impl Default for ArchiveOptions {
 }
 
 /// Optional deterministic secrets for reproducible archive generation.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ArchiveBuildSecrets {
     /// Fixed archive identifier to embed in metadata.
     pub archive_id: [u8; 16],
@@ -53,6 +53,24 @@ pub struct ArchiveBuildSecrets {
     pub dek: [u8; 32],
     /// Fixed ephemeral X25519 secret keys used to wrap the DEK for recipients.
     pub wrap_ephemeral_secret_keys: Vec<[u8; 32]>,
+}
+
+impl core::fmt::Debug for ArchiveBuildSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ArchiveBuildSecrets")
+            .field("archive_id", &self.archive_id)
+            .field("file_id", &self.file_id)
+            .field("secrets", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for ArchiveBuildSecrets {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.dek.zeroize();
+        self.wrap_ephemeral_secret_keys.zeroize();
+    }
 }
 
 /// Recipient-specific wrapped copy of the archive data-encryption key (DEK).
@@ -148,7 +166,7 @@ pub(crate) struct BuiltArchive {
     pub(crate) wrapped: Vec<WrappedDek>,
     pub(crate) header_plain: Vec<u8>,
     pub(crate) chunks: Vec<EncryptedChunkRecord>,
-    pub(crate) dek: [u8; 32],
+    pub(crate) dek: zeroize::Zeroizing<[u8; 32]>,
     pub(crate) meta: ArchiveBuildResult,
 }
 
@@ -158,4 +176,23 @@ pub(crate) struct ParsedPart {
     pub(crate) first_chunk_index: u32,
     pub(crate) chunk_count: u32,
     pub(crate) chunk_ciphertexts: Vec<Vec<u8>>,
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn archive_secrets_debug_is_redacted() {
+        let secrets = ArchiveBuildSecrets {
+            archive_id: [0; 16],
+            file_id: [0; 16],
+            dek: [37; 32],
+            wrap_ephemeral_secret_keys: vec![[38; 32]],
+        };
+        let rendered = format!("{secrets:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains(&format!("{:?}", secrets.dek)));
+        assert!(!rendered.contains(&format!("{:?}", secrets.wrap_ephemeral_secret_keys)));
+    }
 }

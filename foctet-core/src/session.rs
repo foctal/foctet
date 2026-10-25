@@ -889,6 +889,14 @@ impl Session {
     ) -> Result<Option<[u8; 32]>, CoreError> {
         match auth {
             Some(auth) => {
+                // A valid self-signature proves possession, not a trusted peer.
+                // Default configurations must not accept attacker-selected keys.
+                if self.auth.peer_identity().is_none()
+                    && self.auth.channel_binding_bytes().is_empty()
+                    && !self.auth.allows_unauthenticated()
+                {
+                    return Err(CoreError::MissingPeerAuthentication);
+                }
                 auth.verify(message)?;
                 if let Some(peer_identity) = self.auth.peer_identity()
                     && auth.identity_public_key != peer_identity.public_key
@@ -1000,6 +1008,37 @@ fn rekey_binding(
 mod tests {
     use super::*;
     use crate::{IdentityKeyPair, PeerIdentity};
+
+    #[test]
+    fn default_initiator_rejects_an_unpinned_self_signed_identity() {
+        let (mut client, hello) = Session::new_initiator(RekeyThresholds::default());
+        let attacker = IdentityKeyPair::from_secret_key_bytes([92; 32]);
+        let mut server = Session::new_responder_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::unauthenticated_for_testing().with_local_identity(attacker),
+        );
+        let reply = server.handle_control(&hello).unwrap().unwrap();
+        assert!(matches!(
+            client.handle_control(&reply),
+            Err(CoreError::MissingPeerAuthentication)
+        ));
+        assert_eq!(client.state(), SessionState::Closed);
+    }
+
+    #[test]
+    fn default_responder_rejects_an_unpinned_self_signed_identity() {
+        let attacker = IdentityKeyPair::from_secret_key_bytes([91; 32]);
+        let (_, hello) = Session::new_initiator_with_auth(
+            RekeyThresholds::default(),
+            SessionAuthConfig::new().with_local_identity(attacker),
+        );
+        let mut server = Session::new_responder(RekeyThresholds::default());
+        assert!(matches!(
+            server.handle_control(&hello),
+            Err(CoreError::MissingPeerAuthentication)
+        ));
+        assert_eq!(server.state(), SessionState::Closed);
+    }
 
     #[test]
     fn session_handshake_and_rekey() {

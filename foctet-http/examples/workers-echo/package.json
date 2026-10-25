@@ -1,8 +1,13 @@
 {
   "scripts": {
-    "test": "node test/wrangler-integration.mjs"
+    "test": "node test/wrangler-integration.mjs",
+    "test:storage": "node test/storage-integration.mjs"
   },
   "devDependencies": {
-    "wrangler": "^4.107.0"
+    "wrangler": "^4.152.0",
+    "miniflare": "5.20261019.2-beta"
+  },
+  "overrides": {
+    "undici": "7.30.1"
   }
 }

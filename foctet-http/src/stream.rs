@@ -91,6 +91,18 @@ impl HttpStreamSealer {
             .map_err(HttpError::SealFailed)
     }
 
+    /// Seals a chunk and returns its detached writer signature.
+    pub fn seal_signed_chunk(
+        &mut self,
+        plaintext: &[u8],
+        is_final: bool,
+        writer: &dyn foctet_core::HandshakeSigner,
+    ) -> Result<(Vec<u8>, [u8; 64]), HttpError> {
+        self.inner
+            .seal_signed_chunk(plaintext, is_final, writer)
+            .map_err(HttpError::SealFailed)
+    }
+
     /// Returns whether the final chunk has been sealed.
     pub fn is_finished(&self) -> bool {
         self.inner.is_finished()
@@ -98,32 +110,32 @@ impl HttpStreamSealer {
 }
 
 /// Opens a context-bound HTTP request body stream.
-pub struct HttpStreamOpener {
+pub struct HttpStreamOpener<'s, S: ?Sized = crate::InMemoryReplayStore> {
     inner: StreamOpener,
+    writer: Option<foctet_core::PeerIdentity>,
+    pending_replay: Option<(&'s S, ContextCarrier, u64, u64)>,
+    failed: bool,
 }
 
-impl HttpStreamOpener {
+impl<'s, S: ReplayStore + ?Sized> HttpStreamOpener<'s, S> {
     /// Begins opening a context-bound request stream.
     ///
     /// Parses the carrier from the request headers, validates freshness, and
-    /// enforces single use against `store` (the message id is consumed once for
-    /// the whole stream), then prepares to open chunks bound to the protected
+    /// prepares a single-use check against `store` (consumed after the first
+    /// chunk authenticates), then prepares to open chunks bound to the protected
     /// context. `stream_header` is the prologue produced by
     /// [`HttpStreamSealer::for_request`].
     #[allow(clippy::too_many_arguments)]
-    pub fn for_request<S>(
+    pub fn for_request(
         parts: &http::request::Parts,
         recipient_secret_key: [u8; 32],
         stream_header: &[u8],
-        store: &S,
+        store: &'s S,
         now_secs: u64,
         max_skew_secs: u64,
         binding: ContextBinding,
         limits: &BodyEnvelopeLimits,
-    ) -> Result<Self, HttpError>
-    where
-        S: ReplayStore + ?Sized,
-    {
+    ) -> Result<Self, HttpError> {
         let carrier = ContextCarrier::from_headers(&parts.headers)?;
         let context = ProtectedContext::for_request(parts, carrier.clone(), binding)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
@@ -132,21 +144,93 @@ impl HttpStreamOpener {
         let inner = StreamOpener::new(recipient_secret_key, stream_header, &aad, limits)
             .map_err(HttpError::OpenFailed)?;
 
-        match ReplayStore::check_and_insert(
-            store,
-            &carrier.message_id,
-            carrier.expiry_secs,
-            now_secs,
-        )
-        .map_err(HttpError::ReplayStore)?
-        {
-            ReplayCheck::Accepted => {}
-            ReplayCheck::Replay => return Err(HttpError::Replayed),
-        }
-
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            writer: None,
+            pending_replay: Some((store, carrier, now_secs, max_skew_secs)),
+            failed: false,
+        })
     }
 
+    /// Opens one received body chunk into its plaintext.
+    pub fn open_chunk(&mut self, chunk: &[u8]) -> Result<DecodedChunk, HttpError> {
+        if self.writer.is_some() {
+            self.failed = true;
+            return Err(HttpError::InvalidContext("writer signature required"));
+        }
+        self.open_authenticated_chunk(chunk)
+    }
+
+    /// Requires signed chunks from a trusted writer. Unsigned calls fail closed.
+    pub fn require_writer(mut self, writer: foctet_core::PeerIdentity) -> Self {
+        self.writer = Some(writer);
+        self
+    }
+
+    /// Verifies writer identity before decryption and replay-state mutation.
+    pub fn open_signed_chunk(
+        &mut self,
+        chunk: &[u8],
+        signature: [u8; 64],
+    ) -> Result<DecodedChunk, HttpError> {
+        if self.failed {
+            return Err(HttpError::StreamIncomplete);
+        }
+        let Some(writer) = self.writer else {
+            self.failed = true;
+            return Err(HttpError::InvalidContext("writer pin required"));
+        };
+        if let Err(error) = self.inner.verify_chunk_writer(chunk, signature, writer) {
+            self.failed = true;
+            return Err(HttpError::OpenFailed(error));
+        }
+        self.open_authenticated_chunk(chunk)
+    }
+
+    fn open_authenticated_chunk(&mut self, chunk: &[u8]) -> Result<DecodedChunk, HttpError> {
+        if self.failed {
+            return Err(HttpError::StreamIncomplete);
+        }
+        // A header only authenticates key wrapping. Context authentication is
+        // established by a chunk, before the replay decision or plaintext release.
+        self.failed = true;
+        let mut decoded = self
+            .inner
+            .open_chunk(chunk)
+            .map_err(HttpError::OpenFailed)?;
+        if let Some((store, carrier, now, skew)) = self.pending_replay.take() {
+            let result = ReplayStore::check_and_insert(
+                store,
+                &carrier.message_id,
+                carrier.replay_retention_deadline(skew),
+                now,
+            );
+            match result {
+                Ok(ReplayCheck::Accepted) => {}
+                other => {
+                    use zeroize::Zeroize;
+                    decoded.plaintext.zeroize();
+                    return Err(match other {
+                        Ok(ReplayCheck::Replay) => HttpError::Replayed,
+                        Err(error) => HttpError::ReplayStore(error),
+                        Ok(ReplayCheck::Accepted) => unreachable!(),
+                    });
+                }
+            }
+        }
+        self.failed = false;
+        Ok(decoded)
+    }
+
+    /// Returns whether the final chunk has been opened. A complete stream MUST
+    /// end with this `true`; otherwise it was truncated or cancelled and its
+    /// plaintext must be discarded.
+    pub fn is_finished(&self) -> bool {
+        !self.failed && self.inner.is_finished()
+    }
+}
+
+impl HttpStreamOpener<'static> {
     /// Begins opening a context-bound response stream.
     ///
     /// Freshness and the initiating request ID are validated before any
@@ -169,19 +253,12 @@ impl HttpStreamOpener {
         let aad = context.to_aad_bytes();
         let inner = StreamOpener::new(recipient_secret_key, stream_header, &aad, limits)
             .map_err(HttpError::OpenFailed)?;
-        Ok(Self { inner })
-    }
-
-    /// Opens one received body chunk into its plaintext.
-    pub fn open_chunk(&mut self, chunk: &[u8]) -> Result<DecodedChunk, HttpError> {
-        self.inner.open_chunk(chunk).map_err(HttpError::OpenFailed)
-    }
-
-    /// Returns whether the final chunk has been opened. A complete stream MUST
-    /// end with this `true`; otherwise it was truncated or cancelled and its
-    /// plaintext must be discarded.
-    pub fn is_finished(&self) -> bool {
-        self.inner.is_finished()
+        Ok(Self {
+            inner,
+            writer: None,
+            pending_replay: None,
+            failed: false,
+        })
     }
 }
 
@@ -192,8 +269,8 @@ impl HttpStreamOpener {
 /// stream, a Cloudflare Workers `ReadableStream`, or any other byte source — and
 /// it incrementally reassembles the stream frames ([`StreamFrameDecoder`]),
 /// builds an [`HttpStreamOpener`] when the header completes (validating freshness
-/// and single use against the replay store at that point), and returns decrypted
-/// plaintext chunks.
+/// at that point), and consumes replay state only after the first chunk
+/// authenticates, before returning any plaintext.
 ///
 /// After the body ends, call [`HttpRequestStreamReader::finish`]: it errors with
 /// [`HttpError::StreamIncomplete`] unless the authenticated final chunk was seen,
@@ -226,9 +303,10 @@ impl HttpStreamOpener {
 /// ```
 pub struct HttpRequestStreamReader<'s, S: ?Sized> {
     decoder: StreamFrameDecoder,
-    opener: Option<HttpStreamOpener>,
+    failed: bool,
+    opener: Option<HttpStreamOpener<'s, S>>,
     parts: http::request::Parts,
-    recipient_secret_key: [u8; 32],
+    recipient_secret_key: zeroize::Zeroizing<[u8; 32]>,
     store: &'s S,
     now_secs: u64,
     max_skew_secs: u64,
@@ -244,9 +322,10 @@ pub struct HttpRequestStreamReader<'s, S: ?Sized> {
 /// returning plaintext.
 pub struct HttpResponseStreamReader {
     decoder: StreamFrameDecoder,
-    opener: Option<HttpStreamOpener>,
+    failed: bool,
+    opener: Option<HttpStreamOpener<'static>>,
     parts: http::response::Parts,
-    recipient_secret_key: [u8; 32],
+    recipient_secret_key: zeroize::Zeroizing<[u8; 32]>,
     expected_request_message_id: [u8; MESSAGE_ID_LEN],
     now_secs: u64,
     max_skew_secs: u64,
@@ -265,9 +344,10 @@ impl HttpResponseStreamReader {
     ) -> Self {
         Self {
             decoder: StreamFrameDecoder::new(limits),
+            failed: false,
             opener: None,
             parts,
-            recipient_secret_key,
+            recipient_secret_key: zeroize::Zeroizing::new(recipient_secret_key),
             expected_request_message_id,
             now_secs,
             max_skew_secs,
@@ -279,8 +359,20 @@ impl HttpResponseStreamReader {
     /// chunks. Drain the result before reading more input to preserve
     /// backpressure.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, HttpError> {
+        if self.failed {
+            return Err(HttpError::StreamIncomplete);
+        }
+        self.failed = true;
+        if !bytes.is_empty()
+            && self
+                .opener
+                .as_ref()
+                .is_some_and(HttpStreamOpener::is_finished)
+        {
+            return Err(HttpError::OpenFailed(BodyEnvelopeError::StreamFinished));
+        }
         self.decoder.push(bytes).map_err(HttpError::OpenFailed)?;
-        let mut out = Vec::new();
+        let mut out = zeroize::Zeroizing::new(Vec::new());
         while let Some(item) = self.decoder.decode_next().map_err(HttpError::OpenFailed)? {
             match item {
                 StreamItem::Header(header) => {
@@ -291,7 +383,7 @@ impl HttpResponseStreamReader {
                     }
                     self.opener = Some(HttpStreamOpener::for_response(
                         &self.parts,
-                        self.recipient_secret_key,
+                        *self.recipient_secret_key,
                         &header,
                         self.expected_request_message_id,
                         self.now_secs,
@@ -307,14 +399,26 @@ impl HttpResponseStreamReader {
                 }
             }
         }
-        Ok(out)
+        if self
+            .opener
+            .as_ref()
+            .is_some_and(HttpStreamOpener::is_finished)
+            && !self.decoder.is_empty()
+        {
+            return Err(HttpError::OpenFailed(BodyEnvelopeError::StreamFinished));
+        }
+        self.failed = false;
+        Ok(std::mem::take(&mut *out))
     }
 
     /// Returns whether the authenticated final chunk has been opened.
     pub fn is_finished(&self) -> bool {
-        self.opener
-            .as_ref()
-            .is_some_and(HttpStreamOpener::is_finished)
+        !self.failed
+            && self.decoder.is_empty()
+            && self
+                .opener
+                .as_ref()
+                .is_some_and(HttpStreamOpener::is_finished)
     }
 
     /// Rejects truncation or cancellation unless a final chunk was opened.
@@ -341,9 +445,10 @@ impl<'s, S: ReplayStore + ?Sized> HttpRequestStreamReader<'s, S> {
     ) -> Self {
         Self {
             decoder: StreamFrameDecoder::new(limits),
+            failed: false,
             opener: None,
             parts,
-            recipient_secret_key,
+            recipient_secret_key: zeroize::Zeroizing::new(recipient_secret_key),
             store,
             now_secs,
             max_skew_secs,
@@ -355,8 +460,20 @@ impl<'s, S: ReplayStore + ?Sized> HttpRequestStreamReader<'s, S> {
     /// Feeds received body bytes and returns any plaintext chunks now available
     /// (possibly none, if a frame is still incomplete).
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, HttpError> {
+        if self.failed {
+            return Err(HttpError::StreamIncomplete);
+        }
+        self.failed = true;
+        if !bytes.is_empty()
+            && self
+                .opener
+                .as_ref()
+                .is_some_and(HttpStreamOpener::is_finished)
+        {
+            return Err(HttpError::OpenFailed(BodyEnvelopeError::StreamFinished));
+        }
         self.decoder.push(bytes).map_err(HttpError::OpenFailed)?;
-        let mut out = Vec::new();
+        let mut out = zeroize::Zeroizing::new(Vec::new());
         while let Some(item) = self.decoder.decode_next().map_err(HttpError::OpenFailed)? {
             match item {
                 StreamItem::Header(header) => {
@@ -367,7 +484,7 @@ impl<'s, S: ReplayStore + ?Sized> HttpRequestStreamReader<'s, S> {
                     }
                     self.opener = Some(HttpStreamOpener::for_request(
                         &self.parts,
-                        self.recipient_secret_key,
+                        *self.recipient_secret_key,
                         &header,
                         self.store,
                         self.now_secs,
@@ -384,14 +501,26 @@ impl<'s, S: ReplayStore + ?Sized> HttpRequestStreamReader<'s, S> {
                 }
             }
         }
-        Ok(out)
+        if self
+            .opener
+            .as_ref()
+            .is_some_and(HttpStreamOpener::is_finished)
+            && !self.decoder.is_empty()
+        {
+            return Err(HttpError::OpenFailed(BodyEnvelopeError::StreamFinished));
+        }
+        self.failed = false;
+        Ok(std::mem::take(&mut *out))
     }
 
     /// Whether the authenticated final chunk has been opened.
     pub fn is_finished(&self) -> bool {
-        self.opener
-            .as_ref()
-            .is_some_and(HttpStreamOpener::is_finished)
+        !self.failed
+            && self.decoder.is_empty()
+            && self
+                .opener
+                .as_ref()
+                .is_some_and(HttpStreamOpener::is_finished)
     }
 
     /// Consumes the reader, succeeding only if the stream reached its final
@@ -427,6 +556,191 @@ mod tests {
             .uri("https://example.com/upload?id=7")
             .body(())
             .expect("request")
+    }
+
+    #[test]
+    fn replay_store_failure_is_terminal_before_plaintext_release() {
+        struct Unavailable;
+        impl ReplayStore for Unavailable {
+            fn check_and_insert(
+                &self,
+                _: &[u8; MESSAGE_ID_LEN],
+                _: u64,
+                _: u64,
+            ) -> Result<ReplayCheck, crate::ReplayStoreError> {
+                Err(crate::ReplayStoreError::AtCapacity)
+            }
+        }
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        let carrier = ContextCarrier::generate(1000, 60);
+        let (mut parts, _) = request().into_parts();
+        let (mut sealer, header) = HttpStreamSealer::for_request(
+            &parts,
+            &carrier,
+            ContextBinding::default(),
+            public,
+            b"kid",
+            &limits,
+        )
+        .unwrap();
+        carrier.apply_to_headers(&mut parts.headers).unwrap();
+        let first = sealer.seal_chunk(b"first", false).unwrap();
+        let last = sealer.seal_chunk(b"last", true).unwrap();
+        let mut opener = HttpStreamOpener::for_request(
+            &parts,
+            secret,
+            &header,
+            &Unavailable,
+            1000,
+            5,
+            ContextBinding::default(),
+            &limits,
+        )
+        .unwrap();
+        assert!(matches!(
+            opener.open_chunk(&first),
+            Err(HttpError::ReplayStore(_))
+        ));
+        assert!(opener.open_chunk(&last).is_err());
+        assert!(!opener.is_finished());
+    }
+
+    #[test]
+    fn streaming_response_rejects_trailing_partial_frames() {
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        for together in [true, false] {
+            let request_id = [7; MESSAGE_ID_LEN];
+            let carrier = ContextCarrier::generate(1000, 60).answering(request_id);
+            let (mut parts, _) = http::Response::new(()).into_parts();
+            let (mut sealer, mut wire) =
+                HttpStreamSealer::for_response(&parts, &carrier, public, b"kid", &limits).unwrap();
+            carrier.apply_to_headers(&mut parts.headers).unwrap();
+            wire.extend(sealer.seal_chunk(b"payload", true).unwrap());
+            let mut reader =
+                HttpResponseStreamReader::new(parts, secret, request_id, 1000, 5, &limits);
+            if together {
+                wire.push(0);
+                assert!(reader.push(&wire).is_err());
+            } else {
+                reader.push(&wire).unwrap();
+                assert!(reader.push(&[0]).is_err());
+            }
+            assert!(!reader.is_finished());
+            assert!(reader.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn trailing_partial_frame_is_rejected_and_reader_stays_failed() {
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        for suffix_in_same_read in [true, false] {
+            let carrier = ContextCarrier::generate(1000, 60);
+            let (mut parts, _) = request().into_parts();
+            let (mut sealer, mut bytes) = HttpStreamSealer::for_request(
+                &parts,
+                &carrier,
+                ContextBinding::default(),
+                public,
+                b"kid",
+                &limits,
+            )
+            .unwrap();
+            bytes.extend(sealer.seal_chunk(b"payload", true).unwrap());
+            carrier.apply_to_headers(&mut parts.headers).unwrap();
+            let store = InMemoryReplayStore::new();
+            let mut reader = HttpRequestStreamReader::new(
+                parts,
+                secret,
+                &store,
+                1000,
+                5,
+                ContextBinding::default(),
+                &limits,
+            );
+            if suffix_in_same_read {
+                bytes.push(0);
+                assert!(reader.push(&bytes).is_err());
+            } else {
+                reader.push(&bytes).unwrap();
+                assert!(reader.is_finished());
+                assert!(reader.push(&[0]).is_err());
+            }
+            assert!(reader.push(&[]).is_err());
+            assert!(!reader.is_finished());
+            assert!(reader.finish().is_err());
+        }
+    }
+
+    #[test]
+    fn altered_context_cannot_poison_stream_replay_state() {
+        let (secret, public) = recipient();
+        let limits = BodyEnvelopeLimits::default();
+        let carrier = ContextCarrier::generate(1000, 60);
+        let (mut parts, _) = request().into_parts();
+        let (mut sealer, header) = HttpStreamSealer::for_request(
+            &parts,
+            &carrier,
+            ContextBinding::default(),
+            public,
+            b"kid",
+            &limits,
+        )
+        .unwrap();
+        let chunk = sealer.seal_chunk(b"data", true).unwrap();
+        let mut altered = carrier.clone();
+        altered.message_id[0] ^= 1;
+        altered.apply_to_headers(&mut parts.headers).unwrap();
+        let store = InMemoryReplayStore::new();
+        let mut forged = HttpStreamOpener::for_request(
+            &parts,
+            secret,
+            &header,
+            &store,
+            1000,
+            5,
+            ContextBinding::default(),
+            &limits,
+        )
+        .unwrap();
+        assert!(store.is_empty());
+        assert!(forged.open_chunk(&chunk).is_err());
+        assert!(store.is_empty());
+        assert!(!forged.is_finished());
+        carrier.apply_to_headers(&mut parts.headers).unwrap();
+        let mut original = HttpStreamOpener::for_request(
+            &parts,
+            secret,
+            &header,
+            &store,
+            1059,
+            5,
+            ContextBinding::default(),
+            &limits,
+        )
+        .unwrap();
+        original.open_chunk(&chunk).unwrap();
+        for now in [1060, 1061, 1065] {
+            let mut replay = HttpStreamOpener::for_request(
+                &parts,
+                secret,
+                &header,
+                &store,
+                now,
+                5,
+                ContextBinding::default(),
+                &limits,
+            )
+            .unwrap();
+            assert!(matches!(
+                replay.open_chunk(&chunk),
+                Err(HttpError::Replayed)
+            ));
+            assert!(!replay.is_finished());
+            assert!(replay.open_chunk(&chunk).is_err());
+        }
     }
 
     #[test]
@@ -482,7 +796,7 @@ mod tests {
 
         // The same request opened again is rejected as a replay (the message id
         // was consumed for the whole stream).
-        let replay = HttpStreamOpener::for_request(
+        let mut replay = HttpStreamOpener::for_request(
             &req_parts,
             secret,
             &header,
@@ -492,6 +806,10 @@ mod tests {
             ContextBinding::default(),
             &limits,
         );
+        let replay = replay
+            .as_mut()
+            .expect("header alone does not consume replay state")
+            .open_chunk(&chunks[0]);
         assert!(matches!(replay, Err(HttpError::Replayed)));
     }
 

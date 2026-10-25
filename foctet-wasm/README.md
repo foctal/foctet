@@ -301,3 +301,12 @@ outer channel (`wss://`, `https://`) unless you pin identities.
 `KeyPair` and `IdentityKeyPair` expose raw key bytes. Store persistent secrets
 in an appropriate keystore or secrets manager and never log them. The WASM SDK
 does not implement host-backed, non-extractable key handling.
+
+## Worker TEXT storage
+
+`SignedObject.toStorageText()` returns a bounded canonical ASCII record containing
+both ciphertext and writer signature. `openSignedTextStorageRecord(text, secret,
+namespace, recordId, expectedVersion, pinnedWriter)` verifies it before opening,
+without unsigned fallback. Versions cross the JS boundary as `bigint`. See
+[Worker database storage](../docs/worker-databases.md) for Turso/Hyperdrive adapters
+and the endpoint/application trust boundary.

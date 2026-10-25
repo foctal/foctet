@@ -248,3 +248,72 @@ fn datagram_session_roundtrip() {
     // Wrong-mode call fails: a datagram session cannot seal messages.
     assert!(client.seal_message(0, 0, b"nope").is_err());
 }
+
+#[wasm_bindgen_test]
+fn signed_storage_and_body_verify_writer_before_decryption() {
+    use foctet_wasm::{
+        KeyPair, WasmIdentityKeyPair, open_signed_body_js, open_signed_storage_record_js,
+        seal_body_with_context_js, seal_signed_storage_record_js,
+    };
+    let recipient = KeyPair::generate();
+    let writer = WasmIdentityKeyPair::generate();
+    let sealed = seal_signed_storage_record_js(
+        b"private",
+        &recipient.public_key(),
+        b"kid",
+        b"tenant",
+        b"id",
+        7,
+        &writer,
+    )
+    .unwrap();
+    assert_eq!(
+        open_signed_storage_record_js(
+            &sealed.ciphertext(),
+            &sealed.signature(),
+            &recipient.secret_key(),
+            b"tenant",
+            b"id",
+            7,
+            &writer.public_key()
+        )
+        .unwrap(),
+        b"private"
+    );
+    assert!(
+        open_signed_storage_record_js(
+            &sealed.ciphertext(),
+            &sealed.signature(),
+            &recipient.secret_key(),
+            b"tenant",
+            b"id",
+            8,
+            &writer.public_key()
+        )
+        .is_err()
+    );
+    let body =
+        seal_body_with_context_js(b"body", &recipient.public_key(), b"kid", b"context").unwrap();
+    let sig = writer.sign_ciphertext(&body, b"context");
+    assert_eq!(
+        open_signed_body_js(
+            &body,
+            &recipient.secret_key(),
+            b"context",
+            &sig,
+            &writer.public_key()
+        )
+        .unwrap(),
+        b"body"
+    );
+    assert!(
+        open_signed_body_js(
+            &body,
+            &recipient.secret_key(),
+            b"context",
+            &sig,
+            &WasmIdentityKeyPair::generate().public_key()
+        )
+        .is_err()
+    );
+}

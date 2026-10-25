@@ -196,6 +196,50 @@ pub fn open_body_with_context_js(
     open_ctx_inner(envelope, recipient_secret_key, context).map_err(to_js)
 }
 
+/// Verifies a detached signature against an independently trusted writer pin.
+/// Call before opening a body or archive; throws on missing/malformed signatures.
+#[wasm_bindgen(js_name = verifyCiphertext)]
+pub fn verify_ciphertext_js(
+    ciphertext: &[u8],
+    context: &[u8],
+    signature: &[u8],
+    writer: &[u8],
+) -> Result<(), JsError> {
+    let signature =
+        <[u8; 64]>::try_from(signature).map_err(|_| JsError::new("expected 64 signature bytes"))?;
+    let writer =
+        <[u8; 32]>::try_from(writer).map_err(|_| JsError::new("expected 32 writer key bytes"))?;
+    foctet_core::verify_ciphertext(
+        ciphertext,
+        context,
+        signature,
+        foctet_core::PeerIdentity::new(writer),
+    )
+    .map_err(|_| JsError::new("writer authentication failed"))
+}
+
+/// Verifies a pinned writer and then opens a context-bound body.
+#[wasm_bindgen(js_name = openSignedBodyWithContext)]
+pub fn open_signed_body_js(
+    envelope: &[u8],
+    secret: &[u8],
+    context: &[u8],
+    signature: &[u8],
+    writer: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let limits = BodyEnvelopeLimits::default();
+    if envelope.len()
+        > limits
+            .max_header_bytes
+            .saturating_add(limits.max_payload_len)
+        || context.len() > limits.max_context_len
+    {
+        return Err(JsError::new("signed body exceeds limits"));
+    }
+    verify_ciphertext_js(envelope, context, signature, writer)?;
+    open_body_with_context_js(envelope, secret, context)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,4 +294,119 @@ mod tests {
             KeyPair::from_secret_key(&kp.secret_key()).unwrap_or_else(|_| panic!("from secret"));
         assert_eq!(rebuilt.public_key(), kp.public_key());
     }
+}
+
+/// Encrypted object and detached writer signature. Neither getter reveals a key.
+#[wasm_bindgen(js_name = SignedObject)]
+pub struct WasmSignedObject {
+    ciphertext: Vec<u8>,
+    signature: [u8; 64],
+}
+#[wasm_bindgen(js_class = SignedObject)]
+impl WasmSignedObject {
+    /// Exact ciphertext bytes to store or forward.
+    #[wasm_bindgen(getter)]
+    pub fn ciphertext(&self) -> Vec<u8> {
+        self.ciphertext.clone()
+    }
+    /// Canonical ASCII record for Worker TEXT storage; ciphertext and signature
+    /// travel together. Rejects records above the portable 1 MiB text budget.
+    #[wasm_bindgen(js_name = toStorageText)]
+    pub fn to_storage_text(&self) -> Result<String, JsError> {
+        foctet_storage_wire::TextRecord::from_parts(&self.ciphertext, &self.signature)
+            .map(|record| record.as_str().to_owned())
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+    /// Detached writer signature, to persist atomically with the ciphertext.
+    #[wasm_bindgen(getter)]
+    pub fn signature(&self) -> Vec<u8> {
+        self.signature.to_vec()
+    }
+}
+/// Seals and signs a storage record using namespace, identity and expected version.
+#[wasm_bindgen(js_name = sealSignedStorageRecord)]
+#[allow(clippy::too_many_arguments)]
+pub fn seal_signed_storage_record_js(
+    plaintext: &[u8],
+    recipient: &[u8],
+    key_id: &[u8],
+    namespace: &[u8],
+    record_id: &[u8],
+    version: u64,
+    writer: &WasmIdentityKeyPair,
+) -> Result<WasmSignedObject, JsError> {
+    let recipient = to_key(recipient).map_err(to_js)?;
+    let (ciphertext, signature) = foctet_core::seal_signed_storage_record(
+        plaintext,
+        recipient,
+        key_id,
+        foctet_core::StorageRecord::new(namespace, record_id, version),
+        &writer.inner,
+        &BodyEnvelopeLimits::default(),
+    )
+    .map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(WasmSignedObject {
+        ciphertext,
+        signature,
+    })
+}
+/// Verifies a trusted writer and expected storage version before decryption.
+#[wasm_bindgen(js_name = openSignedStorageRecord)]
+#[allow(clippy::too_many_arguments)]
+pub fn open_signed_storage_record_js(
+    ciphertext: &[u8],
+    signature: &[u8],
+    secret: &[u8],
+    namespace: &[u8],
+    record_id: &[u8],
+    version: u64,
+    writer: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let signature = signature
+        .try_into()
+        .map_err(|_| JsError::new("expected 64 signature bytes"))?;
+    let pin = foctet_core::PeerIdentity::new(
+        writer
+            .try_into()
+            .map_err(|_| JsError::new("expected 32 writer key bytes"))?,
+    );
+    foctet_core::open_signed_storage_record(
+        ciphertext,
+        signature,
+        to_key(secret).map_err(to_js)?,
+        foctet_core::StorageRecord::new(namespace, record_id, version),
+        pin,
+        &BodyEnvelopeLimits::default(),
+    )
+    .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Opens canonical signed TEXT storage with an independently trusted writer and
+/// expected record identity/revision. No legacy unsigned fallback is attempted.
+#[wasm_bindgen(js_name = openSignedTextStorageRecord)]
+pub fn open_signed_text_storage_record_js(
+    text: &str,
+    secret: &[u8],
+    namespace: &[u8],
+    record_id: &[u8],
+    version: u64,
+    writer: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let pin = foctet_core::PeerIdentity::new(
+        writer
+            .try_into()
+            .map_err(|_| JsError::new("expected 32 writer key bytes"))?,
+    );
+    foctet_storage_wire::TextRecord::parse(text, foctet_storage_wire::MAX_TEXT_BYTES)
+        .and_then(|record| {
+            record.open(
+                secret
+                    .try_into()
+                    .map_err(|_| foctet_storage_wire::Error::Invalid)?,
+                foctet_core::StorageRecord::new(namespace, record_id, version),
+                pin,
+                &BodyEnvelopeLimits::default(),
+            )
+        })
+        .map_err(|e| JsError::new(&e.to_string()))
 }

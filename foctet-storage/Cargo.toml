@@ -1,0 +1,31 @@
+[package]
+readme = "README.md"
+name = "foctet-storage"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.94"
+license.workspace = true
+repository.workspace = true
+description = "Opaque signed-record storage and atomic replay adapters for Foctet"
+
+[features]
+default = []
+turso = ["dep:reqwest", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:rustls", "dep:webpki-roots"]
+
+[dependencies]
+foctet-core.workspace = true
+foctet-http.workspace = true
+sqlx = { version = "0.9", default-features = false, features = ["any", "mysql", "postgres", "sqlite-bundled", "runtime-tokio", "tls-rustls-ring"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"], optional = true }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+zeroize = { workspace = true, optional = true }
+thiserror.workspace = true
+
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"], optional = true }
+webpki-roots = { version = "1.0.11", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+x25519-dalek.workspace = true
+tempfile = "3.27"
