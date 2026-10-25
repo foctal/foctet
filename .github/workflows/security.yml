@@ -24,4 +24,13 @@ jobs:
       - name: Check advisory exception review dates
         run: bash scripts/check-advisory-exceptions.sh
       - name: Check dependency advisories
-        run: cargo audit --db "$RUNNER_TEMP/foctet-cargo-audit-db" --deny warnings --ignore RUSTSEC-2025-0134
+        run: |
+          cargo audit --db "$RUNNER_TEMP/foctet-cargo-audit-db" --deny warnings
+          for lockfile in foctet-http/examples/workers-echo/Cargo.lock foctet-http/examples/workers-kv-vault/Cargo.lock; do
+            cargo audit --db "$RUNNER_TEMP/foctet-cargo-audit-db" --no-fetch --file "$lockfile" --deny warnings
+          done
+      - name: Check JavaScript development and interop advisories
+        run: |
+          for directory in packages/worker-storage interop foctet-wasm/examples/browser foctet-http/examples/workers-echo foctet-http/examples/workers-kv-vault; do
+            (cd "$directory" && npm audit --audit-level=low)
+          done

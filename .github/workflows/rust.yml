@@ -24,14 +24,51 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+      - name: Check packaged test fixtures
+        run: python3 scripts/check-test-fixtures.py
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --workspace --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Check transport features independently
         run: |
           for feature in transport-muxtls transport-websock transport-websock-mux transport-quinn transport-quion transport-webtrans transport-webtrans-quion; do
             cargo check -p foctet --no-default-features --features "$feature" --locked
           done
+      - name: Check archive WASM targets
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p foctet-archive --all-targets --all-features --locked --target wasm32-unknown-unknown
+          cargo check -p foctet-storage-wire --locked --target wasm32-unknown-unknown
       - name: Test
         run: cargo test --workspace --all-features --locked
+
+  storage:
+    name: Disposable database integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Exercise MySQL, MariaDB, PostgreSQL and libSQL
+        run: python3 scripts/test-storage-databases.py
+
+  worker-databases:
+    name: Worker Turso and Hyperdrive adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install WASM toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Test portable codecs and local Worker database connections
+        working-directory: packages/worker-storage
+        run: |
+          npm ci
+          npm test
+          npm run test:types
+          npm run test:databases
