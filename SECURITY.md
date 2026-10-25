@@ -74,6 +74,15 @@ a protocol/profile must be disabled sooner for safety.
   each recipient. Use randomized builders for application data; deterministic
   secrets are intended for test vectors.
 
+## Writer authentication
+
+Body/storage/archive encryption to a public key does not identify the writer.
+Anyone holding the public key can create a valid replacement ciphertext. Use
+`sign_ciphertext` / `verify_ciphertext` with a pinned writer before decrypting,
+or the signed storage helpers, when the storage or relay is malicious. Protected
+HTTP context and replay protection do not replace sender authentication or
+application authorization. See [security and platform boundaries](docs/security-boundaries.md).
+
 ## Limitations and application responsibilities
 
 - **No session persistence or resumption.** After a restart or reconnect,
@@ -96,7 +105,8 @@ a protocol/profile must be disabled sooner for safety.
   count thresholds or explicit rekeys. The SDK is not yet published to npm.
 - **Endpoint security and key distribution belong to the application.** Foctet
   does not protect a compromised endpoint, distribute trusted identities,
-  enforce application authorization, or provide key recovery.
+  enforce application authorization, or recover arbitrary lost endpoint keys.
+  Optional archive threshold recovery requires shares provisioned before key loss.
 
 See [resource limits](docs/resource-limits.md) and
 [operations](docs/operations.md) for sizing, monitoring, and shutdown guidance.

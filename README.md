@@ -19,7 +19,9 @@ Transport-agnostic end-to-end encryption layer for secure data transfer.
 - `foctet-http`: Thin HTTP adapter for `application/foctet` body envelopes.
 - `foctet-archive`: Encrypted single-file and split archives with recipient key wrapping.
 - `foctet-transport`: Layered transport integration helpers.
-- `foctet-wasm`: WebAssembly / TypeScript bindings for the body envelope.
+- `foctet-wasm`: WebAssembly / TypeScript bindings for body envelopes and sessions.
+- `foctet-storage`: Native SQL and remote Turso storage/replay adapters (Rust 1.94).
+- `foctet-storage-wire`: Driver-free signed TEXT records and SQL plans (Rust 1.88).
 - `foctet`: Top-level re-export crate.
 
 ## Stability
@@ -58,11 +60,15 @@ Foctet provides:
 - **Encrypted archives** for single-file and split-file delivery.
 - **WASM/TypeScript bindings** for body envelopes and framed sessions.
 
-Current gaps:
+Signed body, record and archive APIs authenticate writers against trusted keys.
+File streaming supports bounded-memory processing, and optional threshold archive
+recovery supports separately held recovery shares. Storage adapters preserve
+opaque records through SQL drivers or existing application connections.
+See [storage integration](docs/storage-integration.md) for API selection.
 
-- npm publishing for the WASM SDK
-- framework-specific streaming response helpers
-- final v1 wire/API compatibility commitment
+See [security and platform boundaries](docs/security-boundaries.md) for guarantees
+and application responsibilities, and [CHANGELOG.md](CHANGELOG.md) for changes
+and upgrade notes.
 
 ## Transport Support
 
@@ -144,3 +150,13 @@ reporting process.
 - Deterministic archive secrets intentionally disable build-time randomness. Reusing
   them across real payloads leaks equality and key-reuse signals, so reserve them for
   fixtures and interoperability tests.
+
+## Storage integration
+
+Foctet encrypts and authenticates records independently of their storage backend.
+Use the native database adapters for supported SQL backends, or the portable
+signed TEXT codec and statement plans with an existing driver. JavaScript
+adapters are available for supported client interfaces. See
+[portable TEXT storage](docs/worker-databases.md) for encoding, adapter selection
+and connection-specific requirements. Applications provide writer trust,
+authorization and trusted revision checkpoints.

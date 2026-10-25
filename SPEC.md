@@ -727,3 +727,119 @@ Receiver (per stream\_id)
 *   ACTIVE: verify AAD/tag, replay check, deliver
 *   ACTIVE -> REKEY -> ACTIVE
 *   ACTIVE -> CLOSED
+
+## Detached ciphertext signatures
+
+Existing body, stream, and archive wire encodings are unchanged. Detached writer
+signatures are carried separately by the application. This construction is
+ordinary Ed25519 over the following 32-byte SHA-256 digest, not Ed25519ph:
+
+```
+SHA256(
+  ASCII("foctet ciphertext signature v1") || 0x00 ||
+  uint64_be(context_length) || context ||
+  uint64_be(ciphertext_length) || ciphertext
+)
+```
+
+The signature is exactly 64 bytes. Verification MUST use strict Ed25519
+verification with an independently trusted writer public key and MUST precede
+decryption. The application context MUST distinguish the protocol purpose and
+unambiguously encode its expected tenant, object, and version as applicable.
+A key delivered with the object MUST NOT establish trust by itself. Signatures
+do not replace HTTP replay prevention, authorization, or rollback checkpoints.
+For split archives, sign the manifest bytes, whose authenticated hashes cover
+the parts. Signed storage helpers use the existing storage-record AAD as context.
+
+## Authenticated recovery shares (FOCTETSS v1)
+
+This optional `foctet-archive/threshold` format uses vsss-rs GF(256) Shamir
+sharing (AES polynomial 0x11b) for a randomly generated 32-byte X25519 recipient
+secret. It is distinct from file splitting. The archive remains the existing
+single-file format and has that recipient as its sole recipient.
+
+Each share is exactly 187 bytes, in order:
+
+| Field | Bytes |
+| --- | ---: |
+| ASCII `FOCTETSS` | 8 |
+| Random recovery-set ID | 16 |
+| Threshold k, total n | 1 each |
+| X25519 recipient public key | 32 |
+| BLAKE3 of exact archive bytes | 32 |
+| Nonzero GF(256) share index | 1 |
+| Secret share value | 32 |
+| Detached writer signature | 64 |
+
+The signature authenticates the first 123 bytes with the detached-ciphertext
+signature transcript and context `foctet recovery share v1`. Require
+`2 <= k <= n <= 255`. Authenticate every supplied share against an independently
+pinned writer and trusted descriptor; reject duplicates, mixed sets, corruption,
+wrong archive hashes, and fewer than k or more than n shares. After interpolation,
+verify the recovered public key before opening the archive. No subset search is
+performed when a supplied share fails authentication.
+
+Shares are secret material; store and transmit them encrypted under independent
+custodian keys. A public descriptor is not a rollback checkpoint unless obtained
+from a trusted source. Rotation creates a fresh archive and set; old shares cannot
+be revoked from holders of an old threshold. This new composition still requires
+independent cryptographic review before a production assurance claim.
+
+## Signed streaming files (FOCTETFS v1)
+
+This bounded-memory format is separate from existing single/split archives. Its
+prefix is ASCII `FOCTETFS` followed by version byte 1. Every subsequent record is
+`length: u32_be || bytes[length] || signature[64]`. Readers enforce limits before
+allocating records. The first record is an existing FOCTETHS stream header. Later
+records are existing stream chunk frames, with sequential indices and authenticated
+FINAL. A successful reader requires FINAL and immediate EOF; trailing bytes,
+truncation, reordering, or signature failure invalidate the entire output.
+
+Let `C = "foctet signed file stream v1\0" || application_context`, where the
+application context is at most 60 KiB and is independently supplied by the reader.
+The first record's detached signature uses context C. Every chunk record's
+signature uses `C || BLAKE3(header)`. Core stream AEAD uses context C for all
+chunks. Thus each signature binds the writer, purpose, exact header, and index.
+The library writer emits an empty FINAL after all data; the reader also accepts
+valid core FINAL frames containing data. Default budgets are 1 MiB per plaintext
+chunk, 1 TiB total plaintext, and 2^24 frames including FINAL. Applications should
+reduce these budgets to their requirements and impose I/O deadlines externally.
+
+Decryption to an arbitrary writer is provisional until success. File extraction
+uses a restricted temporary file in the destination directory, validates the full
+stream, syncs the file, and publishes without overwriting an existing destination.
+Directory durability and filesystem semantics remain platform-dependent. The
+format supports one recipient; multi-recipient small files use existing archives.
+
+## HTTP writer signatures
+
+Complete protected-context requests and responses can carry the detached writer
+signature in `x-foctet-writer-signature` as exactly 128 lowercase hexadecimal ASCII
+characters. Duplicate headers are rejected. Its transcript signs exact body bytes
+with the canonical protected HTTP AAD as context. Receivers must explicitly require
+a trusted writer pin; stripping the header then fails. Unprotected/raw methods
+reject a configured writer policy. The signature does not replace request replay
+checks, response correlation, or application authorization.
+
+For direct signed chunk APIs, the signature context is
+`"foctet signed stream chunk v1\0" || u64_be(header.length) || header || context`.
+A signature is a separate sidecar for each existing chunk frame. Byte-reader APIs
+do not implicitly parse this sidecar; callers must use `open_signed_chunk` and
+require a writer, or authenticate the surrounding transport/application explicitly.
+
+
+## Signed storage TEXT v1
+
+Worker-compatible storage may transport the existing signed storage envelope as
+ASCII `FCT1.<ciphertext-base64>.<signature-base64>`. Both fields use RFC 4648
+standard Base64 with canonical padding and zero unused bits. Whitespace, alternate
+alphabets, omitted padding, additional fields, an empty ciphertext, and signatures
+other than 64 decoded bytes are rejected. The complete text is limited to
+1,048,576 bytes by the portable adapter. No trust is established by parsing it.
+
+The signature and storage-record AAD are unchanged from the signed storage API.
+The reader supplies the trusted namespace, record identity, expected revision and
+writer public key separately. Portable SQL revisions are positive signed BIGINTs.
+A database row version alone is not an authenticated freshness checkpoint. The
+format contains neither plaintext keys nor a self-authorizing writer pin. There
+is no automatic fallback to unsigned v0.5 storage envelopes.

@@ -21,3 +21,6 @@ Wire changes must update [SPEC.md](../SPEC.md) and the
 [test vectors](../test-vectors/README.md) together. See
 [testing](testing.md) for compatibility checks and
 [security policy](../SECURITY.md#supported-versions) for supported releases.
+
+Release-specific API changes and upgrade notes are recorded in
+[CHANGELOG.md](../CHANGELOG.md).

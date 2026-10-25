@@ -1,213 +1,125 @@
-# Zero-Knowledge Storage Backends
+# Blind storage backends
 
-How to use foctet so a backend stores and moves user data it **cannot read** —
-the model for a password manager or any end-to-end-encrypted app. The examples
-focus on Cloudflare Workers, but the same storage model applies to D1, Turso /
-libSQL, PostgreSQL, MySQL / MariaDB, R2, KV, object stores, and ordinary Rust
-servers such as axum or Actix Web.
+A blind storage backend persists and forwards data that it cannot decrypt. The
+cryptographic model is independent of the database, hosting provider and server
+framework: encryption and decryption happen at trusted endpoints, while the
+backend receives opaque ciphertext and the metadata required to route it.
 
-The core rule is independent of the database: the backend stores opaque
-ciphertext bytes and never receives the user's plaintext or decryption key.
+Here, "zero-knowledge storage" means that the backend has no decryption keys. It
+does not imply zero-knowledge proofs or concealment of access patterns, record
+sizes or routing metadata.
 
-## Two encryption patterns
+## Choose the decryption boundary
 
-| Pattern | Who decrypts | foctet API | Use for |
-| --- | --- | --- | --- |
-| **Blind storage** (zero-knowledge) | client only | `foctet_core::storage` (`seal_storage_record` / `open_storage_record`) | vault items, notes, attachments — anything the server just stores |
-| **Encrypted transport** | the Worker | `foctet_http::workers` (`WorkersOpener` / `WorkersSealer`) | requests the server must act on (sync metadata, sharing control) |
-
-A zero-knowledge app is mostly blind storage, with encrypted transport only for
-the few operations the server legitimately processes.
-
-## Blind storage
-
-The client seals a value to its own key and hands the opaque bytes to the
-Worker, which stores them verbatim. Each value binds a record descriptor —
-namespace, id, version — into the AEAD:
-
-```rust
-use foctet_core::{StorageRecord, seal_storage_record, open_storage_record};
-
-let record = StorageRecord::new(b"vault-items", b"login-github", version);
-let blob = seal_storage_record(plaintext, account_public_key, b"account-v1", record)?;
-// ... store `blob` in KV / D1 / Turso / PostgreSQL / MySQL / R2 / any backend,
-// keyed by plaintext-free metadata such as owner id, record id, and version ...
-let plaintext = open_storage_record(&blob, account_secret_key, record)?;
-```
-
-The descriptor is authenticated but not stored in the envelope, so the reader
-must supply the same `StorageRecord` to open it. This gives:
-
-- **Confidentiality:** the server holds only ciphertext; it has no key.
-- **Substitution resistance:** a backend cannot answer a read for record A with
-  record B's ciphertext — the namespace/id in the reader's descriptor would not
-  match, and the open fails.
-- **Rollback resistance:** bind the version the client *expects* (tracked
-  client-side or via an authenticated version pointer); serving a stale
-  ciphertext then fails to open.
-
-See the runnable [`workers-kv-vault`](../foctet-http/examples/workers-kv-vault/README.md)
-example — a Worker with **no crypto dependency** that stores blobs in KV.
-
-## Mapping to Cloudflare primitives
-
-Blind storage produces `Vec<u8>`, so it drops into any Cloudflare store:
-
-- **KV** — `put_bytes(id, blob)` / `get(id).bytes()`. Best for per-record vault
-  items and small config. (See the example.)
-- **D1** — store the blob in a `BLOB` column; index on plaintext-free columns
-  only (record id, owner id, version), never on decrypted fields.
-- **Turso / libSQL** — store the blob in a `BLOB` column, or encode it as
-  base64/hex `TEXT` only if the client library or migration path makes binary
-  values awkward. Cloudflare's TypeScript Worker integration uses
-  `@libsql/client/web`; worker-rs applications commonly use `libsql-client`.
-  Both are application-level database choices: foctet only requires that the
-  stored value remain the exact sealed bytes.
-- **R2** — for large attachments, seal with `foctet-archive`
-  (`create_split_archive_from_bytes`) and store the parts as R2 objects.
-- **Durable Objects** — hold per-user coordination state and opaque blobs; a DO
-  also backs strongly-consistent anti-replay (see
-  [`DurableObjectReplayStore`](../foctet-http/src/workers.rs)).
-- **Hyperdrive to PostgreSQL / MySQL** — Hyperdrive is a connectivity layer, not
-  an encryption boundary. Store foctet ciphertext in `BYTEA` (PostgreSQL) or
-  `BLOB` / `VARBINARY` (MySQL / MariaDB), and keep indexes limited to
-  plaintext-free metadata.
-- **Queues** — enqueue sealed bytes for async fan-out. Queues redeliver, so make
-  consumers idempotent; dedupe by the record/message id with an
-  `AsyncReplayStore` (e.g. a Durable Object) if a duplicate would cause harm.
-
-## SQL schema pattern
-
-Keep server-visible routing metadata separate from the sealed payload:
-
-```sql
-CREATE TABLE vault_records (
-    owner_id TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    record_id TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    key_id TEXT NOT NULL,
-    ciphertext BLOB NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (owner_id, namespace, record_id)
-);
-
-CREATE INDEX vault_records_owner_version
-    ON vault_records(owner_id, namespace, version);
-```
-
-The corresponding `StorageRecord` must be derived from the same logical
-descriptor that the client expects:
-
-```rust
-let record = StorageRecord::new(
-    namespace.as_bytes(),
-    record_id.as_bytes(),
-    version,
-);
-```
-
-The server may use `owner_id`, `namespace`, `record_id`, and `version` for
-routing, authorization checks, pagination, conflict detection, or quota
-accounting. It must not derive columns from decrypted fields such as a note
-title, URL, task name, email body, attachment filename, or password entry
-username unless those fields are intentionally public metadata for that
-application.
-
-When binary columns are unavailable or inconvenient, store `ciphertext` as
-base64 `TEXT` and decode it byte-for-byte before returning it to the client.
-
-## Turso / libSQL deployment patterns
-
-Turso works as a zero-knowledge backend when it is only the persistence layer for
-sealed bytes.
-
-- **Cloudflare Worker, TypeScript:** use Turso's Worker-compatible web client
-  (`@libsql/client/web`) to insert and fetch the sealed blob. The Worker should
-  receive ciphertext from the client, store it, and return ciphertext on reads.
-  It does not need a foctet secret key for blind storage.
-- **Cloudflare Worker, worker-rs:** use `libsql-client` or another
-  wasm-compatible libSQL client. The database adapter should accept and return
-  `Vec<u8>` (or encoded text) without trying to parse foctet envelopes.
-- **Native Rust backend:** use the `turso` or `libsql` crate when that is the
-  right operational fit for an axum / Actix Web / background worker process.
-  The same zero-knowledge rule applies: store opaque bytes and keep keys on the
-  end-user client.
-
-Turso authentication tokens, database URLs, retry policy, migrations, and query
-builders are application concerns. Foctet does not manage database connections or credentials.
-
-## PostgreSQL, MySQL, and MariaDB
-
-PostgreSQL, MySQL, and MariaDB are also valid blind-storage backends.
-
-Recommended binary columns:
-
-| Database | Ciphertext column | Notes |
+| Pattern | Who decrypts | Foctet API |
 | --- | --- | --- |
-| PostgreSQL | `BYTEA` | Keep server-side indexes on owner/record/version metadata only. |
-| MySQL / MariaDB | `BLOB`, `MEDIUMBLOB`, or `VARBINARY` | Choose the size class from the maximum sealed payload size. |
-| SQLite / D1 / libSQL / Turso | `BLOB` | `TEXT` with base64 is acceptable only as an encoding workaround. |
+| Blind storage | Trusted data endpoints; the storage service cannot decrypt | Signed APIs in `foctet_core::storage` |
+| Encrypted request/response | The application endpoint processing the request | Protected-context APIs in `foctet-http` |
+| Encrypted file storage | Authorized archive recipients | Signed archives and file streaming in `foctet-archive` |
 
-With Cloudflare Workers, Hyperdrive can connect a Worker to PostgreSQL or MySQL,
-but Hyperdrive does not change the cryptographic model. With axum, Actix Web, or
-another native Rust backend, any DB library (`sqlx`, `diesel`, `tokio-postgres`,
-`mysql_async`, `turso`, `libsql`, or a project-specific adapter) can be used as
-long as it preserves the sealed bytes exactly.
+A service that processes plaintext is a trusted endpoint for that data. Transport
+encryption, database authentication and encryption at rest do not make that
+service blind. Choose the boundary separately for each operation.
+
+## Seal and authenticate records
+
+The endpoint binds the expected namespace, record ID and version into the record.
+A pinned writer signature prevents an untrusted store from replacing the record
+with a new envelope encrypted using the public recipient key. Store ciphertext
+and signature atomically; obtain the writer pin independently of the store.
+
+```rust
+use foctet_core::{StorageRecord, seal_signed_storage_record, open_signed_storage_record};
+
+let record = StorageRecord::new(namespace, record_id, expected_version);
+let (ciphertext, signature) = seal_signed_storage_record(
+    plaintext, recipient_public_key, recipient_key_id, record, &writer, &limits,
+)?;
+// Persist ciphertext and signature together using the selected backend.
+let plaintext = open_signed_storage_record(
+    &ciphertext, signature, recipient_secret_key, record, trusted_writer, &limits,
+)?;
+```
+
+The reader must supply its independently expected descriptor and writer identity:
+
+- The recipient key provides confidentiality.
+- The signature authenticates the writer against the trusted pin.
+- Namespace and record identity binding prevent cross-record substitution.
+- Expected version binding rejects stale records only when the reader has a
+  trustworthy freshness checkpoint. A database-reported revision is insufficient.
+
+These properties do not prevent deletion, withholding or denial of service.
+
+## Choose the stored representation
+
+| Representation | Use when | API |
+| --- | --- | --- |
+| Ciphertext bytes and detached signature | The driver supports binary values | Core signed storage APIs or `StoredRecord` in `foctet-storage` |
+| Canonical signed TEXT value | An ASCII value is convenient for the driver or transport | `TextRecord` in `foctet-storage-wire` or the WASM signed TEXT API |
+| Signed archive or file stream | Data is stored or delivered as files/objects | `SignedArchive`, `SignedSplitArchive` or `foctet_archive::streaming` |
+
+Encoding ciphertext as text does not add encryption. Preserve the exact signed
+bytes and enforce size limits before buffering untrusted input. For SQL storage,
+use bound parameters and select column capacities for the complete encrypted
+representation, including signatures and encoding overhead.
+
+| Database family | Binary column |
+| --- | --- |
+| PostgreSQL | `BYTEA` |
+| MySQL / MariaDB | An appropriately sized `BLOB` family column or `VARBINARY` |
+| SQLite / libSQL-compatible services | `BLOB` |
+
+Signed TEXT records can be stored in a sufficiently sized text column. The native
+and portable adapters have separate schemas; apply their migrations explicitly.
+See [storage integration](storage-integration.md) and
+[portable TEXT storage](worker-databases.md) for supported interfaces and limits.
+
+## Routing metadata and concurrency
+
+Keep intentionally visible metadata separate from the encrypted payload. A row
+may contain an opaque storage key, revision, ciphertext and signature; a TEXT
+record already carries ciphertext and signature together. The backend may use
+routing metadata for authorization, quotas and conflict detection, but must not
+derive searchable columns from decrypted fields while claiming to remain blind.
+
+Ensure the authenticated record identity also distinguishes tenants. A tenant
+column used only for routing is not itself cryptographic tenant binding.
+
+Conditional updates can prevent concurrent writers from overwriting one another.
+They do not establish the reader's trusted latest version. Define checkpoint
+storage, conflict resolution and recovery independently. Do not reset revisions
+or reuse identifiers in a way that makes an old signed record current again.
+
+## Backend-specific concerns
+
+The same record representation can be carried by SQL databases, object stores,
+key/value services and queues. Applications must account for their differing
+atomicity, consistency, size limits, expiration and retry behavior. A cache may
+return a valid but old signed record. Queue consumers must handle redelivery.
+
+Connection proxies and platform bindings change how the backend is accessed,
+not who can decrypt the payload. Use the native adapter where supported, or pass
+opaque records through an existing driver. Drivers, credentials, connection
+lifetime and authoritative-read routing must match the deployment.
+
+The [`workers-kv-vault` example](../foctet-http/examples/workers-kv-vault/README.md)
+illustrates one implementation using a key/value service. It is an example of the
+storage boundary, not a required deployment architecture.
 
 ## Application responsibilities
 
-Foctet provides the encrypted envelope and descriptor binding. The application
-manages:
+Applications provide:
 
+- Recipient-key provisioning and independently authenticated writer identities.
+- Authorization for record access and modification.
+- Trusted revisions, conflict resolution, retention and backup/recovery policies.
+- Database credentials, schema migrations, network security and resource limits.
+- A deliberate policy for metadata visibility, including indexes and logs.
+- Key distribution, device enrollment, revocation and endpoint security.
 
-- database schema, migrations, pooling, retries, and credentials;
-- Cloudflare bindings, Turso tokens, Hyperdrive configuration, or native DB
-  connection strings;
-- authorization for who may create, read, update, or delete a record id;
-- conflict resolution, version allocation, pagination, quotas, and retention;
-- deciding which metadata is intentionally visible to the backend.
-
-## Safe and unsafe patterns
-
-Safe patterns:
-
-- Store `ciphertext` plus `owner_id`, `namespace`, `record_id`, and `version`.
-- Bind the same namespace/id/version into `StorageRecord`.
-- Return ciphertext to the client and let the client decrypt.
-- Use encrypted transport separately for server-processed control operations.
-- Use `foctet-archive` or split archives for large attachments.
-
-Unsafe patterns:
-
-- Decrypt in the Worker or backend and store plaintext in SQL.
-- Store searchable decrypted fields next to the ciphertext and still call the
-  design zero knowledge.
-- Let the server choose a different descriptor than the client expects.
-- Treat database encryption-at-rest, Turso auth tokens, TLS, Hyperdrive, or
-  private networking as a replacement for client-side foctet encryption.
-- Reuse one ciphertext under a different namespace/id/version and expect it to
-  open.
-
-## Sharing and multiple devices
-
-- **One account, many devices:** derive one account keypair from the master
-  password; every device holds the same key, so single-recipient
-  `seal_storage_record` reads everywhere.
-- **Sharing with other users:** wrap one payload to several recipient public keys
-  with `foctet-archive` (`create_archive_from_bytes(payload, &[pub_a, pub_b, …])`),
-  and store the archive bytes like any other blob.
-
-## Client key management (out of foctet's scope)
-
-foctet encrypts to X25519 keys; it does not derive them from a password. The
-client is responsible for:
-
-- deriving the account key from the master password with a memory-hard KDF
-  (Argon2id) and never uploading it;
-- rotating the account key with an overlap window if it changes (see
-  [Key rotation](key-rotation.md));
-- authenticating the outer transport (TLS) and the user session separately —
-  blind storage protects data at rest, not who is allowed to read or write a
-  given record id.
+Foctet does not require a password-derived account key or a particular multi-device
+identity design. If an application derives or wraps keys, it owns that protocol
+and its recovery policy. Multi-recipient archives can protect a payload for
+several recipients; the application authenticates those recipients and the writer.
+See [key rotation](key-rotation.md) and [security boundaries](security-boundaries.md).

@@ -15,7 +15,7 @@ the bounds. In particular:
 | Messages | `DEFAULT_MAX_MESSAGE_SIZE` | Clamp to the backend's lower message limit | Queue rejection before acceptance is recoverable; backend send failure is terminal |
 | Datagrams | 1200-byte on-wire default | Lower it to the proven path MTU; never depend on fragmentation | Oversize output is rejected before delivery; loss is not backpressure |
 | HTTP bodies | 64 MiB one-shot default | Prefer streaming for large bodies and cap aggregate request concurrency | Streaming holds at most one undecoded maximum frame; incomplete bodies are rejected |
-| Archives | 512 MiB in-memory plaintext maximum | Budget plaintext plus encrypted chunks and metadata; use an application-level smaller cap under constrained runtimes | No streaming archive format exists; input above the cap is rejected |
+| Archives | 512 MiB in-memory plaintext maximum | Budget plaintext plus encrypted chunks and metadata; use an application-level smaller cap under constrained runtimes | Input above the in-memory cap is rejected; use the separate signed FOCTETFS streaming API for larger files |
 | Workers replay | One Durable Object entry per message ID until expiry | TTL multiplied by peak accepted request rate determines retained state | Store failure rejects the request; never bypass replay protection |
 
 To measure throughput and latency on your hardware, run:

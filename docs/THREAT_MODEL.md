@@ -83,6 +83,16 @@ Alice". A wrong or attacker-supplied pinned key defeats authentication.
 Trust-on-first-use, directories, and revocation are out of scope for v0
 (see §3.9 on key loss).
 
+### Public-key envelope writer authentication
+
+The body and archive formats do not authenticate a sender. A storage adversary
+with the recipient public key can construct a fresh, valid ciphertext, including
+one with the expected storage descriptor. Require a detached writer signature
+verified against a trusted pin (or a separate authenticated write mechanism).
+The signed storage helpers compose this check before decryption. Context binding
+and AEAD integrity alone do not establish writer identity. Version checkpoints
+must be independently trusted to reject an older, correctly signed object.
+
 ### 3.2 Replay
 
 **Threat.** The attacker re-delivers a previously valid ciphertext: a frame in
@@ -245,9 +255,11 @@ Foctet's own header must be hidden from a specific hop.
 
 **Threat.** The holder of the only decryption key loses it.
 
-**Position.** Foctet is strictly end-to-end: there is **no key escrow and no
-recovery path**. Losing the recipient secret for a body envelope or archive
-makes the data permanently unreadable; losing an identity key means
+**Position.** Foctet is strictly end-to-end: there is **no built-in key escrow** for lost endpoint keys. Optional archive threshold recovery can
+protect a separately generated archive recipient key when shares were provisioned
+before loss; it does not recover arbitrary sessions or lost identity keys. Losing
+the only recipient secret without a backup or threshold recovery set makes the
+data permanently unreadable; losing an identity key means
 re-establishing trust out of band. Archives support **multiple recipients**
 (the DEK is wrapped per recipient), which is the supported mitigation: wrap to
 a backup/escrow recipient key *that the application controls* if recovery is a
@@ -260,16 +272,16 @@ specified in `docs/POLICIES.md`.
 
 - Keys and plaintext cross the JS boundary as `Uint8Array`s; JS engines may
   copy them arbitrarily — zeroization guarantees stop at the boundary.
-- No non-extractable key storage: WebCrypto has no portable non-extractable
-  X25519/Ed25519 type, so a compromised page context (XSS, malicious
-  extension) can exfiltrate keys. Treat the browsing context as the endpoint's
+- The SDK exposes raw key bytes and does not provide non-extractable key
+  storage, so a compromised page context (XSS, malicious extension) can
+  exfiltrate keys. Treat the browsing context as the endpoint's
   trust boundary and apply standard web hardening (CSP, no untrusted scripts).
 - The wasm runtime has no monotonic clock: age-based rekey is disabled there
   (frame/byte-count thresholds still apply); long-lived WASM sessions should
   drive rekey explicitly.
 
 Wire compatibility between Rust and JS is pinned by interop fixtures (Node
-opens Rust-produced envelopes) and in-browser tests in CI.
+opens Rust-produced envelopes) and the in-browser runtime test suite.
 
 ## 4. Explicit non-goals
 
@@ -283,6 +295,6 @@ opens Rust-produced envelopes) and in-browser tests in CI.
 ## 5. Assurance status
 
 Defenses above are implemented and regression-tested (unit, property,
-conformance across real transports, fuzzing in CI, cross-language interop,
+conformance across real transports, fuzz targets, cross-language interop,
 in-browser runtime tests). Report suspected gaps via the process in
 `SECURITY.md`.

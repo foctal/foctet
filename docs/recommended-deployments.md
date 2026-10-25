@@ -9,6 +9,7 @@ Draft v0 is experimental; see [SECURITY.md](../SECURITY.md) before deploying.
 | --- | --- | --- | --- |
 | Interactive end-to-end transport between peers | `foctet-transport` with authenticated native handshake | Stream payloads, frame integrity, replay window, rekey lifecycle | Peer discovery, transport availability, routing metadata |
 | HTTP request/response body encryption | `foctet-http` or `foctet_core::body` | HTTP body bytes; with protected-context APIs, selected request metadata is also authenticated and replay-protected | Method, URL, query, status code, outer headers, server authentication |
+| Persistent application records | Core signed storage APIs, native database adapters or portable TEXT records | Ciphertext confidentiality, writer authentication and expected record identity/version | Authorization, metadata visibility, trusted freshness checkpoints and backend availability |
 | File transfer, offline export, or storage handoff | `foctet-archive` | File contents, encrypted metadata, recipient-scoped DEK wrapping | File naming outside the archive, storage ACLs, distribution channel authenticity |
 
 ## Pattern 1: Authenticated Transport E2EE
@@ -82,9 +83,10 @@ Use this when the data must survive outside a live session.
 
 - Recommended crate: `foctet-archive`
 - Recommended setup:
-  - use `create_archive_from_bytes` or `create_split_archive_from_bytes`
+  - use `SignedArchive` or `SignedSplitArchive` when the reader must verify a writer
+  - use the signed file-streaming API for bounded-memory processing of larger files
   - distribute the resulting archive bytes or manifest/parts through any storage or transport layer
-  - decrypt with the intended recipient private key
+  - verify the independently trusted writer and decrypt with the intended recipient private key
 
 ### When to choose it
 
@@ -97,6 +99,23 @@ Use this when the data must survive outside a live session.
 `ArchiveBuildSecrets` is for reproducible vectors and deterministic tests only.
 
 Do not use deterministic archive secrets for real user data because fixed archive identifiers, DEKs, or wrapping ephemeral secrets leak equality and key-reuse signals across builds.
+
+## Pattern 4: Persistent Encrypted Records
+
+Use this when a storage service must preserve records without access to their
+plaintext. Encrypt and sign at the trusted data endpoint, then store the complete
+opaque record using the application's backend.
+
+- Use core signed storage APIs for application-managed binary records.
+- Use `foctet-storage` for its supported native database adapters.
+- Use `foctet-storage-wire` for canonical signed TEXT records and SQL plans, or
+  the JavaScript adapters for supported connection interfaces.
+- Keep writer pins and expected revisions independently trusted; backend
+  authorization and conditional updates do not replace these checks.
+
+See [blind storage](zero-knowledge-workers-storage.md),
+[storage integration](storage-integration.md) and
+[portable TEXT storage](worker-databases.md) for API and driver requirements.
 
 ## Deployment Checklist
 

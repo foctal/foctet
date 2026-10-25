@@ -1,7 +1,7 @@
-# Portable Worker storage
+# Portable signed TEXT storage
 
-Driver-free signed TEXT encoding and SQL statement plans for existing libSQL
-and Hyperdrive/MySQL connections. Supports native Rust and wasm32 with Rust 1.88.
+Driver-free signed TEXT encoding, independent of the storage backend, with
+parameterized SQL plans for libSQL and MySQL-compatible drivers. Supports native Rust and wasm32 with Rust 1.88.
 Parsing is not authentication: opening requires an independently trusted writer
 and expected namespace, record ID and revision. SQL plans contain only scalar
 text parameters and must be executed atomically by the application driver.
