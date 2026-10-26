@@ -39,7 +39,7 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo check -p foctet-archive --all-targets --all-features --locked --target wasm32-unknown-unknown
-          cargo check -p foctet-storage-wire --locked --target wasm32-unknown-unknown
+          cargo clippy -p foctet-storage-wire -p foctet-http -p foctet-transport --features workers,transport-websock --locked --target wasm32-unknown-unknown -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features --locked
 
@@ -54,7 +54,7 @@ jobs:
         run: python3 scripts/test-storage-databases.py
 
   worker-databases:
-    name: Worker Turso and Hyperdrive adapters
+    name: Worker storage adapters
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -63,8 +63,9 @@ jobs:
           node-version: '24'
       - name: Install WASM toolchain
         run: |
-          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
-          cargo install wasm-bindgen-cli --version 0.2.126 --locked
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked
+          cargo install worker-build --version 0.8.7 --locked
       - name: Test portable codecs and local Worker database connections
         working-directory: packages/worker-storage
         run: |
@@ -72,3 +73,6 @@ jobs:
           npm test
           npm run test:types
           npm run test:databases
+          cargo fmt --manifest-path ../../foctet-storage-wire/examples/workers/Cargo.toml -- --check
+          cargo clippy --manifest-path ../../foctet-storage-wire/examples/workers/Cargo.toml --all-features --target wasm32-unknown-unknown --locked -- -D warnings
+          npm run test:workers-rs

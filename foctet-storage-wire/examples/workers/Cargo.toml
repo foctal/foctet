@@ -1,0 +1,25 @@
+[package]
+name = "foctet-workers-storage-fixture"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+sdk-http = ["worker/http"]
+
+[dependencies]
+foctet-transport = { path = "../../../foctet-transport", features = ["transport-websock"] }
+futures-util = "0.3"
+websock-proto = "0.6.0"
+foctet-core = { path = "../../../foctet-core", default-features = false }
+foctet-storage-wire = { path = "../..", features = ["workers"] }
+foctet-http = { path = "../../../foctet-http", features = ["workers"] }
+worker = { version = "=0.8.7", features = ["d1"] }
+serde_json = "1"
+tokio = { version = "1.54.1", features = ["io-util"] }
+
+[workspace]

@@ -11,7 +11,8 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "test:databases": "node test/databases.mjs",
-    "test:types": "tsc --noEmit --strict --target es2022 --module nodenext test/types.ts"
+    "test:types": "tsc --noEmit --strict --target es2022 --module nodenext test/types.ts",
+    "test:workers-rs": "node test/workers-rs.mjs"
   },
   "devDependencies": {
     "@libsql/client": "0.17.4",
