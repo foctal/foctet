@@ -34,7 +34,9 @@
 //!   unbounded buffering at the Foctet layer.
 
 use futures_util::lock::Mutex;
-use websock::{Error as WebsockError, Message, WebSocketConnection};
+// Preserve the exact backend trait/type identity without depending on a facade
+// that selects a browser backend (and its wasm-bindgen version) for consumers.
+pub use websock_proto::{Error as WebsockError, Message, WebSocketConnection, WebSocketLimits};
 
 use crate::message::MessageTransport;
 
@@ -60,7 +62,7 @@ use websock_tungstenite_mux as websock_mux;
 /// WebSocket framing (unlike the byte-stream mux helpers in this module, which
 /// treat the socket as an opaque stream).
 ///
-/// It is generic over the `websock` crate's cross-platform
+/// It is generic over the `websock-proto` crate's cross-platform
 /// [`WebSocketConnection`] trait, so the same adapter works over the native
 /// (`websock-tungstenite`) connection **and** the browser
 /// (`websock-wasm`) WebSocket connection — a Rust/wasm front-end can run a
@@ -73,7 +75,7 @@ use websock_tungstenite_mux as websock_mux;
 /// use foctet_core::Session;
 /// use foctet_transport::{MessageChannelError, SecureMessageChannel};
 /// use foctet_transport::websock::WebsockMessageTransport;
-/// use websock::{Error, WebSocketConnection};
+/// use foctet_transport::websock::{WebsockError as Error, WebSocketConnection};
 ///
 /// async fn send<C: WebSocketConnection>(
 ///     connection: C,
@@ -105,7 +107,7 @@ impl<C> WebsockMessageTransport<C> {
     /// Wraps a connection and reports its configured WebSocket message limit.
     ///
     /// Pass the same value used in the connection's
-    /// [`websock::WebSocketLimits`] so [`crate::SecureMessageChannel`] can
+    /// [`WebSocketLimits`] so [`crate::SecureMessageChannel`] can
     /// clamp its Foctet frame size before sending.
     pub fn with_max_message_size(connection: C, max_message_size: usize) -> Self {
         Self {
@@ -154,7 +156,7 @@ pub async fn open_secure_channel(
     session: Session,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     open_secure_channel_with(session_handle, session, TransportConfig::default()).await
 }
@@ -168,7 +170,7 @@ pub async fn open_secure_channel_with(
     config: TransportConfig,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     let (send, recv) = session_handle
         .open_bi()
@@ -188,7 +190,7 @@ pub async fn open_secure_channel_with_handshake(
     thresholds: RekeyThresholds,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     open_secure_channel_with_handshake_and_auth_config(
         session_handle,
@@ -208,7 +210,7 @@ pub async fn open_secure_channel_with_handshake_and_config(
     config: TransportConfig,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     open_secure_channel_with_handshake_and_auth_config(
         session_handle,
@@ -228,7 +230,7 @@ pub async fn open_secure_channel_with_handshake_and_auth_config(
     config: TransportConfig,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     let (send, recv) = session_handle
         .open_bi()
@@ -249,7 +251,7 @@ pub async fn accept_secure_channel(
     session: Session,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     accept_secure_channel_with(session_handle, session, TransportConfig::default()).await
 }
@@ -263,7 +265,7 @@ pub async fn accept_secure_channel_with(
     config: TransportConfig,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     let (send, recv) = session_handle
         .accept_bi()
@@ -283,7 +285,7 @@ pub async fn accept_secure_channel_with_handshake(
     thresholds: RekeyThresholds,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     accept_secure_channel_with_handshake_and_auth_config(
         session_handle,
@@ -303,7 +305,7 @@ pub async fn accept_secure_channel_with_handshake_and_config(
     config: TransportConfig,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     accept_secure_channel_with_handshake_and_auth_config(
         session_handle,
@@ -323,7 +325,7 @@ pub async fn accept_secure_channel_with_handshake_and_auth_config(
     config: TransportConfig,
 ) -> Result<
     TokioTransportChannel<SplitIo<websock_mux::RecvStream, websock_mux::SendStream>>,
-    TransportChannelError<websock::Error>,
+    TransportChannelError<WebsockError>,
 > {
     let (send, recv) = session_handle
         .accept_bi()
@@ -342,7 +344,7 @@ mod tests {
     use super::*;
     use crate::SecureMessageChannel;
     use foctet_core::{RekeyThresholds, Session, SessionAuthConfig};
-    use websock::{ClientBuilder, ServerBuilder, WebSocketLimits};
+    use websock_tungstenite::{ClientBuilder, ServerBuilder};
 
     /// Drives a real native Foctet handshake so both sides share traffic keys.
     fn shared_session_keys() -> (Session, Session) {

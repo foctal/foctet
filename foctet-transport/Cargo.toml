@@ -23,8 +23,8 @@ runtime-futures = ["dep:futures-io", "dep:futures-sink", "dep:futures-util", "fo
 transport-muxtls = ["runtime-tokio", "dep:muxtls"]
 transport-webtrans = ["runtime-tokio", "dep:webtrans", "webtrans/quinn", "dep:bytes"]
 # Cross-platform raw-WebSocket message transport (`WebsockMessageTransport`),
-# usable on native and in the browser (wasm) via the `websock` crate's backends.
-transport-websock = ["dep:websock", "dep:futures-util"]
+# accepts any backend implementing the shared websock-proto connection trait.
+transport-websock = ["dep:websock-proto", "dep:futures-util"]
 # Native multiplexed-WebSocket byte-stream helpers (require a Tokio runtime).
 transport-websock-mux = ["transport-websock", "runtime-tokio", "dep:websock-tungstenite-mux"]
 transport-quion = ["runtime-tokio", "dep:quion"]
@@ -43,7 +43,7 @@ futures-util = { version = "0.3", default-features = false, features = ["io", "s
 tokio = { version = "1.54.1", features = ["io-util", "net", "time", "sync"], optional = true }
 muxtls = { version = "0.4.0", default-features = false, optional = true }
 webtrans = { version = "0.6.0", default-features = false, optional = true }
-websock = { version = "0.6.0", default-features = false, optional = true }
+websock-proto = { version = "0.6.0", optional = true }
 websock-tungstenite-mux = { version = "0.6.0", optional = true }
 quinn = { version = "0.11.11", default-features = false, optional = true }
 quion = { version = "0.2.2", default-features = false, features = ["runtime-tokio", "datagram"], optional = true }
@@ -56,6 +56,7 @@ js-sys = { version = "0.3", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [dev-dependencies]
+websock-tungstenite = "0.6.0"
 quion = { version = "0.2.2", default-features = false, features = ["runtime-tokio", "rustls-ring", "datagram"] }
 tokio = { version = "1.54.1", features = ["macros", "rt", "rt-multi-thread", "io-util", "time"] }
 foctet-core = { workspace = true, features = ["runtime-tokio"] }

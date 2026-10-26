@@ -1,7 +1,14 @@
-//! Portable, driver-free signed storage for Workers and native endpoints.
-//! SQL plans contain only opaque text; applications execute them with their own
-//! libSQL or Hyperdrive connection. No keys, network runtime or SQLx are required
-//! by a blind storage service. See `docs/worker-databases.md` for the trust boundary.
+//! Portable signed storage for Workers and native endpoints.
+//! SQL plans contain only opaque text. The default codec has no driver/runtime
+//! dependency; optional workers-rs adapters execute plans through SDK bindings.
+//! A blind storage service requires no private decryption keys.
+//! See `docs/worker-databases.md` for the trust boundary.
+pub mod database;
+#[cfg(any(test, all(feature = "workers", target_arch = "wasm32")))]
+mod hrana;
+#[cfg(all(feature = "workers", target_arch = "wasm32"))]
+pub mod workers;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use foctet_core::{BodyEnvelopeLimits, HandshakeSigner, PeerIdentity, StorageRecord};
 

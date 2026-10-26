@@ -32,13 +32,14 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 futures-util = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-worker = { version = "0.8.5", optional = true }
+worker = { version = "0.8.7", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 [features]
 default = []
 dangerous-stateless-http = []
 axum = ["dep:axum", "dep:http-body-util"]
-workers = ["dep:worker"]
+workers = ["dep:worker", "dep:futures-util"]
 redis = ["dep:redis"]
 
 [[example]]

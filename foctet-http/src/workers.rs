@@ -5,6 +5,7 @@
 //! outer HTTPS channel and Worker runtime.
 
 use foctet_core::BodyEnvelopeLimits;
+use futures_util::StreamExt;
 use thiserror::Error;
 
 use crate::{
@@ -93,7 +94,10 @@ pub async fn check_and_insert_in_durable_object(
     if request.method() != worker::Method::Post || request.path() != DURABLE_REPLAY_PATH {
         return worker::Response::error("Not Found", 404);
     }
-    let payload = request.bytes().await?;
+    let payload = match read_bounded_body(&mut request, crate::MESSAGE_ID_LEN + 16).await {
+        Ok(payload) => payload,
+        Err(_) => return worker::Response::error("Bad Request", 400),
+    };
     if payload.len() != crate::MESSAGE_ID_LEN + 16 {
         return worker::Response::error("Bad Request", 400);
     }
@@ -271,7 +275,14 @@ impl WorkersOpener {
         mut request: worker::Request,
     ) -> Result<Vec<u8>, WorkersError> {
         crate::raw::ensure_foctet_content_type(&worker_headers_to_http(&request)?)?;
-        let body = request.bytes().await?;
+        let limits = self.opener.options().limits().cloned().unwrap_or_default();
+        let body = read_bounded_body(
+            &mut request,
+            limits
+                .max_header_bytes
+                .saturating_add(limits.max_payload_len),
+        )
+        .await?;
         self.opener.open_body(&body).map_err(WorkersError::Http)
     }
 
@@ -317,7 +328,14 @@ impl WorkersOpener {
         S: ReplayStore + ?Sized,
     {
         let parts = worker_request_to_http_parts(&request)?;
-        let body = request.bytes().await?;
+        let limits = self.opener.options().limits().cloned().unwrap_or_default();
+        let body = read_bounded_body(
+            &mut request,
+            limits
+                .max_header_bytes
+                .saturating_add(limits.max_payload_len),
+        )
+        .await?;
         let http_request = http::Request::from_parts(parts, body);
         self.opener
             .open_request_with_context(http_request, store, now_secs, max_skew_secs, binding)
@@ -339,7 +357,14 @@ impl WorkersOpener {
         S: AsyncReplayStore + ?Sized,
     {
         let parts = worker_request_to_http_parts(&request)?;
-        let body = request.bytes().await?;
+        let limits = self.opener.options().limits().cloned().unwrap_or_default();
+        let body = read_bounded_body(
+            &mut request,
+            limits
+                .max_header_bytes
+                .saturating_add(limits.max_payload_len),
+        )
+        .await?;
         let http_request = http::Request::from_parts(parts, body);
         self.opener
             .open_request_with_async_store(http_request, store, now_secs, max_skew_secs, binding)
@@ -522,4 +547,34 @@ fn worker_headers_to_http(request: &worker::Request) -> Result<http::HeaderMap, 
         out.append(name, value);
     }
     Ok(out)
+}
+
+// Bound aggregate buffering independently of Content-Length (including chunked
+// requests). SDK/runtime-owned incoming chunk allocations remain platform-owned.
+async fn read_bounded_body(
+    request: &mut worker::Request,
+    max_bytes: usize,
+) -> Result<Vec<u8>, WorkersError> {
+    let body = request.inner().body();
+    let mut stream = request.stream()?;
+    let result = async {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+                return Err(HttpError::LimitExceeded("body_len").into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+    .await;
+    drop(stream);
+    if result.is_err()
+        && let Some(body) = body
+    {
+        // Cancel while the request context is alive, including SDK http-body bridges.
+        let _ = worker::wasm_bindgen_futures::JsFuture::from(body.cancel()).await;
+    }
+    result
 }
