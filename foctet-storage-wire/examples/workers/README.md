@@ -8,7 +8,8 @@ Requires Docker, the Rust `wasm32-unknown-unknown` target and `worker-build` 0.8
 The runner creates and removes its own containers and local persistence directory.
 
 This standalone workspace pins worker 0.8.7 to test the latest supported SDK
-together with Foctet HTTP/storage and the WebSocket message transport.
+together with Foctet HTTP/storage, the WebSocket message transport and the
+published websock 0.6.1 facade (including its WASM backend).
 The test-only socket bridge uses public synthetic identity keys, selects binary
 ArrayBuffer delivery explicitly, and checks encrypted messages in both directions.
 Production applications must bound SDK event queues and connection lifetimes.

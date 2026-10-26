@@ -14,7 +14,7 @@ sdk-http = ["worker/http"]
 [dependencies]
 foctet-transport = { path = "../../../foctet-transport", features = ["transport-websock"] }
 futures-util = "0.3"
-websock-proto = "0.6.0"
+websock = "0.6.1"
 foctet-core = { path = "../../../foctet-core", default-features = false }
 foctet-storage-wire = { path = "../..", features = ["workers"] }
 foctet-http = { path = "../../../foctet-http", features = ["workers"] }

@@ -80,14 +80,15 @@ The default portable and WebSocket transport crates retain Rust 1.88. The option
 workers-rs 0.8.7 integration requires Rust 1.91. Match the wasm-bindgen CLI to the
 resolved Rust crate version; CI uses CLI 0.2.129.
 
-### WebSocket dependency boundary
+### WebSocket connections
 
-Foctet depends on `websock-proto` 0.6.0 rather than the `websock` facade. The shared
+Foctet uses `websock-proto` 0.6.1 for the shared connection interface. Its
 `WebSocketConnection`, `Message`, limits and error types are identical to those
 re-exported by `websock`; existing backend implementations retain type compatibility.
 These types are also available from `foctet_transport::websock`. Native tests and
-examples use `websock-tungstenite` directly. No fork, vendored dependency or consumer
-`[patch.crates-io]` override is needed for Foctet and workers-rs together.
+examples use `websock-tungstenite` directly. The runtime fixture also depends on
+the published `websock` 0.6.1 facade, compiling its browser backend alongside
+workers-rs in the same dependency graph.
 
 A workers-rs application supplies a connection bridge to the trait, or implements
 `MessageTransport` directly. The local fixture demonstrates a `WebSocketPair`
@@ -105,20 +106,8 @@ socket.accept()?;
 This is required because recent compatibility dates default to Blob delivery.
 See [Cloudflare's binary-message documentation](https://developers.cloudflare.com/workers/runtime-apis/websockets/#binary-messages).
 
-**Upstream work remains only for applications directly depending on `websock` or
-`websock-wasm` 0.6.0 alongside the new SDK.** That published backend pins
-`wasm-bindgen = "=0.2.126"` and `wasm-bindgen-futures = "=0.4.76"`; Foctet cannot
-override another published crate's manifest for its consumers. The upstream
-maintainer must relax the exact constraints to tested compatible ranges (and keep
-the test runner/CLI in sync), or release a backend compatible with 0.2.129. A
-compatible backend release can be selected by the facade's existing 0.6 range;
-a new minor backend version would also require a facade update. Validate browser
-behavior and supported Rust versions before publishing. Merely updating an
-application lockfile cannot solve the published exact-pin conflict.
-
-Foctet's `transport-websock-mux` remains a native Tokio adapter. Resolving the
-message transport dependency does not make native multiplexed sockets available
-inside Workers.
+Foctet's `transport-websock-mux` is a native Tokio adapter. Worker applications
+use a socket bridge for message transport.
 
 Run `npm run test:workers-rs` in `packages/worker-storage` after `npm ci`, installing
 `worker-build` 0.8.7 and the Rust WASM target first. Docker provides disposable

@@ -21,7 +21,7 @@ facade. Native stream adapters use Tokio. No features are enabled by default.
 | Feature | Module | Backend | Shapes |
 | --- | --- | --- | --- |
 | `transport-muxtls` | `muxtls` | muxtls 0.4 | Byte stream |
-| `transport-websock` | `websock` | websock 0.6 | Native/browser messages |
+| `transport-websock` | `websock` | websock-proto 0.6 | Backend-neutral messages (native/browser/Worker bridges) |
 | `transport-websock-mux` | `websock` | websock-tungstenite-mux 0.6 | Native byte stream |
 | `transport-quinn` | `quinn` | Quinn 0.11 | Byte stream, datagram |
 | `transport-quion` | `quion` | Quion 0.2.2 | Byte stream, datagram |

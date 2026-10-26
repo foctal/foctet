@@ -3,7 +3,7 @@
 use foctet_core::{IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig};
 use foctet_transport::{SecureMessageChannel, websock::WebsockMessageTransport};
 use futures_util::StreamExt;
-use websock_proto::{Error, LocalBoxFuture, Message, WebSocketConnection};
+use websock::{Error, LocalBoxFuture, Message, WebSocketConnection};
 
 struct Connection<'a> {
     socket: &'a worker::WebSocket,

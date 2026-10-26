@@ -621,9 +621,9 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.8"
+version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d726facc8b27e604391b232b970cdc19b5468c69f08b466b9734c759216c7415"
+checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -668,9 +668,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.5"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
+checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
 dependencies = [
  "cmov",
  "subtle",
@@ -3881,9 +3881,9 @@ dependencies = [
 
 [[package]]
 name = "websock-mux-proto"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bfd122f15a2b1ea1a9606c16bc043caa07877067e1605485042d8486b60daaa"
+checksum = "b5acd79d900376e44742664dfa32d26096755121677fff1812a6ebff6e57d1c7"
 dependencies = [
  "bytes",
  "thiserror",
@@ -3893,9 +3893,9 @@ dependencies = [
 
 [[package]]
 name = "websock-proto"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92b7cf8caabbbf83e3fc5bca26867760fd450597f88c917b882079c331cae5d4"
+checksum = "cbacce99a0770f7a277af7d0758b848025964c747dcc29a7a1f2b95b8c8feef2"
 dependencies = [
  "bytes",
  "futures-core",
@@ -3905,9 +3905,9 @@ dependencies = [
 
 [[package]]
 name = "websock-tungstenite"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3ceaa40eaeb4ad226adac48e2beadfcdada8845ec07afb67b31ee4214611ce3"
+checksum = "c10cfc2a5c758b224dc71db341fdc8083ddf215f86a740fd7a071f3805e49916"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -3924,9 +3924,9 @@ dependencies = [
 
 [[package]]
 name = "websock-tungstenite-mux"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57de231ea7ce1b6e8de5e3e303def2e59121b99aaa70b13a00ddc25b5bfddc93"
+checksum = "5b40d6467f3e90ca72f0383001b9b0c4e54e76cce5c5f7f2cbaa7f96a51db87f"
 dependencies = [
  "bytes",
  "futures-core",
