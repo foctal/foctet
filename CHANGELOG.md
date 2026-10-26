@@ -6,6 +6,21 @@ Target version: 0.6.0.
 
 ### Added
 
+- WebSocket message transport now depends on backend-neutral `websock-proto`,
+  preserving connection trait identity without pulling in `websock-wasm`'s exact
+  wasm-bindgen pins. It can be used alongside workers-rs 0.8.7 / wasm-bindgen
+  0.2.129; a workerd regression checks authenticated encrypted messages together
+  with the HTTP and storage features. Direct use of `websock-wasm` 0.6.0 still
+  requires an upstream dependency update to combine it with that SDK.
+
+- Portable `AsyncTextStore` and a `TextDriver` bridge with non-`Send` futures for
+  request-scoped database connections, including drivers on workers-rs sockets.
+- Optional `foctet-storage-wire/workers` adapters for D1 and remote libSQL over
+  Fetch, with bounded responses, cancellation, timeouts and redirect rejection.
+  Runtime tests cover workers-rs 0.8.7, including its `http` feature.
+- Streaming input limits in the workers-rs HTTP opener and Durable Object replay
+  handler, enforced before accumulating oversized bodies.
+
 - Detached ciphertext signatures and signed storage-record APIs with independently
   pinned writer verification.
 - Signed HTTP bodies and a signed-chunk API, signed single/split archives,

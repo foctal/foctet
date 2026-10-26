@@ -200,3 +200,9 @@ managed service's cache, TLS termination, region routing or production failover.
 References: [Cloudflare Turso guide](https://developers.cloudflare.com/workers/tutorials/connect-to-turso-using-workers/),
 [Hyperdrive MySQL configuration](https://developers.cloudflare.com/hyperdrive/examples/connect-to-mysql/),
 [Hyperdrive query caching](https://developers.cloudflare.com/hyperdrive/concepts/query-caching/).
+
+## Rust Workers adapters
+
+For workers-rs, use `database::AsyncTextStore` with `D1Driver`, `LibsqlDriver`, or
+an application `TextDriver` implementation. See [Rust Workers integration](workers-rs.md)
+for feature selection, SDK compatibility and the Hyperdrive driver boundary.

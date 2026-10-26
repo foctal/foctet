@@ -11,3 +11,8 @@ and [security policy](https://github.com/foctal/foctet/blob/main/SECURITY.md).
 
 The `worker_fixture` example generates public synthetic test data for the local
 Worker integration suite. Its fixed keys are not application credentials.
+
+`database::AsyncTextStore` executes plans through a `TextDriver` with non-`Send`
+futures. The optional `workers` feature provides workers-rs D1 and Fetch/libSQL
+implementations (SDK 0.8.7 requires Rust 1.91). See [Rust Workers integration](https://github.com/foctal/foctet/blob/main/docs/workers-rs.md)
+for SDK compatibility, connection responsibilities and runtime regression tests.

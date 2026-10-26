@@ -64,7 +64,8 @@ Signed body, record and archive APIs authenticate writers against trusted keys.
 File streaming supports bounded-memory processing, and optional threshold archive
 recovery supports separately held recovery shares. Storage adapters preserve
 opaque records through SQL drivers or existing application connections.
-See [storage integration](docs/storage-integration.md) for API selection.
+See [storage integration](docs/storage-integration.md) for API selection and
+[Rust Workers integration](docs/workers-rs.md) for workers-rs SDK support.
 
 See [security and platform boundaries](docs/security-boundaries.md) for guarantees
 and application responsibilities, and [CHANGELOG.md](CHANGELOG.md) for changes

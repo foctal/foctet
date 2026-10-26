@@ -9,6 +9,8 @@ Choose a storage API based on the runtime and driver interface. The native
 adapter manages supported SQL connections. For an existing driver or a runtime
 that cannot use the native adapter, see [portable TEXT storage](worker-databases.md)
 for signed text records, parameterized SQL plans and JavaScript adapters.
+[Rust Workers integration](workers-rs.md) covers the optional workers-rs D1 and
+Fetch/libSQL drivers and the application-owned SQL driver interface.
 
 ## Database adapters
 
