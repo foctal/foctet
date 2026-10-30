@@ -562,12 +562,15 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         frame: DecodedFrame,
     ) -> Result<Option<Vec<u8>>, CoreError> {
         let this = self.get_mut();
-        if this.terminal {
+        if this.terminal || session.state() == crate::SessionState::Closed {
+            this.terminate();
+            session.terminate();
             return Err(CoreError::TransportTerminal);
         }
         let result = this.handle_incoming_with_session_inner(session, frame);
         if result.is_err() {
-            this.terminal = true;
+            this.terminate();
+            session.terminate();
         }
         result
     }
@@ -627,7 +630,7 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         // cannot permanently advance the window and reject later legitimate
         // frames (receive-side desynchronization / DoS).
         let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
-        self.replay.check_and_record(
+        self.replay.check_and_record_ordered(
             frame.header.key_id,
             frame.header.stream_id,
             frame.header.seq,
@@ -911,6 +914,31 @@ mod tests {
         KeyHandle::new(
             derive_traffic_keys(&[0x11; 32], &[0x22; 32], 1).expect("derive test traffic keys"),
         )
+    }
+
+    #[test]
+    fn framed_receive_rejects_authenticated_reordering() {
+        let keys = fixed_test_keys();
+        let mut io = MemoryIo::default();
+        for sequence in [1, 0] {
+            let frame = encrypt_frame(&keys, Direction::C2S, 0, 0, sequence, b"data").unwrap();
+            io.inbound.extend(frame.to_bytes());
+        }
+        let mut framed = FoctetFramed::new(io, keys, Direction::C2S, Direction::S2C);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(Some(Ok(_)))
+        ));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(Some(Err(CoreError::Replay)))
+        ));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(Some(Err(CoreError::TransportTerminal)))
+        ));
     }
 
     #[derive(Default, Debug)]

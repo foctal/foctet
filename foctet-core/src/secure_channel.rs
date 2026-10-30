@@ -149,22 +149,31 @@ impl<T: Read + Write> SecureChannel<T> {
     /// it receives a non-control frame, then decodes TLVs and returns the first
     /// `APPLICATION_DATA` value.
     pub fn recv_application(&mut self) -> Result<Vec<u8>, CoreError> {
-        loop {
-            let Some(plaintext) = self.io.recv_application_with_session(&mut self.session)? else {
-                continue;
-            };
-
-            let tlvs = payload::decode_tlvs(&plaintext)?;
-            let app = tlvs
-                .iter()
-                .find(|t| t.typ == tlv_type::APPLICATION_DATA)
-                .ok_or(CoreError::InvalidTlv)?;
-            return Ok(app.value.clone());
+        let tlvs = self.recv_tlvs()?;
+        match tlvs
+            .into_iter()
+            .find(|t| t.typ == tlv_type::APPLICATION_DATA)
+        {
+            Some(app) => Ok(app.value),
+            None => {
+                self.io.terminate();
+                self.session.terminate();
+                Err(CoreError::InvalidTlv)
+            }
         }
     }
 
     /// Receives the next non-control frame and returns decoded TLVs.
     pub fn recv_tlvs(&mut self) -> Result<Vec<Tlv>, CoreError> {
+        let result = self.recv_tlvs_inner();
+        if result.is_err() {
+            self.io.terminate();
+            self.session.terminate();
+        }
+        result
+    }
+
+    fn recv_tlvs_inner(&mut self) -> Result<Vec<Tlv>, CoreError> {
         loop {
             let Some(plaintext) = self.io.recv_application_with_session(&mut self.session)? else {
                 continue;
@@ -373,35 +382,44 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
     /// it receives a non-control frame, then decodes TLVs and returns the first
     /// `APPLICATION_DATA` value.
     pub async fn recv_application(&mut self) -> Result<Vec<u8>, CoreError> {
-        if self.pending_rekey.is_some() {
-            return Err(CoreError::RekeyInProgress);
-        }
-        loop {
-            let item = poll_fn(|cx| Pin::new(&mut self.framed).poll_next(cx)).await;
-            let decoded = match item {
-                Some(Ok(frame)) => frame,
-                Some(Err(e)) => return Err(e),
-                None => return Err(CoreError::UnexpectedEof),
-            };
-
-            if let Some(plaintext) = Pin::new(&mut self.framed)
-                .handle_incoming_with_session(&mut self.session, decoded)?
-            {
-                let tlvs = payload::decode_tlvs(&plaintext)?;
-                let app = tlvs
-                    .iter()
-                    .find(|t| t.typ == tlv_type::APPLICATION_DATA)
-                    .ok_or(CoreError::InvalidTlv)?;
-                return Ok(app.value.clone());
+        let tlvs = self.recv_tlvs().await?;
+        match tlvs
+            .into_iter()
+            .find(|t| t.typ == tlv_type::APPLICATION_DATA)
+        {
+            Some(app) => Ok(app.value),
+            None => {
+                self.terminate_receive();
+                Err(CoreError::InvalidTlv)
             }
         }
     }
 
+    fn terminate_receive(&mut self) {
+        self.pending_rekey = None;
+        self.pending_rekey_enqueued = false;
+        self.framed.terminate();
+        self.session.terminate();
+    }
+
     /// Receives the next non-control frame and returns decoded TLVs.
     pub async fn recv_tlvs(&mut self) -> Result<Vec<Tlv>, CoreError> {
+        if self.framed.is_terminal() || self.session.state() == crate::SessionState::Closed {
+            self.terminate_receive();
+            return Err(CoreError::TransportTerminal);
+        }
+        // A suspended outbound rekey is recoverable by resuming that transaction.
         if self.pending_rekey.is_some() {
             return Err(CoreError::RekeyInProgress);
         }
+        let result = self.recv_tlvs_inner().await;
+        if result.is_err() {
+            self.terminate_receive();
+        }
+        result
+    }
+
+    async fn recv_tlvs_inner(&mut self) -> Result<Vec<Tlv>, CoreError> {
         loop {
             let item = poll_fn(|cx| Pin::new(&mut self.framed).poll_next(cx)).await;
             let decoded = match item {
@@ -522,6 +540,69 @@ mod tests {
             .expect("initiator handle server hello");
         assert!(none.is_none());
         (initiator, responder)
+    }
+
+    fn rejected_wire(session: &Session, case: u8) -> Vec<u8> {
+        if case == 0 {
+            return Vec::new(); // EOF before a complete application message.
+        }
+        let valid = crate::payload::encode_tlvs(&[crate::Tlv::application_data(b"valid").unwrap()])
+            .unwrap();
+        let payload = match case {
+            2 => &b""[..],
+            5 => &valid,
+            _ => &b"\xff"[..],
+        };
+        let flags = if case == 4 {
+            crate::frame::flags::IS_CONTROL
+        } else {
+            0
+        };
+        let mut wire = crate::encrypt_frame(
+            &session.active_keys().unwrap(),
+            session.inbound_direction(),
+            flags,
+            0,
+            0,
+            payload,
+        )
+        .unwrap()
+        .to_bytes();
+        if case == 3 {
+            *wire.last_mut().unwrap() ^= 1;
+        }
+        wire
+    }
+
+    #[test]
+    fn receive_failures_close_both_blocking_channel_and_session() {
+        for case in 0..6 {
+            for application in [false, true] {
+                if case == 2 && !application {
+                    continue;
+                } // Empty TLVs are valid.
+                let (_, session) = make_session_pair();
+                let (mut peer, io) = MemPipe::pair();
+                peer.write_all(&rejected_wire(&session, case)).unwrap();
+                let mut channel = SecureChannel::from_active_session(io, session).unwrap();
+                if case == 5 {
+                    channel.session_mut().terminate();
+                }
+                let failed = if application {
+                    channel.recv_application().is_err()
+                } else {
+                    channel.recv_tlvs().is_err()
+                };
+                assert!(failed, "case {case}");
+                assert_eq!(channel.session().state(), crate::SessionState::Closed);
+                assert!(channel.session().active_keys().is_none());
+                assert!(matches!(
+                    channel.recv_tlvs(),
+                    Err(crate::CoreError::TransportTerminal)
+                ));
+                assert!(channel.send_data(b"retry").is_err());
+            }
+        }
     }
 
     #[test]
@@ -694,12 +775,47 @@ mod tests {
             }
         }
 
-        /// Regression test: `send_data` must encrypt and enqueue the payload
-        /// exactly once even when the transport flush suspends, forcing the
-        /// send future to be polled multiple times. A latch bug here once
-        /// re-encrypted the plaintext under the next sequence number on every
-        /// re-poll, silently delivering duplicates (caught by the websock-mux
-        /// byte-stream conformance test).
+        #[test]
+        fn receive_failures_close_both_async_channel_and_session() {
+            for case in 0..6 {
+                for application in [false, true] {
+                    if case == 2 && !application {
+                        continue;
+                    }
+                    let (_, session) = quiet_session_pair();
+                    let io = SlowFlushIo {
+                        inbound: super::rejected_wire(&session, case).into(),
+                        ..Default::default()
+                    };
+                    let mut channel = AsyncSecureChannel::from_active_session(io, session).unwrap();
+                    if case == 5 {
+                        channel.session_mut().terminate();
+                    }
+                    let mut cx = Context::from_waker(Waker::noop());
+                    let failed = if application {
+                        matches!(
+                            pin!(channel.recv_application()).poll(&mut cx),
+                            Poll::Ready(Err(_))
+                        )
+                    } else {
+                        matches!(pin!(channel.recv_tlvs()).poll(&mut cx), Poll::Ready(Err(_)))
+                    };
+                    assert!(failed, "case {case}");
+                    assert_eq!(channel.session().state(), crate::SessionState::Closed);
+                    assert!(channel.session().active_keys().is_none());
+                    assert!(matches!(
+                        pin!(channel.recv_tlvs()).poll(&mut cx),
+                        Poll::Ready(Err(crate::CoreError::TransportTerminal))
+                    ));
+                    assert!(matches!(
+                        pin!(channel.send_data(b"retry")).poll(&mut cx),
+                        Poll::Ready(Err(_))
+                    ));
+                }
+            }
+        }
+
+        /// A suspended flush must never re-encrypt an already queued payload.
         #[test]
         fn send_data_is_not_duplicated_when_flush_suspends() {
             let (initiator, responder) = quiet_session_pair();
@@ -827,6 +943,11 @@ mod tests {
                 1
             );
 
+            assert!(matches!(
+                pin!(sender.send_data(b"after rekey")).poll(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+
             let wire = sender.framed_ref().get_ref().outbound.clone();
             let mut receiver = AsyncSecureChannel::from_active_session(
                 SlowFlushIo {
@@ -840,7 +961,7 @@ mod tests {
                 let mut receive = pin!(receiver.recv_application());
                 assert!(matches!(
                     receive.as_mut().poll(&mut cx),
-                    Poll::Ready(Err(crate::CoreError::UnexpectedEof))
+                    Poll::Ready(Ok(payload)) if payload == b"after rekey"
                 ));
             }
             assert_eq!(

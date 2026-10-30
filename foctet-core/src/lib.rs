@@ -327,9 +327,10 @@ impl CoreError {
         }
     }
 
-    /// Classifies whether a stateful endpoint may safely continue after this
-    /// error. Stateless helpers may surface the same errors without retaining
-    /// protocol state; callers of those helpers should apply their own scope.
+    /// Classifies the error variant for retry decisions. Terminal endpoint or
+    /// closed session state takes precedence: receive failures can close an
+    /// endpoint even for variants recoverable during outbound validation.
+    /// Stateless helpers retain no protocol state; apply their documented scope.
     pub const fn disposition(&self) -> CoreErrorDisposition {
         match self {
             Self::FrameTooLarge

@@ -613,7 +613,7 @@ impl<T: Read + Write> SyncIo<T> {
         // and desynchronize/DoS the receiver. See replay.rs and SPEC.md.
         let frame = Frame { header, ciphertext };
         let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
-        self.replay.check_and_record(
+        self.replay.check_and_record_ordered(
             frame.header.key_id,
             frame.header.stream_id,
             frame.header.seq,
@@ -720,12 +720,15 @@ impl<T: Read + Write> SyncIo<T> {
         &mut self,
         session: &mut Session,
     ) -> Result<Option<Vec<u8>>, CoreError> {
-        if self.terminal {
+        if self.terminal || session.state() == crate::SessionState::Closed {
+            self.terminate();
+            session.terminate();
             return Err(CoreError::TransportTerminal);
         }
         let result = self.recv_application_with_session_inner(session);
         if result.is_err() {
-            self.terminal = true;
+            self.terminate();
+            session.terminate();
         }
         result
     }
@@ -757,7 +760,7 @@ impl<T: Read + Write> SyncIo<T> {
         // Authenticate before committing replay state (see `recv`).
         let frame = Frame { header, ciphertext };
         let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
-        self.replay.check_and_record(
+        self.replay.check_and_record_ordered(
             frame.header.key_id,
             frame.header.stream_id,
             frame.header.seq,
@@ -1133,5 +1136,19 @@ mod tests {
             .recv()
             .expect_err("seq outside the small replay window must be rejected");
         assert!(matches!(err, CoreError::ReplayWindowExceeded));
+    }
+
+    #[test]
+    fn sync_receive_rejects_authenticated_reordering() {
+        let keys = test_keys();
+        let mut mock = MockIo::default();
+        for sequence in [1, 0] {
+            let frame = encrypt_frame(&keys, Direction::C2S, 0, 0, sequence, b"data").unwrap();
+            mock.inbound.extend(frame.to_bytes());
+        }
+        let mut io = SyncIo::new(mock, keys, Direction::C2S, Direction::S2C);
+        io.recv().unwrap();
+        assert!(matches!(io.recv(), Err(CoreError::Replay)));
+        assert!(matches!(io.recv(), Err(CoreError::TransportTerminal)));
     }
 }
