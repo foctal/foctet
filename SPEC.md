@@ -185,6 +185,10 @@ Immediately followed by:
 *   Sender `seq` MUST be strictly increasing for each `(direction, stream_id, key_id)` tuple.
 *   Receiver MUST maintain a replay window per tuple and reject duplicates.
 *   Receiver MAY accept out-of-order frames only when they are within the replay window.
+    Reliable byte-stream and message adapters reject non-increasing sequences
+    within each `(key_id, stream_id)` after authentication. Datagram adapters
+    permit reordering within the window. Sequence gaps and cross-stream order
+    do not establish application delivery or completeness.
 *   Frames outside the window MUST be rejected unless an application profile explicitly defines a different mode.
 
 Default replay window recommendation: 4096 frames.
@@ -258,7 +262,10 @@ Rekeys **alternate** between the two peers: after a side initiates a rekey it MU
 NOT initiate another until it has received one from the peer (`old_key_id` and the
 turn flag enforce this). This prevents the root chain from forking and ensures
 both peers' ratchet keys rotate, providing forward secrecy and post-compromise
-security across an alternating rekey. The initiator takes the first turn. The
+security across an alternating rekey. These properties require erasure of old
+ephemeral and traffic keys; retained generations remain exposed. Recovery after
+passive state compromise requires fresh contributions from both peers and an
+end to the attacker's endpoint access. The initiator takes the first turn. The
 receiver MUST reject a `Rekey` whose `old_key_id` is not its active key, whose
 `new_key_id` is not `old_key_id + 1`, or whose transcript binding does not match.
 
@@ -535,12 +542,15 @@ Mitigations:
 ### 12.2 Replay & Reordering
 
 *   Receivers MUST enforce replay windows.
-*   Reordering is permitted within window; higher layers can impose strict ordering.
+*   Datagram reordering is permitted within the window. Reliable adapters enforce
+    monotonic sequences per key/stream domain as described in §6.4.
 
 ### 12.3 Key Management
 
 *   Long-term identity keys MUST be protected by OS keystore when possible.
 *   Session keys MUST be kept in memory only and zeroized on teardown.
+    Teardown includes dropping shared key handles and prepared rekeys held by
+    the application; closing a session cannot erase independently retained copies.
 *   Rekey MUST occur per thresholds to reduce blast radius.
 
 Operational guidance:

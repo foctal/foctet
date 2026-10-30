@@ -25,11 +25,17 @@ otherwise conceal a diverged peer state, so it is terminal.
 
 ## Core protocol
 
-`CoreError::disposition()` is the executable classification.
+`CoreError::disposition()` classifies the error variant. Endpoint state takes
+precedence: stateful receive failures close the endpoint even when the same
+variant (such as `FrameTooLarge` or `TlvTooLarge`) is recoverable during outbound
+validation. Secure channels also close their paired session on receive failure,
+including EOF and invalid TLVs. Do not retry after the session is `Closed` or
+the endpoint reports `is_terminal()`. `RekeyInProgress` before receiving is a
+recoverable request to resume the pending outbound rekey.
 
 | Errors | Disposition | Required action |
 | --- | --- | --- |
-| `FrameTooLarge`, `TlvTooLarge`, `OutboundBufferLimitExceeded`, `ResourceExhausted`, `RekeyInProgress`, `HandshakeRateLimited` | Recoverable | Correct input, drain queued output, resume/cancel the prepared rekey, or wait before retrying. |
+| `FrameTooLarge`, `TlvTooLarge`, `OutboundBufferLimitExceeded`, `ResourceExhausted`, `RekeyInProgress`, `InvalidChannelBinding`, `ChannelBindingTooLarge`, `OutboundStreamCapacityExceeded`, `HandshakeRateLimited`, `HandshakeConcurrencyLimited`, `EndpointAlreadyClaimed` | Recoverable when the endpoint remains active | Correct input/configuration, drain queued output, resume/cancel the prepared rekey, reuse the existing endpoint lease, or wait before retrying. |
 | All other `CoreError` variants, including parser/header errors, AEAD/HKDF/DH failures, replay errors, invalid control or session state, key/sequence exhaustion, I/O/EOF, and handshake authentication/timeout failures | Terminal | Discard the endpoint/session and establish a new authenticated session. |
 
 Stateless helpers may return `CoreError` without retaining a session. Their

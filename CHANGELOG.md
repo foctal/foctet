@@ -56,6 +56,19 @@ Target version: 0.6.0.
 
 ### Security
 
+- Redact session ratchet roots in `Debug`, including nested transport diagnostics.
+  Erase ephemeral secrets on terminal closure and guard temporary DH/root values
+  across fallible rekey preparation.
+- Close the paired session on terminal receive failures, including malformed
+  control messages, TLV failures, and EOF in secure channels. A closed session
+  cannot continue receiving through a transport that still holds shared keys.
+- Reject authenticated non-increasing sequences in reliable stream/message
+  adapters; datagram reordering remains supported. Replay bitmap shifts now
+  reuse their allocation and are checked against a set model at word boundaries.
+- Use constant-time all-zero X25519 shared-secret validation. Document
+  ciphertext-only breach protection separately from recipient-key compromise,
+  retained session keys, and deployment acceptance.
+
 - Require a trusted peer pin or authenticated channel binding for default
   authenticated sessions; arbitrary self-signed peers are rejected.
 - Use strict Ed25519 verification and verify pinned writers before opening signed

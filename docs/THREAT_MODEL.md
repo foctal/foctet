@@ -129,8 +129,10 @@ choice matters: a replay-store entry must outlive the freshness window.
 **Threat.** The attacker reorders frames, truncates a stream early, or splices
 ciphertext from one context into another.
 
-**Defense.** Byte-stream and message sessions enforce ordering via the replay
-window; the streaming body format requires strictly sequential chunk indices,
+**Defense.** Byte-stream and message receivers reject non-increasing sequence
+numbers within each `(key_id, stream_id)` after authentication. They do not
+detect every missing frame or impose order across streams or retained key
+generations. The streaming body format requires strictly sequential chunk indices,
 authenticates chunk position (`index` in the AAD), and requires exactly one
 authenticated FINAL chunk — a truncated, extended, reordered, or duplicated
 stream fails to verify (`is_finished()` must be true before the plaintext is
@@ -170,22 +172,32 @@ application needing ordering on datagrams must layer it.
   (forward secrecy at session granularity).
 - **Within a session** — rekey is a **DH ratchet**: each rekey mixes a fresh
   ephemeral DH output into a root chain, and rekeys alternate between peers.
-  Keys before the compromise stay safe (forward secrecy); after a compromise,
-  security heals once both peers have taken a ratchet turn
+  Erased keys before the compromise stay safe (forward secrecy); retained
+  previous generations are still exposed. After a passive state compromise,
+  security can heal once both peers have taken a fresh ratchet turn
   (post-compromise security). Under one-directional traffic the alternation
   stalls (the quiet side never takes its turn); rekey periodically from both
   ends.
+- **Stored envelopes** — body, storage and archive encryption does not provide
+  forward secrecy against recipient private-key compromise. Captured ciphertext
+  can be opened with that key. Session ratcheting does not protect these formats.
+  An attacker with continued endpoint access can observe replacement keys too;
+  post-compromise recovery assumes that access has ended.
 - **Long-term identity compromise** — an attacker holding the Ed25519 identity
   key can impersonate the endpoint in *new* handshakes (it cannot decrypt
   past traffic — the identity key only signs). Revocation/rotation of
   identities is the application's responsibility (see `docs/POLICIES.md`);
   using a `HandshakeSigner` backed by an HSM/KMS reduces exfiltration risk.
 
-**In-process hygiene** (reduces exposure window, not a boundary): traffic-key
-bytes live in exactly one place (`TrafficKeys` is non-`Clone`, shared via
-`KeyHandle`), are zeroized on drop, redacted in `Debug` output, and compared
-in constant time; secret-returning APIs are `expose_`-prefixed and return
-`Zeroizing` buffers. On WASM, zeroization cannot be guaranteed across the JS
+**In-process hygiene** (reduces exposure window, not a boundary): `TrafficKeys`
+is non-`Clone` and shared via `KeyHandle`; its owned bytes are zeroized when the
+last handle is dropped, redacted in `Debug`, and compared in constant time.
+Closing a session erases its root and ephemeral secret but cannot erase keys
+held by external handles, prepared rekeys, or independently owned signers.
+Some low-level APIs, including `TrafficKeys::key_for`, DH helpers, and root-key
+derivation, return raw secret copies. Wrap these in `Zeroizing` immediately and
+never log them; zeroization cannot guarantee removal of all compiler-created
+copies or snapshots. On WASM, zeroization cannot be guaranteed across the JS
 boundary (JS engines copy freely) and keys are extractable bytes — treat a
 compromised page/extension context as a compromised endpoint.
 
@@ -222,8 +234,9 @@ endpoint as an amplifier.
   and its unvalidated-server constructor always installs a QUIC-style 3x
   limiter. Until validation, an endpoint cannot send more than three times the
   bytes received. QUIC/WebTransport enforce this at the transport layer.
-- Parsers for every attacker-facing format are fuzzed continuously (7 targets,
-  seeded, time-budgeted in CI).
+- Attacker-facing parsers and state machines have seeded fuzz targets. Local
+  time-bounded fuzz runs are smoke tests; no continuous fuzzing service is
+  currently configured. See `fuzz/README.md`.
 
 **Residual risk.** The transport crate provides token-bucket handshake rate
 limiting and RAII concurrency admission, but applications must install and

@@ -1,8 +1,27 @@
 # Security and platform boundaries
 
-Foctet is experimental and does not claim production certification or
-universal platform support. A successful native build is not evidence of a
-successful browser, database, or Cloudflare deployment.
+Foctet's production requirements do not depend on its major version. Local
+validation does not establish production certification or universal platform
+support. A successful native build is not evidence of a successful browser,
+database, or Cloudflare deployment.
+
+## What a breach exposes
+
+| Compromised material | Confidentiality consequence |
+| --- | --- |
+| Ciphertext-only database, object store, relay, or backup | No plaintext recovery under the cryptographic assumptions, provided endpoint secrets and decryption services remain outside the breach |
+| Recipient private key plus captured bodies, records, or archives | Previously stored ciphertext for that recipient can be decrypted; these formats do not provide recipient-compromise forward secrecy |
+| Current session state | Current and retained previous traffic keys are exposed; erased generations are not recoverable from the root chain alone |
+| Writer signing key | Forged writes and new identity impersonation become possible; the signing key alone does not decrypt recipient envelopes |
+| Browser scripts, endpoint process, or sufficient recovery shares | Treat accessible plaintext and keys as compromised |
+
+Place endpoint keys, recovery shares, and trusted version checkpoints in separate
+trust domains from ciphertext. A cloud secret in the same compromised account
+is not an independent boundary. A Worker that decrypts is an endpoint; a Worker
+that only forwards sealed bytes can remain outside the plaintext boundary.
+The recipient-compromise limitation also occurs in standardized public-key
+encryption (see [RFC 9180 §9.7.4](https://www.rfc-editor.org/rfc/rfc9180.html#section-9.7.4));
+Foctet's envelope is its own format and does not claim HPKE wire compatibility.
 
 ## Trust boundaries
 

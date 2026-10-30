@@ -1,7 +1,7 @@
 # Recommended Deployment Patterns
 
 Choose a Foctet layer based on the lifetime and routing of your data. Foctet
-Draft v0 is experimental; see [SECURITY.md](../SECURITY.md) before deploying.
+The Draft v0 format is not yet stable; see [SECURITY.md](../SECURITY.md) before deploying.
 
 ## Choosing the Right Foctet Layer
 

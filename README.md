@@ -8,10 +8,10 @@
 
 Transport-agnostic end-to-end encryption layer for secure data transfer.
 
-> **Status: experimental (Draft v0) — not production-ready.** Foctet provides
-> authenticated encrypted framing, HTTP body envelopes, encrypted archives, and
-> a WASM/TypeScript SDK. The wire format is still unstable. See
-> [`SECURITY.md`](SECURITY.md) before deploying.
+> **Status: production hardening toward v1.** Security requirements apply to
+> every release, including `0.x`. Local tests are not an independent security
+> audit or production certification. See [`SECURITY.md`](SECURITY.md) for the
+> security model, limitations, and vulnerability reporting.
 
 ## Crates
 

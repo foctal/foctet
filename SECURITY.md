@@ -1,10 +1,13 @@
 # Security Policy
 
-## Status: experimental — not production-ready
+## Status: production hardening toward v1
 
-Foctet is an **experimental Draft v0** implementation of authenticated encrypted
-framing, a one-shot `application/foctet` body envelope, and encrypted archive
-formats. The project is under active security and interoperability development.
+Foctet implements authenticated encrypted framing, `application/foctet` body
+envelopes, and encrypted archive formats. Security defects are release blockers,
+regardless of the version number. Passing local tests does not establish an
+independent cryptographic audit or certify a production deployment. See
+[security and platform boundaries](docs/security-boundaries.md) for deployment
+responsibilities and the consequences of different types of compromise.
 
 The wire format and APIs may change during the `0.x` release line. See the
 [threat model](docs/THREAT_MODEL.md) for trust boundaries and metadata leakage,
@@ -84,6 +87,14 @@ HTTP context and replay protection do not replace sender authentication or
 application authorization. See [security and platform boundaries](docs/security-boundaries.md).
 
 ## Limitations and application responsibilities
+
+- **Ciphertext-only breach protection requires independent keys.** A database,
+  object-store, or relay breach does not reveal plaintext when the breached
+  system has neither endpoint secrets nor a decryption capability. Body,
+  storage, and archive recipient-key compromise can decrypt previously captured
+  ciphertext for that recipient. Rotation cannot revoke copies already stolen
+  with their keys. Session forward secrecy is a separate property; retained
+  previous traffic keys remain exposed during their retention interval.
 
 - **No session persistence or resumption.** After a restart or reconnect,
   establish a fresh authenticated session. Restoring traffic keys with reset

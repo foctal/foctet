@@ -1,6 +1,6 @@
 # API and format stability
 
-Foctet is experimental. Rust and TypeScript APIs and the Draft v0 wire format
+Foctet is being hardened toward v1. Rust and TypeScript APIs and the Draft v0 wire format
 may change incompatibly during the `0.x` release line. Check the specification
 and test vectors when upgrading communicating peers together.
 

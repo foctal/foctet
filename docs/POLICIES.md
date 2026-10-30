@@ -64,7 +64,7 @@ Foctet uses four kinds of keys. Per-kind guidance:
 | Key | Lives | Rotation | Notes |
 | --- | --- | --- | --- |
 | Ephemeral X25519 (handshake/ratchet) | one handshake / one ratchet step | automatic | never persisted; zeroized on drop |
-| Traffic keys (per-direction AEAD) | one `key_id` generation within a session | automatic via rekey thresholds (frames / bytes / age) or `force_rekey` | non-`Clone`, single-owner, zeroized; never persist |
+| Traffic keys (per-direction AEAD) | one `key_id` generation within a session, plus configured retention | automatic via rekey thresholds (frames / bytes / age) or channel `rekey_now` | non-`Clone`, shared through `KeyHandle`, zeroized on last-handle drop; never persist |
 | Recipient X25519 (body envelopes / archives) | long-lived, application-managed | application policy (see below) | `key_id` field routes to the right key |
 | Ed25519 identity (handshake auth) | long-lived, application-managed | application policy (see below) | prefer `HandshakeSigner` over raw bytes |
 
@@ -73,7 +73,11 @@ Foctet uses four kinds of keys. Per-kind guidance:
 - Rekey thresholds (`RekeyThresholds`) default to bounded frames/bytes/age;
   tune them to your traffic profile. Every rekey is a DH-ratchet step and
   rekeys alternate between peers — under one-directional traffic, drive
-  `force_rekey` periodically from both ends so the ratchet keeps healing.
+  channel `rekey_now` periodically from both ends so the ratchet keeps advancing.
+  Low-level integrations use `Session::prepare_rekey` and `commit_rekey` around
+  delivery of the exact control message under the old key. `Session::force_rekey`
+  is test-only. After passive state compromise, recovery requires fresh ratchet
+  contributions from both peers and an end to the attacker's endpoint access.
 - On WASM the age threshold is inactive (no monotonic clock): drive rekey by
   count thresholds or explicitly.
 - **Never persist session state.** There is no session-resumption format; a
@@ -86,9 +90,10 @@ Foctet uses four kinds of keys. Per-kind guidance:
 - **Storage:** identity signing should go through the `HandshakeSigner` trait
   backed by an HSM / cloud KMS / OS keystore where available, so the secret
   never enters process memory. Raw-byte keys (`IdentityKeyPair`,
-  envelope recipient secrets) should live in a secrets manager, be loaded via
-  the `expose_`-prefixed APIs (returning `Zeroizing` buffers), and never be
-  logged — `Debug` output is redacted, but application logging of raw buffers
+  envelope recipient secrets) should live in a secrets manager and never be
+  logged. Prefer zeroizing exports where available and immediately wrap raw
+  secret copies from low-level APIs in `Zeroizing`. `Debug` output is redacted,
+  but application logging of raw buffers
   defeats that.
 - **Rotation:** rotate on a schedule appropriate to exposure (e.g. yearly for
   offline-stored keys, more often for keys on internet-facing hosts) and
@@ -96,10 +101,11 @@ Foctet uses four kinds of keys. Per-kind guidance:
   identified by `key_id`, so rotation is: publish the new public key under a
   new `key_id`, keep the old secret only as long as data sealed to it must
   remain readable, then destroy it.
-- **Multiple recipients as backup:** archives and envelopes can wrap the DEK
-  to several recipients. If data recovery is a requirement, wrap to an
-  application-controlled backup key stored offline — Foctet itself has no
-  escrow or recovery path (`THREAT_MODEL.md` §3.9).
+- **Recovery:** single/split archives can wrap the content key to multiple
+  recipients, including an application-controlled offline backup key. Body
+  envelopes have one recipient. Optional threshold archive recovery requires
+  separately provisioned shares; it cannot recover keys without those shares.
+  See `THREAT_MODEL.md` §3.9 for custody requirements.
 - **Identity distribution and revocation** are the application's
   responsibility: Foctet pins the exact public key you configure. Keep an
   application-level mapping of "who currently holds which identity key" and
@@ -120,8 +126,9 @@ RustSec advisory for the affected crates.
 Suggested playbook, by key type:
 
 1. **Traffic key / single session** — close the session; a new handshake
-   derives unrelated keys. Past traffic before the compromised generation
-   stays protected (forward secrecy); if the exposure window is unknown,
+   derives unrelated keys. Past traffic whose traffic and ephemeral keys have
+   been erased stays protected; retained previous generations remain exposed.
+   If the exposure window is unknown,
    assume everything under that session's current and later generations until
    re-handshake.
 2. **Identity (Ed25519) key** — stop using it immediately (new handshakes with
