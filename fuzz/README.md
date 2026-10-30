@@ -1,7 +1,7 @@
 # Fuzzing
 
-This directory contains `cargo-fuzz` targets for hardening every parser and
-AEAD-open path that consumes attacker-controlled bytes.
+This directory contains `cargo-fuzz` targets for parsers and AEAD-open paths
+that consume attacker-controlled bytes.
 
 ## Prerequisites
 
@@ -45,18 +45,12 @@ cargo run -p foctet --example gen_fuzz_seeds
 Sealing uses random ephemerals, so regenerated seeds differ byte-for-byte;
 they only need to be valid, not reproducible.
 
-The working corpus (`corpus/`, git-ignored) grows locally. Retain this corpus between local runs. `cargo fuzz` uses libFuzzer with
-AddressSanitizer on supported native targets. This repository does not currently
-run a scheduled fuzzing service; bounded local smoke runs do not replace
-continuous fuzzing or independent review.
+The working corpus (`corpus/`, git-ignored) grows locally; retain it between runs.
+`cargo fuzz` uses libFuzzer with AddressSanitizer on supported native targets.
 
-## Triage and service level
-
-CI fuzz failures are security-sensitive. Preserve the crashing input as a
-private artifact, acknowledge it within 2 business days, determine severity
-within 7 days, and target a fix or advisory within 30 days (7 days for critical
-impact). Do not attach an unpatched crash input to a public issue. Add every
-fixed input to the permanent regression corpus before closing the finding.
+Report security-sensitive crashes privately through [SECURITY.md](../SECURITY.md),
+including the crashing input and reproduction command. After a fix, add a
+regression case to the corpus.
 
 ## Run locally
 

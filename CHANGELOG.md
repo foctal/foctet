@@ -8,16 +8,13 @@ Target version: 0.6.0.
 
 - WebSocket adapters use websock 0.6.1 components. The message adapter depends
   on the backend-neutral `websock-proto` interface, preserving connection trait
-  identity. A workerd regression checks the published facade alongside workers-rs
-  0.8.7, HTTP/storage features and authenticated encrypted WebSocket messages.
+  identity and supporting workers-rs socket bridges.
 - Portable `AsyncTextStore` and a `TextDriver` bridge with non-`Send` futures for
   request-scoped database connections, including drivers on workers-rs sockets.
 - Optional `foctet-storage-wire/workers` adapters for D1 and remote libSQL over
   Fetch, with bounded responses, cancellation, timeouts and redirect rejection.
-  Runtime tests cover workers-rs 0.8.7, including its `http` feature.
 - Streaming input limits in the workers-rs HTTP opener and Durable Object replay
   handler, enforced before accumulating oversized bodies.
-
 - Detached ciphertext signatures and signed storage-record APIs with independently
   pinned writer verification.
 - Signed HTTP bodies and a signed-chunk API, signed single/split archives,
@@ -64,11 +61,10 @@ Target version: 0.6.0.
   cannot continue receiving through a transport that still holds shared keys.
 - Reject authenticated non-increasing sequences in reliable stream/message
   adapters; datagram reordering remains supported. Replay bitmap shifts now
-  reuse their allocation and are checked against a set model at word boundaries.
+  reuse their allocation.
 - Use constant-time all-zero X25519 shared-secret validation. Document
-  ciphertext-only breach protection separately from recipient-key compromise,
-  retained session keys, and deployment acceptance.
-
+  ciphertext-only breach protection separately from recipient-key compromise
+  and retained session keys.
 - Require a trusted peer pin or authenticated channel binding for default
   authenticated sessions; arbitrary self-signed peers are rejected.
 - Use strict Ed25519 verification and verify pinned writers before opening signed

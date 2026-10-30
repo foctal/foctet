@@ -52,8 +52,8 @@ The planned v1 compatibility policy is:
 
 - the wire format is stable within a major version; frames, envelopes, and
   archives produced by any v1.x implementation are readable by any other;
-- a supported-versions table replaces the "latest 0.x only" rule, with a
-  minimum security-fix window announced at release;
+- a supported-versions table replaces the "latest 0.x only" rule, with the
+  minimum security-fix windows in [SECURITY.md](../SECURITY.md#supported-versions);
 - deprecations follow SemVer: deprecate in a minor, remove no earlier than
   the next major.
 
@@ -65,7 +65,7 @@ Foctet uses four kinds of keys. Per-kind guidance:
 | --- | --- | --- | --- |
 | Ephemeral X25519 (handshake/ratchet) | one handshake / one ratchet step | automatic | never persisted; zeroized on drop |
 | Traffic keys (per-direction AEAD) | one `key_id` generation within a session, plus configured retention | automatic via rekey thresholds (frames / bytes / age) or channel `rekey_now` | non-`Clone`, shared through `KeyHandle`, zeroized on last-handle drop; never persist |
-| Recipient X25519 (body envelopes / archives) | long-lived, application-managed | application policy (see below) | `key_id` field routes to the right key |
+| Recipient X25519 (body envelopes / archives) | long-lived, application-managed | application policy (see below) | the HTTP opener tries configured recipient keys in order |
 | Ed25519 identity (handshake auth) | long-lived, application-managed | application policy (see below) | prefer `HandshakeSigner` over raw bytes |
 
 ### 2.1 Session (traffic) keys
@@ -95,15 +95,14 @@ Foctet uses four kinds of keys. Per-kind guidance:
   secret copies from low-level APIs in `Zeroizing`. `Debug` output is redacted,
   but application logging of raw buffers
   defeats that.
-- **Rotation:** rotate on a schedule appropriate to exposure (e.g. yearly for
-  offline-stored keys, more often for keys on internet-facing hosts) and
+- **Rotation:** rotate on a schedule appropriate to exposure and
   immediately on suspected compromise. Envelope/archive recipients are
   identified by `key_id`, so rotation is: publish the new public key under a
   new `key_id`, keep the old secret only as long as data sealed to it must
   remain readable, then destroy it.
 - **Recovery:** single/split archives can wrap the content key to multiple
-  recipients, including an application-controlled offline backup key. Body
-  envelopes have one recipient. Optional threshold archive recovery requires
+  recipients, including an application-controlled offline backup key. Current
+  body-envelope sealing APIs use one recipient. Optional threshold archive recovery requires
   separately provisioned shares; it cannot recover keys without those shares.
   See `THREAT_MODEL.md` §3.9 for custody requirements.
 - **Identity distribution and revocation** are the application's
@@ -115,10 +114,9 @@ Foctet uses four kinds of keys. Per-kind guidance:
 
 ### 3.1 For a vulnerability in Foctet itself
 
-Follow `SECURITY.md`: private reporting (GitHub private vulnerability
-reporting or maintainer email), acknowledgement target 7 days, coordinated
-disclosure. Fixes land in the latest release line; wire-affecting fixes come
-with updated vectors and security release notes, and (post-v1) a
+Follow the private reporting and coordinated disclosure process in
+[SECURITY.md](../SECURITY.md). Fixes land in the latest release line;
+wire-affecting fixes come with updated vectors and security release notes, and (post-v1) a
 RustSec advisory for the affected crates.
 
 ### 3.2 For a key compromise in a deployment

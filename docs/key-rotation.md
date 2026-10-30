@@ -28,11 +28,8 @@ let opener = HttpOpener::new(
 );
 ```
 
-Trial decryption is safe:
+Keyring limits and replay handling:
 
-- Every keyring entry is one of the recipient's own secret keys, and each attempt
-  is against context-bound, authenticated ciphertext, so a non-matching key
-  simply fails to open — there is no decryption oracle.
 - An opener accepts at most 16 keys. Keyring construction returns
   `HttpOptionsError::TooManyRecipientKeys` before retaining a seventeenth key,
   bounding X25519, HKDF, and AEAD trial work per envelope.
@@ -59,8 +56,9 @@ Place the key that serves the most traffic first to minimize wasted attempts.
    still sealed to the old key now fail authentication and are answered `401`.
 6. **Destroy** the retired secret once you are confident no rollback is needed.
 
-**Rollback:** if the new key is bad, keep the old key in the keyring and tell
-senders to revert to the old kid. Because the recipient still holds both, no
+**Rollback:** if the new key is misconfigured and the old key is still trusted,
+keep the old key in the keyring and tell senders to revert to the old kid.
+Because the recipient still holds both, no
 redeploy is required to accept old-kid traffic again.
 
 ## Failure handling
@@ -83,12 +81,12 @@ is a `401`, not a server error.
 ## Monitoring
 
 - Track the `401` rate during and after an overlap window. A rising `401` rate
-  after retiring a key means senders had not finished migrating — roll the old
-  key back into the keyring.
+  after retiring a key may indicate stale senders or a key mismatch. Investigate
+  before restoring an old key; never restore a key suspected of compromise.
 - On Workers, watch live traffic with `npx wrangler tail` while rolling out each
   step.
-- Keep the overlap window open until the `401` rate at the *old* kid drops to
-  zero before retiring.
+- Confirm that senders have migrated before retiring the old key. A lack of
+  `401` errors during overlap does not establish migration: both keys still work.
 
 ## Verifying rotation
 

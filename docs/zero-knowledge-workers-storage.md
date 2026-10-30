@@ -109,14 +109,9 @@ storage boundary, not a required deployment architecture.
 
 ## Application responsibilities
 
-Applications provide:
-
-- Recipient-key provisioning and independently authenticated writer identities.
-- Authorization for record access and modification.
-- Trusted revisions, conflict resolution, retention and backup/recovery policies.
-- Database credentials, schema migrations, network security and resource limits.
-- A deliberate policy for metadata visibility, including indexes and logs.
-- Key distribution, device enrollment, revocation and endpoint security.
+Applications manage key distribution, endpoint security, authorization, and
+recovery. See [key policies](POLICIES.md) and
+[security boundaries](security-boundaries.md) for these requirements.
 
 Foctet does not require a password-derived account key or a particular multi-device
 identity design. If an application derives or wraps keys, it owns that protocol

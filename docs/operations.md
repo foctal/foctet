@@ -5,9 +5,8 @@ This guide covers resource sizing, metrics, and session lifecycle. See also
 
 ## Safe defaults and sizing
 
-Keep the library defaults unless a measured workload requires a lower value.
-Public configuration is clamped to protocol hard ceilings and cannot disable
-the bounds. In particular:
+Size limits for the workload and aggregate connection count. Configurable
+limits and fixed ceilings are listed in [resource limits](resource-limits.md).
 
 | Surface | Safe starting point | Sizing rule | Backpressure behavior |
 | --- | --- | --- | --- |

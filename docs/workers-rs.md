@@ -85,10 +85,7 @@ resolved Rust crate version; CI uses CLI 0.2.129.
 Foctet uses `websock-proto` 0.6.1 for the shared connection interface. Its
 `WebSocketConnection`, `Message`, limits and error types are identical to those
 re-exported by `websock`; existing backend implementations retain type compatibility.
-These types are also available from `foctet_transport::websock`. Native tests and
-examples use `websock-tungstenite` directly. The runtime fixture also depends on
-the published `websock` 0.6.1 facade, compiling its browser backend alongside
-workers-rs in the same dependency graph.
+These types are also available from `foctet_transport::websock`. Native examples use `websock-tungstenite` directly.
 
 A workers-rs application supplies a connection bridge to the trait, or implements
 `MessageTransport` directly. The local fixture demonstrates a `WebSocketPair`

@@ -78,7 +78,6 @@ standalone crate use byte-identical copies in that crate's `tests/fixtures/`;
 `check-test-fixtures.py` checks that these copies cannot silently drift.
 Do not replace fixed vectors to make an incompatible implementation pass.
 
-
 ### Platform binding tests
 
 From `foctet-http/examples/workers-echo`, run `npm ci`, `npm test`, and

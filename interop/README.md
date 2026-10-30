@@ -24,7 +24,7 @@ vectors in `test-vectors/` end to end:
 - **`rekey-v0.json`** — DH-ratchet root seeding, the rekey ephemeral DH, and
   one full `dh_ratchet_step` (advanced root + both direction keys).
 
-Run it (Node 18+):
+Run it (Node 20.19+):
 
 ```bash
 cd interop

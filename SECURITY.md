@@ -1,17 +1,9 @@
 # Security Policy
 
-## Status: production hardening toward v1
-
-Foctet implements authenticated encrypted framing, `application/foctet` body
-envelopes, and encrypted archive formats. Security defects are release blockers,
-regardless of the version number. Passing local tests does not establish an
-independent cryptographic audit or certify a production deployment. See
-[security and platform boundaries](docs/security-boundaries.md) for deployment
-responsibilities and the consequences of different types of compromise.
-
-The wire format and APIs may change during the `0.x` release line. See the
-[threat model](docs/THREAT_MODEL.md) for trust boundaries and metadata leakage,
-and [policies](docs/POLICIES.md) for key management and incident response.
+Foctet protects data between trusted endpoints. See the
+[threat model](docs/THREAT_MODEL.md) for assumptions and
+[security boundaries](docs/security-boundaries.md) for the consequences of
+compromise. The wire format and APIs may change during `0.x`.
 
 ## Reporting a vulnerability
 

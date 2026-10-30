@@ -11,16 +11,12 @@ protocol; namespace, record ID and revision are authenticated. There is no write
 key or authoritative version inside the text value. Both must be independently
 trusted at the decrypting endpoint. The SQL row's version is a concurrency guard.
 
-## Responsibility boundary
+## Trust and connection requirements
 
-| Foctet provides | The application provides |
-| --- | --- |
-| Encryption and mandatory signature verification in signed APIs | Authorized writer pins, recipient-key provenance, rotation and revocation |
-| Canonical bounded ASCII encoding; ciphertext and signature stored together | Request/body limits before buffering, DB quotas and tenant authorization |
-| Parameterized SQL plans and atomic compare-and-swap (CAS) | Existing driver/socket connection, credentials, TLS, timeout and connection lifetime |
-| Verification against an expected namespace, object ID and version | Trusted latest-version checkpoints outside the untrusted database |
-| Rejection of tampering, wrong writer and wrong expected context | Device enrollment, recovery approval, migration of historical unsigned data |
-| Reproducible driver and runtime tests | Production routing, caching, TLS, quotas and failover validation |
+The adapters provide bounded encoding, parameterized statements, and conditional
+updates. Applications supply driver connections, credentials, TLS, timeouts,
+request limits, and tenant authorization. Keep trusted writer pins and revision
+checkpoints outside the untrusted database.
 
 A blind storage service never receives private decryption keys. If the application
 decrypts inside that service, it is a trusted endpoint and can see the plaintext.

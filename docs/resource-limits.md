@@ -1,8 +1,8 @@
 # Resource Limits
 
-Foctet applies hard resource ceilings before copying attacker-controlled fields,
-allocating count-derived collections, or starting cryptographic work. Public
-configuration may tighten these limits but cannot raise a hard ceiling.
+Foctet checks input sizes before allocation and cryptographic processing. Some
+limits are fixed by the format or implementation; others are caller-configured.
+Size configurable limits for the workload and available memory.
 
 | Surface | Default | Hard maximum | Enforcement point |
 | --- | ---: | ---: | --- |

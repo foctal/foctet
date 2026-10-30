@@ -1,10 +1,5 @@
 # Security and platform boundaries
 
-Foctet's production requirements do not depend on its major version. Local
-validation does not establish production certification or universal platform
-support. A successful native build is not evidence of a successful browser,
-database, or Cloudflare deployment.
-
 ## What a breach exposes
 
 | Compromised material | Confidentiality consequence |
@@ -19,9 +14,6 @@ Place endpoint keys, recovery shares, and trusted version checkpoints in separat
 trust domains from ciphertext. A cloud secret in the same compromised account
 is not an independent boundary. A Worker that decrypts is an endpoint; a Worker
 that only forwards sealed bytes can remain outside the plaintext boundary.
-The recipient-compromise limitation also occurs in standardized public-key
-encryption (see [RFC 9180 §9.7.4](https://www.rfc-editor.org/rfc/rfc9180.html#section-9.7.4));
-Foctet's envelope is its own format and does not claim HPKE wire compatibility.
 
 ## Trust boundaries
 
@@ -52,23 +44,14 @@ server-side disk encryption, and cloud-managed keys do not create this boundary.
 Code served by a malicious host can steal browser keys before encryption; client
 code integrity and endpoint security remain application responsibilities.
 
-## Integration responsibilities
+## Integration guides
 
-| Use case | Library capabilities | Application responsibilities |
-| --- | --- | --- |
-| Real-time streams/messages/datagrams | Pinned handshakes, ratchet, replay windows, bounded frames, transport adapters, browser execution | Identity rollout, WAN/load SLOs, delivery policy; session resumption is not provided |
-| HTTP request/response | Protected context, correlation, complete-body writer signatures, replay stores, signed chunk API, finalization | Authorization, upload deadlines, signed-chunk carrier integration; byte readers do not parse signature sidecars |
-| Files | Signed single/split archives, bounded-memory FOCTETFS streams, validated atomic extraction | Trusted object/version checkpoints, filesystem durability and retention policy |
-| Threshold recovery | Optional vsss-rs 2..255 Shamir shares, signed set/archive binding, corruption/duplicate rejection, independent vectors | Independent composition review, separate custodian encryption/custody and recovery drills |
-| Native SQL storage | Binary signed records, conditional updates and atomic replay storage for supported databases | Credentials, TLS, schema migration, backup/restore and consistency policy |
-| Portable TEXT storage | Bounded signed text records, SQL plans and adapters for supported client interfaces | Driver integration, writer trust, authoritative revisions and connection configuration |
-| Platform storage bindings | Opaque record bytes can be stored or forwarded where the binding preserves them | Size limits, tenant isolation, consistency, TTLs, retries and cache policy |
-| Server-side content processing | Compatible only when the processing service is a trusted plaintext endpoint | Select which services may access plaintext; opaque data cannot be searched, transformed or inspected as plaintext |
-
-See [storage integration](storage-integration.md) for executable test commands and
-API selection. Split files remain segmentation; only the distinct threshold API
-provides k-of-n key recovery. The threshold convenience API uses bounded in-memory
-archives, while FOCTETFS handles large single-recipient streaming files.
+See [transport requirements](transport-matrix.md),
+[storage integration](storage-integration.md), and
+[deployment patterns](recommended-deployments.md) for API selection.
+Split files provide segmentation; only the separate threshold API provides
+k-of-n key recovery. Threshold recovery uses bounded in-memory archives, while
+FOCTETFS supports large single-recipient streaming files.
 
 ## Operational requirements
 

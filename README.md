@@ -1,88 +1,33 @@
 [crates-badge]: https://img.shields.io/crates/v/foctet.svg
 [crates-url]: https://crates.io/crates/foctet
-[doc-url]: https://docs.rs/foctet/latest/foctet
 [license-badge]: https://img.shields.io/crates/l/foctet.svg
-[examples-url]: https://github.com/foctal/foctet/tree/main/foctet/examples
 
 # foctet [![Crates.io][crates-badge]][crates-url] ![License][license-badge]
 
-Transport-agnostic end-to-end encryption layer for secure data transfer.
+Transport-agnostic end-to-end encryption for live connections, HTTP bodies,
+stored records, and files. Foctet provides authenticated sessions with rekeying,
+public-key envelopes, signed records, and encrypted archives.
 
-> **Status: production hardening toward v1.** Security requirements apply to
-> every release, including `0.x`. Local tests are not an independent security
-> audit or production certification. See [`SECURITY.md`](SECURITY.md) for the
-> security model, limitations, and vulnerability reporting.
+Encrypt and decrypt at trusted endpoints to keep plaintext out of relays and
+storage services. Applications supply trusted identities, key custody, and
+authorization. See the [security model](SECURITY.md) and
+[compromise boundaries](docs/security-boundaries.md).
+
+The wire format and APIs may change during `0.x`. See
+[compatibility policy](docs/api-stability.md) and [release notes](CHANGELOG.md).
 
 ## Crates
 
-- `foctet-core`: Framing, crypto, handshake/rekey state, replay protection.
-- `foctet-http`: Thin HTTP adapter for `application/foctet` body envelopes.
-- `foctet-archive`: Encrypted single-file and split archives with recipient key wrapping.
-- `foctet-transport`: Layered transport integration helpers.
-- `foctet-wasm`: WebAssembly / TypeScript bindings for body envelopes and sessions.
-- `foctet-storage`: Native SQL and remote Turso storage/replay adapters (Rust 1.94).
-- `foctet-storage-wire`: Driver-free signed TEXT records and SQL plans (Rust 1.88).
-- `foctet`: Top-level re-export crate.
-
-## Stability
-
-- Current releases are `0.x`; breaking changes may occur while Draft v0 is finalized.
-- Wire-level changes must update both `SPEC.md` and `test-vectors/`.
-- Stable wire/API compatibility is planned for `v1`.
-
-## Deployment Guide
-
-See [`docs/recommended-deployments.md`](docs/recommended-deployments.md) for the integration patterns across transport E2EE, HTTP body envelopes, and archive/file delivery.
-
-Security documentation:
-
-- [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) — what Foctet defends against, residual risks, and explicit non-goals.
-- [`docs/POLICIES.md`](docs/POLICIES.md) — versioning/compatibility/deprecation, key lifecycle and rotation, incident response.
-- [`docs/error-handling.md`](docs/error-handling.md) — required action for core, HTTP, and transport errors.
-- [`SECURITY.md`](SECURITY.md) — security status, known limitations, vulnerability reporting.
-
-## Examples
-
-- Repository examples: [examples][examples-url]
-- Guided overview: [`docs/examples.md`](docs/examples.md)
-
-## What Foctet Covers
-
-Foctet provides:
-
-- **Byte-stream channels** over generic split I/O plus transport helpers for
-  QUIC, WebTransport, WebSocket mux, and muxTLS.
-- **Datagram channels** for QUIC datagrams, raw UDP, and browser WebTransport.
-- **Message channels** for reliable, ordered message transports such as raw
-  WebSocket.
-- **HTTP body envelopes** with protected-context request binding and replay
-  defense.
-- **Encrypted archives** for single-file and split-file delivery.
-- **WASM/TypeScript bindings** for body envelopes and framed sessions.
-
-Signed body, record and archive APIs authenticate writers against trusted keys.
-File streaming supports bounded-memory processing, and optional threshold archive
-recovery supports separately held recovery shares. Storage adapters preserve
-opaque records through SQL drivers or existing application connections.
-See [storage integration](docs/storage-integration.md) for API selection and
-[Rust Workers integration](docs/workers-rs.md) for workers-rs SDK support.
-
-See [security and platform boundaries](docs/security-boundaries.md) for guarantees
-and application responsibilities, and [CHANGELOG.md](CHANGELOG.md) for changes
-and upgrade notes.
-
-## Transport Support
-
-Foctet exposes three transport shapes:
-
-- **byte stream**: `TokioTransportBuilder` / `FuturesTransportBuilder`, plus
-  feature-gated adapters for Quinn, Quion, WebTransport, WebSocket, and muxtls
-  (see the [feature table](docs/transport-matrix.md#backend-features))
-- **message**: `MessageTransport` + `SecureMessageChannel`
-- **datagram**: `DatagramTransport` + `SecureDatagramChannel`
-
-Browser support is provided by `foctet-wasm` (`FoctetSession`) and the
-wasm32-only `BrowserWebTransportDatagrams` adapter.
+| Crate | Purpose |
+| --- | --- |
+| `foctet-core` | Framing, cryptography, handshake, rekeying, and replay protection |
+| `foctet-http` | HTTP body envelopes and protected request context |
+| `foctet-archive` | Single-file, split, and streaming encrypted archives |
+| `foctet-transport` | Byte-stream, message, and datagram adapters |
+| `foctet-wasm` | WebAssembly / TypeScript body and session APIs |
+| `foctet-storage` | Native SQL and remote Turso adapters (Rust 1.94) |
+| `foctet-storage-wire` | Driver-free signed TEXT records and SQL plans (Rust 1.88) |
+| `foctet` | Facade re-exporting the component crates |
 
 ## Quick Start
 
@@ -119,45 +64,18 @@ where
 }
 ```
 
-If you already derived or exchanged Foctet session state out of band, you can
-still inject an active `Session` directly.
+The peer public key must come from a trusted source. The responder uses
+`establish_production_responder` with its own identity and the initiator's pin.
+After a restart or failed connection, establish a fresh session; live session
+state must not be restored.
 
-For archives, prefer the default randomized builders in `foctet-archive`.
-Reserve the deterministic `*_with_secrets` APIs for reproducible vectors and
-tests.
+## Guides
 
-## Security Notes
+- [Choosing an integration](docs/recommended-deployments.md)
+- [Runnable examples](docs/examples.md) and [transport features](docs/transport-matrix.md)
+- [HTTP context rules](docs/http-canonicalization.md) and [recipient-key rotation](docs/key-rotation.md)
+- [Storage integration](docs/storage-integration.md), [portable TEXT records](docs/worker-databases.md), and [Rust Workers](docs/workers-rs.md)
+- [Threat model](docs/THREAT_MODEL.md), [key management](docs/POLICIES.md), and [error handling](docs/error-handling.md)
+- [Protocol specification](SPEC.md), [test vectors](test-vectors/README.md), and [running tests](docs/testing.md)
 
-See [`SECURITY.md`](SECURITY.md) for the security limitations, threat model, and
-reporting process.
-
-- Both the async (`FoctetFramed`) and synchronous (`SyncIo`) paths **fail
-  closed on sequence/key-id exhaustion**.
-- **Do not persist and restore live session state.** No persistence format exists
-  yet; after a restart, establish a fresh session rather than reusing traffic keys
-  with reset or uncertain outbound sequence state.
-- **Replay state is committed only after AEAD authentication**, so a forged frame
-  cannot advance the replay window; the replay-window map is bounded.
-- The native handshake is **authenticated by default**: an unauthenticated handshake
-  requires an explicit `SessionAuthConfig::unauthenticated_for_testing()` opt-in,
-  intended for tests. Use pinned peer keys or an explicit `ChannelBinding`
-  for authenticated sessions.
-- For HTTP, prefer the **protected-context APIs** (`HttpSealer::seal_request_with_context`
-  / `HttpOpener::open_request_with_context`, plus the `axum` / Workers adapters):
-  they bind request metadata (method/path/query/message-id/timestamp/expiry) into
-  the AEAD and enforce single use through a `ReplayStore`. The low-level
-  stateless request helpers remain replayable by design and are not suitable
-  for production HTTP.
-- Deterministic archive secrets intentionally disable build-time randomness. Reusing
-  them across real payloads leaks equality and key-reuse signals, so reserve them for
-  fixtures and interoperability tests.
-
-## Storage integration
-
-Foctet encrypts and authenticates records independently of their storage backend.
-Use the native database adapters for supported SQL backends, or the portable
-signed TEXT codec and statement plans with an existing driver. JavaScript
-adapters are available for supported client interfaces. See
-[portable TEXT storage](docs/worker-databases.md) for encoding, adapter selection
-and connection-specific requirements. Applications provide writer trust,
-authorization and trusted revision checkpoints.
+Report suspected vulnerabilities privately using the [security policy](SECURITY.md#reporting-a-vulnerability).

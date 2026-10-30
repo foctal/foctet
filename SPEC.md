@@ -4,10 +4,9 @@ Foctet Protocol Specification (Draft v0)
 0\. Status
 ----------
 
-*   **Status**: Draft v0 (work-in-progress). **Not production-ready.** See `SECURITY.md` for the current security posture and known limitations, and `docs/THREAT_MODEL.md` for the full threat model.
+*   **Status**: Draft v0. Wire compatibility is not yet stable. See [SECURITY.md](SECURITY.md) for limitations and [the threat model](docs/THREAT_MODEL.md) for security assumptions.
 *   **Spec version**: `foctet-spec/0.3-draft`. The specification is versioned independently of the crate versions: crates may release without spec changes, and this stamp only changes when normative content changes. Any wire-level change MUST bump this stamp and move `test-vectors/` in the same commit (see the compatibility policy below).
 *   **Conformance language**: The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119/8174. Unless a section is explicitly marked *informative*, requirements stated with these key words are normative for Draft v0 implementations; an implementation that violates a MUST is not a conforming Foctet implementation even if it interoperates with this codebase.
-*   **Implementation status**: This specification describes the target protocol. As of this revision, the implemented surface is: **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket / muxtls, all covered by a real-connection conformance suite), the **message shape** (raw WebSocket, native + browser), the **datagram API** (`foctet_core::datagram`) with QUIC and raw-UDP adapters (mandatory anti-amplification for unvalidated server peers) and rekey-over-datagram via a reliable control channel, the one-shot body envelope and archive formats, streaming HTTP request and response bodies with per-chunk AEAD, an HTTP protected-context + anti-replay layer (in-memory / Redis / Cloudflare Durable Object stores), the DH-ratchet rekey, and a **WASM/TypeScript SDK** (`foctet-wasm`) covering the body envelope **and** the framed session (message + datagram modes, including in-session rekey), tested in headless Chrome in CI, plus a browser-WebTransport datagram adapter (`foctet_transport::webtrans_browser`). The canonical vectors are additionally verified by an independent non-Rust implementation (`interop/verify_vectors.mjs`, in CI), and the Workers path is exercised against Wrangler with a real Durable Object.
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
@@ -72,7 +71,7 @@ key-loss policy, and the WASM boundary — is `docs/THREAT_MODEL.md`.
 *   **Replay protection**: Endpoints detect replayed frames within a session.
 *   **Forward secrecy (between sessions)**: A fresh ephemeral X25519 handshake per session means compromise of one session's keys does not reveal other sessions' traffic.
 *   **Within-session rekey is a forward-secret DH ratchet.** Each rekey performs a Diffie-Hellman ratchet step (a fresh ephemeral X25519 output mixed into a root-key chain; see §7.1.2), and rekeys alternate between the peers so both ratchet keys rotate. This provides forward secrecy and, across an alternating rekey, post-compromise security. Under strictly one-directional traffic the alternation can stall after one step, so rekey periodically from both ends.
-*   **Key separation**: Distinct keys for directions and purposes (data vs control).
+*   **Key separation**: Distinct keys for each direction. Data and control frames share directional keys and sequence allocation; the control flag is authenticated in the header.
 
 ### 3.3 Misuse Cases (Implementation Risks)
 
@@ -621,8 +620,8 @@ on the same security context are forbidden.
 
 Inside ciphertext, define a simple TLV:
 
-*   type (varint)
-*   length (varint)
+*   type (u16, big-endian)
+*   length (u32, big-endian)
 *   value
 
 This allows future features (ack hints, compression hints, file metadata) without changing plaintext header.
@@ -692,17 +691,6 @@ Archive implementations MUST reject at least the following:
 *   hash mismatch on plaintext/chunks/parts
 *   missing or duplicated split-part indices
 *   AEAD authentication failure
-
-* * *
-
-16\. Open Questions (Draft v0)
-------------------------------
-
-1.  **Handshake authentication**: should static identity authentication become mandatory in v1?
-2.  **Nonce format**: should v1 introduce stricter domain separation and explicit endianness requirements?
-3.  **Varint adoption**: should v1 replace fixed-width integer fields where appropriate?
-4.  **Relay envelope**: should relay envelope metadata remain out-of-scope or be standardized?
-5.  **Padding defaults**: should v1 define a mandatory default padding strategy?
 
 * * *
 

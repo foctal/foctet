@@ -1,126 +1,63 @@
-# Recommended Deployment Patterns
+# Choosing a Foctet integration
 
-Choose a Foctet layer based on the lifetime and routing of your data. Foctet
-The Draft v0 format is not yet stable; see [SECURITY.md](../SECURITY.md) before deploying.
+Choose by data lifetime and where plaintext may be accessed. A service that
+opens ciphertext is a trusted endpoint, including a Worker or database API server.
 
-## Choosing the Right Foctet Layer
+| Use case | Layer | Application responsibilities |
+| --- | --- | --- |
+| Live peer connections | `foctet-transport` | Peer trust, connection establishment, authorization, delivery policy |
+| HTTP request/response bodies | `foctet-http` | HTTPS, authorization, shared replay storage, visible routing metadata |
+| Persistent records | Signed storage APIs | Trusted writer pins and revisions, backend access control |
+| Offline files and exports | `foctet-archive` | Recipient keys, writer trust, distribution and retention |
 
-| Use case | Recommended Foctet layer | What Foctet protects | What must be protected elsewhere |
-| --- | --- | --- | --- |
-| Interactive end-to-end transport between peers | `foctet-transport` with authenticated native handshake | Stream payloads, frame integrity, replay window, rekey lifecycle | Peer discovery, transport availability, routing metadata |
-| HTTP request/response body encryption | `foctet-http` or `foctet_core::body` | HTTP body bytes; with protected-context APIs, selected request metadata is also authenticated and replay-protected | Method, URL, query, status code, outer headers, server authentication |
-| Persistent application records | Core signed storage APIs, native database adapters or portable TEXT records | Ciphertext confidentiality, writer authentication and expected record identity/version | Authorization, metadata visibility, trusted freshness checkpoints and backend availability |
-| File transfer, offline export, or storage handoff | `foctet-archive` | File contents, encrypted metadata, recipient-scoped DEK wrapping | File naming outside the archive, storage ACLs, distribution channel authenticity |
+## Authenticated connections
 
-## Pattern 1: Authenticated Transport E2EE
-
-Use this when both endpoints actively exchange encrypted data over a live connection.
-
-- Recommended crates: `foctet-transport` plus `foctet-core` identity types.
-- Recommended transports: QUIC streams, WebTransport streams, multiplexed WebSocket streams, `muxtls`, or any split send/recv byte stream.
 Use `ProductionSessionAuth::pinned_identity` with a local Ed25519 identity and
-the expected remote `PeerIdentity`, then call the transport builder's
-`establish_production_initiator` or `establish_production_responder`. If the
-outer channel already authenticates the peer, use
-`ProductionSessionAuth::authenticated_channel` with its `ChannelBinding`.
+the expected remote `PeerIdentity`. Call the transport builder's
+`establish_production_initiator` or `establish_production_responder`.
+If an outer channel already authenticates the peer, bind the session to it with
+`ProductionSessionAuth::authenticated_channel` and its `ChannelBinding`.
 
-### When to choose it
+See [transport support](transport-matrix.md) for byte streams, messages,
+datagrams, and backend features. Datagrams require a separate reliable control
+channel for handshake and rekey. Reconnect with a fresh session after terminal
+errors; see [error handling](error-handling.md).
 
-- You need bidirectional E2EE streams.
-- You need replay protection and rekey over a long-lived session.
-- You want one transport-agnostic secure channel abstraction across Quinn, Quion, WebTransport, WebSocket, or custom split I/O.
+## HTTP bodies
 
-### What still remains outside Foctet
+Use `HttpSealer::seal_request_with_context` and
+`HttpOpener::open_request_with_context`, or their axum / Workers adapters.
+Multi-instance services need a shared atomic replay store. Authenticate the
+outer channel and authorize requests separately.
 
-- Connection establishment and retry policy.
-- Transport-level routing information such as IP addresses, QUIC connection IDs, or relay metadata.
-- Authorization rules above peer identity, if your application needs roles or permissions.
+Protected context authenticates selected request metadata but does not hide
+methods, URLs, status codes, or outer headers. The `x-foctet-scope: body-only`
+header describes this boundary; it does not authenticate the sender.
+See [context rules](http-canonicalization.md) and [key rotation](key-rotation.md).
 
-## Pattern 2: HTTP Body Encryption
+## Persistent records
 
-Use this when you need encrypted payload bodies over HTTP APIs but do not need full HTTP-message confidentiality.
+Encrypt and sign at the trusted data endpoint, then store the complete opaque
+record. Use core signed storage APIs for binary records, `foctet-storage` for
+native database adapters, or `foctet-storage-wire` for TEXT records and SQL plans.
+JavaScript adapters support selected client interfaces.
 
-- Recommended crates: `foctet-http` or `foctet_core::body`.
-- Recommended outer channel: HTTPS or another authenticated session that already authenticates the peer.
-- Recommended setup:
-  - seal request or response bodies with `application/foctet`
-  - for production HTTP requests, prefer `foctet-http`'s protected-context
-    path (`seal_request_with_context` / `open_request_with_context`) with a
-    shared replay store
-  - keep `x-foctet-scope: body-only`
-  - authenticate the outer HTTP channel separately
-  - rotate recipient keys with an `HttpOpener` keyring and an overlap window
-    (see [Key rotation](key-rotation.md))
-  - for zero-knowledge storage where the server holds no key, seal at rest with
-    `foctet_core::storage` (see
-    [Zero-knowledge storage backends](zero-knowledge-workers-storage.md))
+Keep writer pins and expected revisions outside the untrusted store's rollback
+domain. Conditional writes do not replace these trust checks. See
+[storage integration](storage-integration.md), [portable TEXT storage](worker-databases.md),
+and [blind storage](zero-knowledge-workers-storage.md).
 
-### When to choose it
+## Files and archives
 
-- You are integrating with `axum`, Cloudflare Workers, or another HTTP stack.
-- You need encrypted request or response bodies without replacing your existing routing or middleware model.
-- You want a compact one-shot envelope instead of a long-lived Foctet session.
+Use `SignedArchive` or `SignedSplitArchive` when readers must authenticate the
+writer. For large single-recipient files, use the signed file-streaming API.
+Distribute encrypted bytes through the application's storage or transport.
+Readers need an independently trusted writer key and the recipient private key.
 
-### Important boundary
+Use randomized builders. Deterministic `*_with_secrets` APIs are for fixtures
+and interoperability tests: reusing secrets can reuse encryption keys and nonces.
+Split archives segment data; threshold recovery is a separate, optional API that
+requires recovery shares to be provisioned before key loss.
 
-Foctet HTTP does not hide:
-
-- request method
-- URL path or query
-- response status code
-- outer HTTP headers unless your application copies them into the encrypted body
-
-With the protected-context APIs, Foctet **does authenticate** selected request
-metadata (method, authority, path, query, message ID, timestamp, expiry) and
-enforces single-use replay protection, but that metadata remains visible to the
-outer HTTP stack.
-
-If you need full-message confidentiality, use transport E2EE instead of relying on HTTP body envelopes alone.
-
-## Pattern 3: Archive and File Distribution
-
-Use this when the data must survive outside a live session.
-
-- Recommended crate: `foctet-archive`
-- Recommended setup:
-  - use `SignedArchive` or `SignedSplitArchive` when the reader must verify a writer
-  - use the signed file-streaming API for bounded-memory processing of larger files
-  - distribute the resulting archive bytes or manifest/parts through any storage or transport layer
-  - verify the independently trusted writer and decrypt with the intended recipient private key
-
-### When to choose it
-
-- You need encrypted files for offline transfer.
-- You need split archives for large payload delivery or resumable distribution.
-- You need recipient-wrapped content keys and encrypted metadata.
-
-### Deterministic builds
-
-`ArchiveBuildSecrets` is for reproducible vectors and deterministic tests only.
-
-Do not use deterministic archive secrets for real user data because fixed archive identifiers, DEKs, or wrapping ephemeral secrets leak equality and key-reuse signals across builds.
-
-## Pattern 4: Persistent Encrypted Records
-
-Use this when a storage service must preserve records without access to their
-plaintext. Encrypt and sign at the trusted data endpoint, then store the complete
-opaque record using the application's backend.
-
-- Use core signed storage APIs for application-managed binary records.
-- Use `foctet-storage` for its supported native database adapters.
-- Use `foctet-storage-wire` for canonical signed TEXT records and SQL plans, or
-  the JavaScript adapters for supported connection interfaces.
-- Keep writer pins and expected revisions independently trusted; backend
-  authorization and conditional updates do not replace these checks.
-
-See [blind storage](zero-knowledge-workers-storage.md),
-[storage integration](storage-integration.md) and
-[portable TEXT storage](worker-databases.md) for API and driver requirements.
-
-## Deployment Checklist
-
-- Use authenticated native handshakes with pinned peer identities whenever Foctet is the main secure channel.
-- Treat sequence-space exhaustion and key-id exhaustion as terminal; start a fresh session instead of trying to recover in place.
-- Keep parser limits enabled for untrusted input.
-- Keep `x-foctet-scope: body-only` on HTTP body-envelope deployments unless you have a strong compatibility reason not to.
-- Use randomized archive builders in production.
+See [security boundaries](security-boundaries.md) for the consequences of key
+compromise and the checks required before using decrypted data.
