@@ -34,13 +34,13 @@ pub enum Direction {
 /// The `c2s` / `s2c` fields are live XChaCha20-Poly1305 keys. They are
 /// **not** printed by the [`Debug`] implementation (which redacts them), are
 /// compared in constant time (see the [`PartialEq`] impl), and are zeroized on
-/// drop. Reading the raw bytes directly via the public fields is an explicit,
-/// auditable exposure — prefer [`TrafficKeys::key_for`], and only copy the
-/// bytes out when you immediately wrap the copy (e.g. in
-/// [`zeroize::Zeroizing`]).
+/// drop. [`TrafficKeys::key_for`] returns a raw copy for low-level integration;
+/// immediately wrap that copy in [`zeroize::Zeroizing`] and never log it.
+/// Directional key fields are private.
 ///
-/// `TrafficKeys` is deliberately **not** `Clone`: the secret key bytes exist in
-/// exactly one place and are zeroized when that place is dropped. Share keys
+/// `TrafficKeys` is deliberately **not** `Clone`: shared handles refer to one
+/// owned key record, which is zeroized when its last handle is dropped. Raw
+/// exports and cipher initialization can still copy secret bytes. Share keys
 /// through a [`KeyHandle`] (a reference-counted handle) instead of copying the
 /// secret bytes into multiple owners.
 ///
@@ -197,10 +197,12 @@ pub fn derive_ratchet_root(
 ///
 /// `(new_root, c2s, s2c)` are independent HKDF-SHA-256 expansions of
 /// `HKDF(salt = root, ikm = dh)`. Because `dh` comes from a freshly generated
-/// ephemeral key at each rekey, an attacker who learns the current keys cannot
-/// derive the keys after the next rekey (post-compromise security), and an
+/// ephemeral key at each rekey, security can recover after a passive state
+/// compromise once both peers have contributed fresh ratchet keys and the
+/// attacker no longer has endpoint access (post-compromise security). An
 /// attacker who later compromises the long-term state cannot derive past keys
-/// (forward secrecy) once the ephemeral private keys are discarded.
+/// (forward secrecy) once the ephemeral private keys and retained traffic keys
+/// are discarded.
 pub fn dh_ratchet_step(
     root: &[u8; 32],
     dh: &[u8; 32],
@@ -258,6 +260,11 @@ impl core::fmt::Debug for EphemeralKeyPair {
 }
 
 impl EphemeralKeyPair {
+    /// Erases the private scalar when its owning session becomes terminal.
+    pub(crate) fn clear_private(&mut self) {
+        self.private.zeroize();
+    }
+
     /// Generates a fresh ephemeral X25519 key pair.
     pub fn generate() -> Self {
         let private = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
@@ -289,7 +296,7 @@ pub fn x25519_shared_secret(
 ) -> Result<Zeroizing<[u8; 32]>, CoreError> {
     let peer = PublicKey::from(peer_public);
     let shared = Zeroizing::new(private.diffie_hellman(&peer).to_bytes());
-    if shared.iter().all(|byte| *byte == 0) {
+    if bool::from(shared.ct_eq(&[0u8; 32])) {
         return Err(CoreError::InvalidSharedSecret);
     }
     Ok(shared)

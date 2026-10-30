@@ -135,10 +135,10 @@ pub struct RekeyThresholds {
 /// An immutable, not-yet-committed outbound DH-ratchet transition.
 ///
 /// A prepared rekey contains the control message that must be encrypted with
-/// the current (old) traffic key. It changes no session state until consumed by
-/// [`Session::commit_rekey`]. Transport integrations must enqueue that exact
-/// control message first, then commit; if output is rejected or ambiguous they
-/// must close rather than use the prepared next generation.
+/// the current (old) traffic key. Preparation reserves a transaction while
+/// active keys remain unchanged until [`Session::commit_rekey`]. Transport
+/// integrations must enqueue that exact control message first, then commit.
+/// Cancel only when no bytes were accepted; ambiguous delivery requires closure.
 pub struct PreparedRekey {
     message: ControlMessage,
     old_key_id: u8,
@@ -188,7 +188,6 @@ impl Default for RekeyThresholds {
 }
 
 /// Handshake + rekey state machine for Foctet Core.
-#[derive(Debug)]
 pub struct Session {
     role: HandshakeRole,
     state: SessionState,
@@ -213,6 +212,27 @@ pub struct Session {
     observer: ObserverHandle,
     message_endpoint_claimed: AtomicBool,
     datagram_endpoint_claimed: AtomicBool,
+}
+
+impl core::fmt::Debug for Session {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Allowlist diagnostics: adding secret state must never implicitly add
+        // it to logs, including through a transport's derived Debug output.
+        f.debug_struct("Session")
+            .field("role", &self.role)
+            .field("state", &self.state)
+            .field("ratchet_root", &"<redacted>")
+            .field(
+                "active_key_id",
+                &self.active_keys.as_ref().map(|k| k.key_id),
+            )
+            .field("previous_key_count", &self.previous_keys.len())
+            .field("peer_authenticated", &self.peer_authenticated)
+            .field("can_rekey", &self.can_rekey)
+            .field("outbound_frames", &self.outbound_frames)
+            .field("outbound_bytes", &self.outbound_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Single-use ownership token for one message endpoint nonce domain.
@@ -438,7 +458,10 @@ impl Session {
         result
     }
 
-    /// Permanently closes this session and zeroizes its live key material.
+    /// Permanently closes this session and erases its root and ephemeral secret.
+    /// Traffic keys are erased when their last shared handle is dropped; an
+    /// independently owned identity signer is not revoked by session closure.
+    /// A caller-owned [`PreparedRekey`] also retains secrets until dropped.
     ///
     /// Transport integrations must call this after an ambiguous outbound
     /// failure, such as a partial control-frame write or a failed flush. The
@@ -482,10 +505,9 @@ impl Session {
 
                 self.peer_eph_public = Some(*eph_public);
                 self.session_salt = *session_salt;
-                let mut shared = self.local_eph.shared_secret(*eph_public)?;
-                let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
+                let shared = Zeroizing::new(self.local_eph.shared_secret(*eph_public)?);
+                let keys = derive_traffic_keys(&shared[..], &self.session_salt, 0)?;
                 self.ratchet_root = derive_ratchet_root(&self.session_salt, &shared)?;
-                shared.zeroize();
 
                 self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
@@ -544,10 +566,9 @@ impl Session {
                     self.verify_server_auth(*eph_public, *transcript_binding, auth.as_ref())?;
 
                 self.peer_eph_public = Some(*eph_public);
-                let mut shared = self.local_eph.shared_secret(*eph_public)?;
-                let keys = derive_traffic_keys(&shared, &self.session_salt, 0)?;
+                let shared = Zeroizing::new(self.local_eph.shared_secret(*eph_public)?);
+                let keys = derive_traffic_keys(&shared[..], &self.session_salt, 0)?;
                 self.ratchet_root = derive_ratchet_root(&self.session_salt, &shared)?;
-                shared.zeroize();
 
                 self.active_keys = Some(KeyHandle::new(keys));
                 self.state = SessionState::Active;
@@ -598,10 +619,10 @@ impl Session {
                 // peer's fresh ratchet public) into the root chain, then adopt
                 // the peer's new public. After receiving it becomes our turn to
                 // initiate the next rekey.
-                let mut dh = self.local_eph.shared_secret(*ratchet_public)?;
+                let dh = Zeroizing::new(self.local_eph.shared_secret(*ratchet_public)?);
                 let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, *new_key_id)?;
-                dh.zeroize();
                 self.peer_eph_public = Some(*ratchet_public);
+                self.ratchet_root.zeroize();
                 self.ratchet_root = new_root;
                 self.install_new_active_key(next);
                 self.can_rekey = true;
@@ -677,7 +698,7 @@ impl Session {
         self.state == SessionState::Active && self.can_rekey
     }
 
-    /// Prepares an immediate rekey without changing this session.
+    /// Reserves a rekey transaction without advancing this session's active keys.
     ///
     /// The returned control message MUST be accepted by the transport under
     /// `old_key_id` before calling [`Self::commit_rekey`]. Only one prepared
@@ -713,9 +734,9 @@ impl Session {
         // DH-ratchet send step: rotate to a fresh ephemeral key and mix
         // DH(new ephemeral, peer's current ratchet public) into the root chain.
         let new_eph = EphemeralKeyPair::generate();
-        let mut dh = new_eph.shared_secret(peer_public)?;
+        let dh = Zeroizing::new(new_eph.shared_secret(peer_public)?);
         let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, new_key_id)?;
-        dh.zeroize();
+        let new_root = Zeroizing::new(new_root);
         rekey_prepare_fault(RekeyPrepareFault::BeforeRetentionAllocation)?;
         let retained_count = self
             .thresholds
@@ -743,7 +764,7 @@ impl Session {
             new_key_id,
             transaction_id: ratchet_public,
             local_eph: new_eph,
-            ratchet_root: Zeroizing::new(new_root),
+            ratchet_root: new_root,
             next_keys: KeyHandle::new(next),
             previous_keys,
         };
@@ -847,6 +868,7 @@ impl Session {
         self.can_rekey = false;
         self.pending_rekey = None;
         self.ratchet_root.zeroize();
+        self.local_eph.clear_private();
         self.active_keys = None;
         self.previous_keys.clear();
     }
@@ -1483,6 +1505,57 @@ mod tests {
     }
 
     #[test]
+    fn session_debug_never_exposes_ratchet_roots() {
+        let (mut client, mut server) = active_pair();
+        for _ in 0..3 {
+            for session in [&client, &server] {
+                let compact = |value: String| {
+                    value
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                };
+                let root = compact(format!("{:?}", session.ratchet_root));
+                for rendered in [format!("{session:?}"), format!("{session:#?}")] {
+                    assert!(!compact(rendered.clone()).contains(&root));
+                    assert!(rendered.contains("<redacted>"));
+                }
+            }
+            let message = client.force_rekey().unwrap();
+            server.handle_control(&message).unwrap();
+            let message = server.force_rekey().unwrap();
+            client.handle_control(&message).unwrap();
+        }
+    }
+
+    #[test]
+    fn terminal_session_erases_ratchet_secrets() {
+        let (mut client, mut server) = active_pair();
+        client.terminate();
+        // Rejected controls must erase secrets through the same close path.
+        assert!(
+            server
+                .handle_control(&ControlMessage::ServerHello {
+                    eph_public: [0; 32],
+                    transcript_binding: [0; 32],
+                    auth: None,
+                })
+                .is_err()
+        );
+        let peer = EphemeralKeyPair::generate().public;
+        let erased =
+            crate::crypto::x25519_shared_secret(&x25519_dalek::StaticSecret::from([0; 32]), peer)
+                .unwrap();
+        for session in [&client, &server] {
+            assert_eq!(session.state(), SessionState::Closed);
+            assert_eq!(session.ratchet_root, [0; 32]);
+            assert_eq!(session.local_eph.shared_secret(peer).unwrap(), *erased);
+            assert!(session.active_keys().is_none());
+            assert!(session.previous_keys.is_empty());
+        }
+    }
+
+    #[test]
     fn replayed_rekey_message_is_rejected_after_a_real_rekey() {
         // A Rekey control message names the `old_key_id` it rotates away
         // from. Once that rotation has happened, the same message replayed
@@ -1737,8 +1810,8 @@ mod tests {
         // `k + 1` — the transition a *future* rekey would name, as if a later
         // ratchet message overtook the pending one. Even with a transcript
         // binding that is internally consistent for its own key ids, it must
-        // be rejected (the ratchet chain cannot skip a step), and the session
-        // must remain usable: the correctly ordered rekey still applies.
+        // be rejected (the ratchet chain cannot skip a step). The session
+        // becomes terminal even if the next control is correctly ordered.
         let (mut client, mut server) = active_pair();
 
         let active_id = server.active_keys().expect("server active key").key_id;
