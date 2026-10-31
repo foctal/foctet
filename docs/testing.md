@@ -9,9 +9,10 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```
 
-The [Rust workflow](../.github/workflows/rust.yml) runs these checks and builds
-each native transport feature independently. Dependency advisories are checked
-weekly by the [security workflow](../.github/workflows/security.yml).
+The [Rust workflow](../.github/workflows/rust.yml) runs these checks on Windows,
+Linux, and macOS, including tests for each native transport feature in isolation.
+The [security workflow](../.github/workflows/security.yml) checks dependency
+advisories weekly.
 The manually triggered [release rehearsal](../.github/workflows/release-rehearsal.yml)
 adds API compatibility, packaging, WASM, and interoperability checks.
 
@@ -58,9 +59,11 @@ cargo check -p foctet --no-default-features --features transport-websock,transpo
 
 ## Browser and JavaScript tests
 
-See the [WASM SDK README](../foctet-wasm/README.md#browser-harness) for the browser
-harness and native WebSocket/WebTransport examples. These tests require local
-browser tooling and are separate from the default Rust workflow.
+CI also runs the browser SDK harness and WebTransport tests in Chrome, covering
+packet loss, reordering, rekeying, and reconnection. See the
+[WASM SDK README](../foctet-wasm/README.md#browser-harness) for local commands and
+WebSocket/WebTransport examples. Run the separate `wasm-bindgen-test` suite
+locally using the [headless browser instructions](../foctet-wasm/README.md#headless-browser-tests).
 
 The [interop tests](../interop/README.md) verify the wire-format vectors with an
 independent JavaScript implementation.
