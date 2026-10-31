@@ -33,8 +33,16 @@ for kind, image, port, options, readiness in cases:
         command = ["--default-storage-engine=MyISAM"] if kind in ("mysql", "mariadb") else []
         run(["docker", "run", "-d", "--name", name, "-p", f"127.0.0.1::{port}", *options, image, *command])
         created = True
-        address = run(["docker", "port", name, str(port)], capture_output=True).stdout.strip()
-        hostport = address.rsplit(":", 1)[1]
+        # Docker Desktop can report the container before publishing its port.
+        for _ in range(30):
+            address = run(["docker", "port", name, str(port)], capture_output=True).stdout.strip()
+            if address:
+                hostport = address.splitlines()[0].rsplit(":", 1)[1]
+                break
+            time.sleep(1)
+        else:
+            run(["docker", "logs", name])
+            raise RuntimeError(f"{kind} did not publish its loopback port")
         if readiness:
             for _ in range(120):
                 ready = subprocess.run(["docker", "exec", name, *readiness], capture_output=True).returncode == 0
