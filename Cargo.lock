@@ -1046,6 +1046,7 @@ dependencies = [
  "base64",
  "foctet-core",
  "foctet-http",
+ "percent-encoding",
  "reqwest",
  "rustls",
  "serde_json",

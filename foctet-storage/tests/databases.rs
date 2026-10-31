@@ -106,8 +106,16 @@ async fn sqlite_roundtrip_cas_replay_and_rollback() {
 #[tokio::test]
 async fn sqlite_restart_preserves_records_and_replay() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("db.sqlite");
-    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let path = directory
+        .path()
+        .join("database space # % \u{65e5}\u{672c}\u{8a9e}.sqlite");
+    // Encode the entire filename so drive letters, separators and URL syntax
+    // survive SQLx's generic URL parser on both Windows and Unix.
+    let filename = percent_encoding::utf8_percent_encode(
+        path.to_str().unwrap(),
+        percent_encoding::NON_ALPHANUMERIC,
+    );
+    let url = format!("sqlite:{filename}?mode=rwc");
     let store = SqlStore::connect(&url, Dialect::Sqlite, 1024)
         .await
         .unwrap();
@@ -134,6 +142,9 @@ async fn sqlite_restart_preserves_records_and_replay() {
         restored.check_and_insert(&[1; 16], 100, 2).await.unwrap(),
         ReplayCheck::Replay
     );
+    restored.close().await;
+    assert!(path.is_file());
+    directory.close().unwrap();
 }
 /// Run against a disposable database. Never point at an application database.
 #[tokio::test]

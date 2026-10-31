@@ -32,6 +32,11 @@ libSQL Hrana HTTP v2 adapter. There is no implicit replica or offline sync polic
    expected descriptor/version and writer. Never accept the store's revision as
    your only freshness authority.
 
+For SQLite files, use `sqlite:<percent-encoded filename>?mode=rwc`. Encode the
+UTF-8 filename, including Windows drive separators and literal `%`, `#` or `?`
+characters, before inserting it into the URL. Do not interpolate `Path::display()`
+directly into a URL. Use `sqlite::memory:` for an in-memory database.
+
 Identifiers passed to the adapter are fixed 32-byte opaque keys. Derive/store
 these without leaking plaintext filenames or tenant information. Ciphertext and
 signature are committed together. SQL parameters bind every user value. Use the
