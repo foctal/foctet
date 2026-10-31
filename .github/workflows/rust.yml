@@ -12,12 +12,19 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Keep the required CI path intentionally small. Broader compatibility and
-# packaging checks belong to the manually dispatched release rehearsal.
+# Native and browser regressions run on Windows, Linux, and macOS.
+# Broader packaging checks belong to the manually dispatched release rehearsal.
 jobs:
   check:
-    name: Format, lint, and test
-    runs-on: ubuntu-latest
+    name: Format, lint, and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Setup stable toolchain
@@ -34,6 +41,7 @@ jobs:
         run: |
           for feature in transport-muxtls transport-websock transport-websock-mux transport-quinn transport-quion transport-webtrans transport-webtrans-quion; do
             cargo check -p foctet --no-default-features --features "$feature" --locked
+            cargo test -p foctet-transport --no-default-features --features "$feature" --test conformance --locked
           done
       - name: Check archive WASM targets
         run: |
@@ -52,6 +60,40 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Exercise MySQL, MariaDB, PostgreSQL and libSQL
         run: python3 scripts/test-storage-databases.py
+
+  browser:
+    name: Browser interoperability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            chrome: /usr/bin/google-chrome
+          - os: windows-latest
+            chrome: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+          - os: macos-latest
+            chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    defaults:
+      run:
+        shell: bash
+    env:
+      CHROME_PATH: ${{ matrix.chrome }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install WASM build tools
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          cargo install wasm-pack --version 0.14.0 --locked
+      - name: Test browser SDK and WebTransport rekey, loss, and reordering
+        working-directory: foctet-wasm/examples/browser
+        run: |
+          npm ci
+          npm run test:webtransport
 
   worker-databases:
     name: Worker storage adapters
