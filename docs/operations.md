@@ -56,11 +56,18 @@ by untrusted source input.
 ## Shutdown, cancellation, and restart
 
 Graceful shutdown stops admission first, lets already accepted writes flush up
-to a bounded deadline, and then discards every session. A cancelled or aborted
-write whose accepted-byte count is unknown is an ambiguous send and makes the
-channel terminal. An incomplete streaming body exposes no successful final
-plaintext. Partial reads, EOF, authentication failure, invalid control state,
-and backend close are terminal for the affected channel.
+to a bounded deadline, and then discards every session. Discard the channel after
+an ambiguous send unless the API explicitly retains the operation for resumption.
+In particular, cancelling `rekey_now` while flush is pending retains the exact
+prepared control; call `rekey_now` again to resume it. Ordinary send/receive
+operations return `RekeyInProgress` until it completes. See
+[error handling](error-handling.md#ambiguous-output-and-rekey).
+
+Incomplete streaming bodies may have released provisional plaintext chunks;
+do not commit their effects before successful finalization. Unexpected EOF,
+authentication failure, invalid control state, and backend close are terminal
+for the affected channel. Normal partial reads are buffered until a complete
+frame is available.
 
 Foctet has no persisted traffic-session or transport-resume format. After a
 process restart or reconnect, establish a fresh authenticated session. Durable

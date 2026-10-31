@@ -49,9 +49,12 @@ Place the key that serves the most traffic first to minimize wasted attempts.
    yet, so all traffic still opens.
 3. **Publish** the new public key + kid to senders and begin the overlap window.
    Senders migrate from the old kid to the new one at their own pace.
-4. **Wait** at least the length of the longest sender-side key cache or protected
-   context TTL (`DEFAULT_CONTEXT_TTL_SECS` by default). Retiring the old key
-   before every in-flight sender has migrated causes spurious `401`s.
+4. **Wait** until senders have stopped sealing to the old key, then allow the
+   last old-key requests to expire, including the accepted clock skew. If
+   migration is bounded by a key-cache lifetime, budget that lifetime plus the
+   maximum request TTL and clock skew from publication of the new key. Use the
+   application's actual TTL bound, not just `DEFAULT_CONTEXT_TTL_SECS`.
+   Retiring earlier rejects otherwise valid in-flight requests with `401`.
 5. **Retire** the old key: remove it from the keyring and redeploy. Requests
    still sealed to the old key now fail authentication and are answered `401`.
 6. **Destroy** the retired secret once you are confident no rollback is needed.
