@@ -168,6 +168,7 @@
           const dgramWriter = wt.datagrams.writable.getWriter();
           const dgramReader = wt.datagrams.readable.getReader();
           const echoes = [];
+          let rekeyFinished = Promise.resolve();
           // Drain replies concurrently with the burst. Browser datagram queues
           // are bounded and may discard unread replies before the send completes.
           // Keep the original loss/reordering checks below; avoid causing loss in
@@ -184,6 +185,10 @@
               if (received.timeout) break;
               const { value, done } = received;
               if (done) throw new Error("datagram stream closed early");
+              // A new-key reply can overtake the acknowledgement on the
+              // separately ordered control stream. Hold at most this one
+              // datagram until local adoption; retained keys still open old replies.
+              await rekeyFinished;
               echoes.push(dec.decode(session.openDatagram(value).plaintext));
             }
           })();
@@ -192,10 +197,16 @@
               await dgramWriter.write(session.sealDatagram(0, 0, enc.encode(message)));
               if (index === 15) {
                 const rekey = session.prepareRekey();
-                await writer.write(frameControl(rekey));
-                const ack = await control.read();
-                assert(ack.length === 1 && ack[0] === 0xac, "rekey adoption not acknowledged");
-                session.commitRekey();
+                let finishRekey;
+                rekeyFinished = new Promise((resolve) => { finishRekey = resolve; });
+                try {
+                  await writer.write(frameControl(rekey));
+                  const ack = await control.read();
+                  assert(ack.length === 1 && ack[0] === 0xac, "rekey adoption not acknowledged");
+                  session.commitRekey();
+                } finally {
+                  finishRekey();
+                }
               }
             }
           })();

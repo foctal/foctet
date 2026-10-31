@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { chromium } from "playwright-core";
 
@@ -7,6 +8,7 @@ const browserDir = resolve(import.meta.dirname);
 const repoDir = resolve(browserDir, "../../..");
 const wasmDir = resolve(browserDir, "../..");
 const children = [];
+let browser;
 
 function start(command, args, cwd) {
   const child = spawn(command, args, { cwd, stdio: "inherit" });
@@ -39,7 +41,15 @@ async function waitForHttp(url) {
 }
 
 try {
-  await run("bash", ["devcert/generate.sh"], repoDir);
+  if (process.platform === "win32") {
+    const gitOpenSsl = resolve(process.env.ProgramFiles ?? "C:/Program Files", "Git/usr/bin/openssl.exe");
+    if (!process.env.OPENSSL_BIN && existsSync(gitOpenSsl)) {
+      process.env.OPENSSL_BIN = gitOpenSsl;
+    }
+    await run("pwsh.exe", ["-NoProfile", "-File", "devcert/generate.ps1"], repoDir);
+  } else {
+    await run("bash", ["devcert/generate.sh"], repoDir);
+  }
   await run(
     "wasm-pack",
     ["build", "--target", "web", "--out-dir", "pkg-web"],
@@ -82,13 +92,20 @@ try {
     process.env.CHROME_PATH ??
     process.env.CHROME_BIN ??
     "/usr/bin/google-chrome";
-  const browser = await chromium.launch({
+  browser = await chromium.launch({
     executablePath,
     headless: true,
     args: ["--enable-quic", "--origin-to-force-quic-on=127.0.0.1:4470"],
   });
   const page = await browser.newPage();
   page.on("console", (message) => console.log(`[browser] ${message.text()}`));
+  await page.goto("http://127.0.0.1:8011/examples/browser/index.html");
+  await page.waitForFunction(() => window.__FOCTET_RESULT__ !== undefined);
+  const sdkResult = await page.evaluate(() => window.__FOCTET_RESULT__);
+  if (sdkResult.failed !== 0 || sdkResult.passed === 0) {
+    throw new Error(`browser SDK failed: ${JSON.stringify(sdkResult)}`);
+  }
+  console.log(`PASS browser SDK: ${sdkResult.passed} checks`);
   await page.goto("http://127.0.0.1:8011/examples/browser/webtransport.html");
   const hash = (await readFile(resolve(repoDir, "devcert/localhost.hex"), "utf8")).trim();
   await page.locator("#hash").fill(hash);
@@ -107,6 +124,7 @@ try {
         `browser run ${run} failed: ${JSON.stringify(result)}\n${details}`,
       );
     }
+    console.log(`PASS WebTransport run ${run}: ${result.passed} checks`);
     // Clear the previous machine-readable result so the second run proves a
     // fresh WebTransport connection and authenticated session.
     await page.evaluate(() => {
@@ -127,8 +145,8 @@ try {
       }, hash);
     }
   }
-  await browser.close();
 } finally {
+  await browser?.close();
   for (const child of children.reverse()) {
     if (child.exitCode === null) child.kill("SIGTERM");
   }
