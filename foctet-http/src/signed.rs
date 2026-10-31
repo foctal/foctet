@@ -51,7 +51,7 @@ pub(crate) fn verify(
         _ => None,
     };
     let mut signature = [0; 64];
-    for (out, pair) in signature.iter_mut().zip(hex.chunks_exact(2)) {
+    for (out, pair) in signature.iter_mut().zip(hex.as_chunks::<2>().0) {
         *out = digit(pair[0])
             .zip(digit(pair[1]))
             .map(|(a, b)| a * 16 + b)
