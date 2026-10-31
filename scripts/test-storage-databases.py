@@ -68,4 +68,4 @@ for kind, image, port, options, readiness in cases:
         run(["cargo", "test", "-p", "foctet-storage", "--all-features", "--locked", "--test", "databases", test, "--", "--ignored"], env=env)
     finally:
         if created:
-            run(["docker", "rm", "-f", name])
+            run(["docker", "rm", "-f", "-v", name])
