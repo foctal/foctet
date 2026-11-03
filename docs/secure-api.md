@@ -26,6 +26,11 @@ lease from an active `Session`; a second endpoint of the same shape fails with
 `CoreError::EndpointAlreadyClaimed`. This prevents two endpoints from starting
 the same `(direction, key_id, stream_id)` sequence at zero.
 
+Live message, datagram, framed, and stream endpoints do not implement `Clone`.
+Sharing a channel requires synchronizing access to the same endpoint (for example,
+with a mutex), not copying its sequence counters or replay windows. To create an
+independent channel, establish a fresh authenticated session with fresh keys.
+
 The advanced
 `dangerously_from_shared_keys_without_nonce_ownership` constructors exist for
 vector generation and integrations with an externally proven nonce-ownership

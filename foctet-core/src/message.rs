@@ -94,7 +94,15 @@ pub struct DecodedMessage {
 /// This type performs no I/O; pair it with a message transport adapter (for
 /// example a raw WebSocket connection) that moves the returned bytes preserving
 /// message boundaries.
-#[derive(Clone, Debug)]
+///
+/// Owns its sequence and replay state. Share access through synchronization;
+/// cloning an endpoint would duplicate a live nonce domain.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<foctet_core::MessageEndpoint>();
+/// ```
+#[derive(Debug)]
 pub struct MessageEndpoint {
     keys: Vec<KeyHandle>,
     active_key_id: u8,

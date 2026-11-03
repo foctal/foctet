@@ -200,7 +200,15 @@ pub struct DecodedFrame {
 }
 
 /// Framed Foctet transport over a poll-based I/O backend.
-#[derive(Clone, Debug)]
+///
+/// Sequence, replay, and buffered-write state have one owner, even when the
+/// underlying I/O handle can be cloned. Synchronize access to share a transport.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<foctet_core::FoctetFramed<()>>();
+/// ```
+#[derive(Debug)]
 pub struct FoctetFramed<T> {
     io: T,
     keys: Vec<KeyHandle>,
@@ -785,7 +793,14 @@ impl<T: PollIo + Unpin> Sink<Vec<u8>> for FoctetFramed<T> {
 }
 
 /// Plain byte-stream convenience wrapper over [`FoctetFramed`].
-#[derive(Clone, Debug)]
+///
+/// The wrapper cannot duplicate the underlying transport's nonce state.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<foctet_core::FoctetStream<()>>();
+/// ```
+#[derive(Debug)]
 pub struct FoctetStream<T> {
     framed: FoctetFramed<T>,
     read_buf: BytesMut,
