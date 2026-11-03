@@ -33,9 +33,14 @@ framing). The full suite (handshakes, Ed25519) is impractically slow under Miri:
 
 ```bash
 for filter in replay:: payload:: limits:: control:: sequence:: crypto:: frame::; do
-  cargo +nightly miri test -p foctet-core --no-default-features --locked -- "$filter"
+  RUSTFLAGS='--cfg sha2_backend="soft"' \
+    cargo +nightly miri test -p foctet-core --no-default-features --locked -- "$filter"
 done
 ```
+
+Use SHA-2's software backend for these interpreter runs because Miri does not
+support every native cryptographic instruction, including AArch64 SHA-256.
+Normal builds and native tests continue to use the default backend selection.
 
 ## Fuzzing
 
