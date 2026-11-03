@@ -1,6 +1,6 @@
 {
   "name": "@foctet/worker-storage",
-  "version": "0.6.0-dev",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "exports": {
