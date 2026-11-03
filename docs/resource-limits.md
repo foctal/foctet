@@ -10,6 +10,8 @@ Size configurable limits for the workload and available memory.
 | Ed25519 identity/signature | 32 / 64 bytes | Fixed by the wire format | Fixed-size decoding precedes signature verification |
 | Outer-channel binding | 1–1024 bytes | 1024 bytes | `ChannelBinding::new` checks before copying or transcript hashing |
 | Frame ciphertext | 16 MiB | Configured receiver limit | Header length is checked before body allocation |
+| Payload TLV sequence | 16 MiB + 6 bytes | 16 MiB + 6 bytes | Entire sequence is validated before allocating record values |
+| Payload TLV records | 4096 | 4096 | Includes empty and unknown records; encoder and decoder enforce the same bound |
 | Buffered framed output | 64 MiB | Configured sender limit | Checked before frame enqueue |
 | Replay window | 4096 slots | 65,536 slots | Configuration is clamped before bitmap allocation |
 | Replay windows / inbound stream IDs | 1024 | 4096 | New map entries are rejected at capacity |

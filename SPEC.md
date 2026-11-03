@@ -626,6 +626,13 @@ Inside ciphertext, define a simple TLV:
 
 This allows future features (ack hints, compression hints, file metadata) without changing plaintext header.
 
+The reference implementation bounds one decoded sequence to 4,096 records and
+16 MiB + 6 encoded bytes (one maximum-sized value plus its header). These are
+resource limits, not new wire fields. Empty and unknown records count toward the
+record limit. The decoder validates the entire sequence before allocating values;
+the encoder applies the same limits. Profiles that need larger payloads should
+split them into bounded frames instead of increasing these limits implicitly.
+
 ### 14.3 Unknown-Type Handling Policy
 
 Draft v0 behavior:
