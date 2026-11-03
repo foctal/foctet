@@ -4,6 +4,19 @@
 
 Target version: 0.6.0.
 
+### Security
+
+- Remove `Clone` from `MessageEndpoint`, `DatagramEndpoint`, `FoctetFramed`,
+  and `FoctetStream`. Cloning live sequence state could reuse an AEAD nonce
+  with the same traffic key and fork replay protection. Share a single endpoint
+  through synchronization instead; never duplicate or restore live session state.
+  Compile-fail tests enforce this security-related API removal.
+- Bound TLV sequences to 4,096 records and 16 MiB plus one record header,
+  including unknown and empty records. Validate complete batches before copying
+  values and allocate encoding/decoding output once. Oversized sequences now
+  return `TlvTooLarge`; ordinary wire encodings and fixed vectors are unchanged.
+- Refresh locked dependencies to include available security fixes.
+
 ### Added
 
 - WebSocket adapters use websock 0.6.1 components. The message adapter depends
