@@ -89,7 +89,15 @@ pub struct DecodedDatagram {
 ///
 /// This type performs no I/O; pair it with a datagram transport adapter (for
 /// example a QUIC or WebTransport datagram socket) that moves the returned bytes.
-#[derive(Clone, Debug)]
+///
+/// Owns its sequence and replay state. Share access through synchronization;
+/// cloning an endpoint would duplicate a live nonce domain.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<foctet_core::DatagramEndpoint>();
+/// ```
+#[derive(Debug)]
 pub struct DatagramEndpoint {
     keys: Vec<KeyHandle>,
     active_key_id: u8,

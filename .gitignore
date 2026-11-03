@@ -32,3 +32,21 @@ foctet-wasm/pkg/
 foctet-wasm/pkg-node/
 foctet-wasm/pkg-web/
 node_modules/
+/foctet-storage-wire/examples/workers/build/
+
+# Local Cloudflare emulator state
+.wrangler/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+!.env.*.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+!.dev.vars.*.example
+*.key
+*.pem
+*.p12
+*.pfx

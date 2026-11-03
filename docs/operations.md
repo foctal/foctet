@@ -5,9 +5,8 @@ This guide covers resource sizing, metrics, and session lifecycle. See also
 
 ## Safe defaults and sizing
 
-Keep the library defaults unless a measured workload requires a lower value.
-Public configuration is clamped to protocol hard ceilings and cannot disable
-the bounds. In particular:
+Size limits for the workload and aggregate connection count. Configurable
+limits and fixed ceilings are listed in [resource limits](resource-limits.md).
 
 | Surface | Safe starting point | Sizing rule | Backpressure behavior |
 | --- | --- | --- | --- |
@@ -15,7 +14,7 @@ the bounds. In particular:
 | Messages | `DEFAULT_MAX_MESSAGE_SIZE` | Clamp to the backend's lower message limit | Queue rejection before acceptance is recoverable; backend send failure is terminal |
 | Datagrams | 1200-byte on-wire default | Lower it to the proven path MTU; never depend on fragmentation | Oversize output is rejected before delivery; loss is not backpressure |
 | HTTP bodies | 64 MiB one-shot default | Prefer streaming for large bodies and cap aggregate request concurrency | Streaming holds at most one undecoded maximum frame; incomplete bodies are rejected |
-| Archives | 512 MiB in-memory plaintext maximum | Budget plaintext plus encrypted chunks and metadata; use an application-level smaller cap under constrained runtimes | No streaming archive format exists; input above the cap is rejected |
+| Archives | 512 MiB in-memory plaintext maximum | Budget plaintext plus encrypted chunks and metadata; use an application-level smaller cap under constrained runtimes | Input above the in-memory cap is rejected; use the separate signed FOCTETFS streaming API for larger files |
 | Workers replay | One Durable Object entry per message ID until expiry | TTL multiplied by peak accepted request rate determines retained state | Store failure rejects the request; never bypass replay protection |
 
 To measure throughput and latency on your hardware, run:
@@ -57,11 +56,18 @@ by untrusted source input.
 ## Shutdown, cancellation, and restart
 
 Graceful shutdown stops admission first, lets already accepted writes flush up
-to a bounded deadline, and then discards every session. A cancelled or aborted
-write whose accepted-byte count is unknown is an ambiguous send and makes the
-channel terminal. An incomplete streaming body exposes no successful final
-plaintext. Partial reads, EOF, authentication failure, invalid control state,
-and backend close are terminal for the affected channel.
+to a bounded deadline, and then discards every session. Discard the channel after
+an ambiguous send unless the API explicitly retains the operation for resumption.
+In particular, cancelling `rekey_now` while flush is pending retains the exact
+prepared control; call `rekey_now` again to resume it. Ordinary send/receive
+operations return `RekeyInProgress` until it completes. See
+[error handling](error-handling.md#ambiguous-output-and-rekey).
+
+Incomplete streaming bodies may have released provisional plaintext chunks;
+do not commit their effects before successful finalization. Unexpected EOF,
+authentication failure, invalid control state, and backend close are terminal
+for the affected channel. Normal partial reads are buffered until a complete
+frame is available.
 
 Foctet has no persisted traffic-session or transport-resume format. After a
 process restart or reconnect, establish a fresh authenticated session. Durable

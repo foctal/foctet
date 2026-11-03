@@ -64,7 +64,7 @@ fn encode_split_archive_from_built(
     built: crate::types::BuiltArchive,
     target_part_size: usize,
 ) -> Result<SplitArchive, ArchiveError> {
-    let part_groups = partition_chunks(&built.chunks, target_part_size)?;
+    let part_groups = partition_chunks(built.chunks, target_part_size)?;
 
     let mut part_entries = Vec::with_capacity(part_groups.len());
     let mut parts = Vec::with_capacity(part_groups.len());

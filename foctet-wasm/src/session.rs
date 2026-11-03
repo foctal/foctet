@@ -43,7 +43,7 @@ fn validated_channel_binding_bytes(bytes: &[u8]) -> Result<Vec<u8>, CoreError> {
 /// An Ed25519 long-term identity key pair used to authenticate a handshake.
 #[wasm_bindgen(js_name = IdentityKeyPair)]
 pub struct WasmIdentityKeyPair {
-    inner: IdentityKeyPair,
+    pub(crate) inner: IdentityKeyPair,
 }
 
 #[wasm_bindgen(js_class = IdentityKeyPair)]
@@ -69,6 +69,12 @@ impl WasmIdentityKeyPair {
     #[wasm_bindgen(getter, js_name = publicKey)]
     pub fn public_key(&self) -> Vec<u8> {
         self.inner.public_key().to_vec()
+    }
+
+    /// Signs encrypted bytes and a purpose-specific canonical context.
+    #[wasm_bindgen(js_name = signCiphertext)]
+    pub fn sign_ciphertext(&self, ciphertext: &[u8], context: &[u8]) -> Vec<u8> {
+        foctet_core::sign_ciphertext(ciphertext, context, &self.inner).to_vec()
     }
 
     /// The 32-byte secret identity key. Handle with care.

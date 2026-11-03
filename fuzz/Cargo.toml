@@ -9,9 +9,10 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
+foctet-storage-wire = { path = "../foctet-storage-wire" }
 libfuzzer-sys = "0.4"
 foctet-core = { path = "../foctet-core" }
-foctet-archive = { path = "../foctet-archive" }
+foctet-archive = { path = "../foctet-archive", features = ["threshold"] }
 foctet-http = { path = "../foctet-http" }
 x25519-dalek = { workspace = true }
 
@@ -88,6 +89,13 @@ bench = false
 [[bin]]
 name = "archive_encoder"
 path = "fuzz_targets/archive_encoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "storage_formats"
+path = "fuzz_targets/storage_formats.rs"
 test = false
 doc = false
 bench = false

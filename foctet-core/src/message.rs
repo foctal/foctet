@@ -14,8 +14,9 @@
 //! - Unlike [`crate::datagram::DatagramEndpoint`] (datagram), the transport is
 //!   reliable and ordered, so the default maximum message size is large
 //!   ([`DEFAULT_MAX_MESSAGE_SIZE`]) rather than MTU-bounded. The replay window is
-//!   still used, so duplicate or reordered messages (e.g. from a buggy or hostile
-//!   peer) are rejected, and **replay state is committed only after AEAD
+//!   combined with monotonic sequence checks per `(key_id, stream_id)`, so
+//!   duplicate or older messages in that domain are rejected. Gaps and ordering
+//!   across domains are not checked, and **replay state is committed only after AEAD
 //!   authentication**.
 //! - **Fail-closed endpoint lifetime.** Authentication, parsing, replay, key,
 //!   or sequence failures make an endpoint terminal; applications must create
@@ -93,7 +94,15 @@ pub struct DecodedMessage {
 /// This type performs no I/O; pair it with a message transport adapter (for
 /// example a raw WebSocket connection) that moves the returned bytes preserving
 /// message boundaries.
-#[derive(Clone, Debug)]
+///
+/// Owns its sequence and replay state. Share access through synchronization;
+/// cloning an endpoint would duplicate a live nonce domain.
+///
+/// ```compile_fail
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<foctet_core::MessageEndpoint>();
+/// ```
+#[derive(Debug)]
 pub struct MessageEndpoint {
     keys: Vec<KeyHandle>,
     active_key_id: u8,
@@ -328,7 +337,7 @@ impl MessageEndpoint {
             })?;
 
         let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
-        self.replay.check_and_record(
+        self.replay.check_and_record_ordered(
             frame.header.key_id,
             frame.header.stream_id,
             frame.header.seq,
@@ -365,6 +374,19 @@ mod tests {
         let opened = server.open(&msg).expect("open");
         assert_eq!(opened.plaintext, b"hello message");
         assert_eq!(opened.header.seq, 0);
+    }
+
+    #[test]
+    fn authenticated_reordering_is_terminal() {
+        let (mut client, mut server) = endpoints();
+        let first = client.seal(0, 0, b"first").unwrap();
+        let second = client.seal(0, 0, b"second").unwrap();
+        server.open(&second).unwrap();
+        assert!(matches!(server.open(&first), Err(CoreError::Replay)));
+        assert!(matches!(
+            server.open(&second),
+            Err(CoreError::TransportTerminal)
+        ));
     }
 
     #[test]

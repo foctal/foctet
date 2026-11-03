@@ -1,0 +1,7 @@
+{
+  "description": "Ed25519 over the domain-separated SHA-256 ciphertext transcript",
+  "secret_key_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+  "context_utf8": "tenant/id/version",
+  "ciphertext_utf8": "sealed record",
+  "signature_hex": "6fcfecae3dbe4e1f21b7e66007bf4544f28925f977f4dddc2b0451861e920c1f8fcf0120e57db2bcfc45780f9882fd2d12ab31775248079a0f3b7f5dba62ef00"
+}

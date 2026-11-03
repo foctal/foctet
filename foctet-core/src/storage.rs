@@ -14,8 +14,12 @@
 //! The binding is authenticated but not secret: the descriptor bytes are folded
 //! into the AEAD associated data and are **not** stored in the envelope, so the
 //! reader must supply a byte-identical [`StorageRecord`] to open it. This is a
-//! zero-knowledge storage building block — only the client holds a key; the
+//! confidentiality building block — only the client holds a key; the
 //! server stores and returns bytes.
+//!
+//! This API does not authenticate writers: anyone with the recipient public key
+//! can create a new valid envelope. Use [`crate::sign_ciphertext`] and verify the
+//! detached signature against a pinned writer before opening untrusted storage.
 //!
 //! Rollback protection is only as strong as the reader's knowledge of the
 //! current version: bind the version the caller *expects* (tracked client-side
@@ -60,22 +64,22 @@ impl<'a> StorageRecord<'a> {
     /// tag, then each variable-length field length-prefixed, then the
     /// fixed-width version. Length-prefixing prevents a `(namespace, record_id)`
     /// pair from colliding with a different split of the same concatenated bytes.
-    fn to_aad(self) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(
-            STORAGE_RECORD_AAD_DOMAIN.len()
-                + 8
-                + self.namespace.len()
-                + 8
-                + self.record_id.len()
-                + 8,
-        );
+    fn to_aad(self, limits: &BodyEnvelopeLimits) -> Result<Vec<u8>, BodyEnvelopeError> {
+        let length = STORAGE_RECORD_AAD_DOMAIN
+            .len()
+            .checked_add(24)
+            .and_then(|n| n.checked_add(self.namespace.len()))
+            .and_then(|n| n.checked_add(self.record_id.len()))
+            .filter(|&n| n <= limits.max_context_len)
+            .ok_or(BodyEnvelopeError::LimitExceeded("context_len"))?;
+        let mut aad = Vec::with_capacity(length);
         aad.extend_from_slice(STORAGE_RECORD_AAD_DOMAIN);
         aad.extend_from_slice(&(self.namespace.len() as u64).to_be_bytes());
         aad.extend_from_slice(self.namespace);
         aad.extend_from_slice(&(self.record_id.len() as u64).to_be_bytes());
         aad.extend_from_slice(self.record_id);
         aad.extend_from_slice(&self.version.to_be_bytes());
-        aad
+        Ok(aad)
     }
 }
 
@@ -113,7 +117,7 @@ pub fn seal_storage_record_with_limits(
         plaintext,
         recipient_public_key,
         recipient_key_id,
-        &record.to_aad(),
+        &record.to_aad(limits)?,
         limits,
     )
 }
@@ -144,7 +148,60 @@ pub fn open_storage_record_with_limits(
     record: StorageRecord<'_>,
     limits: &BodyEnvelopeLimits,
 ) -> Result<Vec<u8>, BodyEnvelopeError> {
-    open_body_with_context(envelope, recipient_secret_key, &record.to_aad(), limits)
+    open_body_with_context(
+        envelope,
+        recipient_secret_key,
+        &record.to_aad(limits)?,
+        limits,
+    )
+}
+
+/// Seals a record and authenticates its writer with a detached signature.
+///
+/// Persist both returned values. Verify with [`open_signed_storage_record`],
+/// using an externally pinned writer and expected record version.
+pub fn seal_signed_storage_record(
+    plaintext: &[u8],
+    recipient_public_key: [u8; 32],
+    recipient_key_id: &[u8],
+    record: StorageRecord<'_>,
+    writer: &dyn crate::HandshakeSigner,
+    limits: &BodyEnvelopeLimits,
+) -> Result<(Vec<u8>, [u8; 64]), BodyEnvelopeError> {
+    let aad = record.to_aad(limits)?;
+    let ciphertext = seal_body_with_context(
+        plaintext,
+        recipient_public_key,
+        recipient_key_id,
+        &aad,
+        limits,
+    )?;
+    let signature = crate::sign_ciphertext(&ciphertext, &aad, writer);
+    Ok((ciphertext, signature))
+}
+
+/// Verifies the pinned writer before opening a stored record.
+///
+/// A writer key received from the untrusted store is not a valid trust anchor.
+/// The expected version must also come from a trusted checkpoint to detect rollback.
+pub fn open_signed_storage_record(
+    envelope: &[u8],
+    signature: [u8; 64],
+    recipient_secret_key: [u8; 32],
+    record: StorageRecord<'_>,
+    writer: crate::PeerIdentity,
+    limits: &BodyEnvelopeLimits,
+) -> Result<Vec<u8>, BodyEnvelopeError> {
+    let aad = record.to_aad(limits)?;
+    let max_envelope = limits
+        .max_header_bytes
+        .saturating_add(limits.max_payload_len);
+    if envelope.len() > max_envelope {
+        return Err(BodyEnvelopeError::LimitExceeded("envelope_len"));
+    }
+    crate::verify_ciphertext(envelope, &aad, signature, writer)
+        .map_err(|_| BodyEnvelopeError::DecryptFailed)?;
+    open_body_with_context(envelope, recipient_secret_key, &aad, limits)
 }
 
 #[cfg(test)]
@@ -158,6 +215,60 @@ mod tests {
         let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
         let public = PublicKey::from(&secret).to_bytes();
         (secret.to_bytes(), public)
+    }
+
+    #[test]
+    fn malicious_store_cannot_replace_a_signed_record() {
+        let (secret, public) = keypair();
+        let writer = crate::IdentityKeyPair::from_secret_key_bytes([42; 32]);
+        let pin = crate::PeerIdentity::new(writer.public_key());
+        let limits = BodyEnvelopeLimits::default();
+        let record = StorageRecord::new(b"vault", b"item", 7);
+        let (sealed, signature) =
+            seal_signed_storage_record(b"original", public, b"kid", record, &writer, &limits)
+                .unwrap();
+        assert_eq!(
+            open_signed_storage_record(&sealed, signature, secret, record, pin, &limits).unwrap(),
+            b"original"
+        );
+        // A store knows the public key and descriptor and can encrypt arbitrary
+        // replacements. Encryption alone accepts them; writer verification must not.
+        let replacement = seal_storage_record(b"forged", public, b"kid", record).unwrap();
+        assert_eq!(
+            open_storage_record(&replacement, secret, record).unwrap(),
+            b"forged"
+        );
+        assert!(
+            open_signed_storage_record(&replacement, signature, secret, record, pin, &limits)
+                .is_err()
+        );
+        assert!(
+            open_signed_storage_record(
+                &sealed,
+                signature,
+                secret,
+                StorageRecord::new(b"vault", b"item", 8),
+                pin,
+                &limits
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn descriptor_budget_is_checked_before_encoding() {
+        let record = StorageRecord::new(b"ns", b"id", 1);
+        let length = STORAGE_RECORD_AAD_DOMAIN.len() + 24 + 4;
+        let mut limits = BodyEnvelopeLimits {
+            max_context_len: length,
+            ..Default::default()
+        };
+        assert_eq!(record.to_aad(&limits).unwrap().len(), length);
+        limits.max_context_len -= 1;
+        assert!(matches!(
+            record.to_aad(&limits),
+            Err(BodyEnvelopeError::LimitExceeded("context_len"))
+        ));
     }
 
     #[test]

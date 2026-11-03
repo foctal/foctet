@@ -600,7 +600,7 @@ pub(crate) fn unwrap_content_key(
     key_id: &[u8],
     recipient_secret_key: [u8; 32],
     ephemeral_public_key: [u8; 32],
-) -> Result<[u8; CONTENT_KEY_LEN], BodyEnvelopeError> {
+) -> Result<Zeroizing<[u8; CONTENT_KEY_LEN]>, BodyEnvelopeError> {
     let recipient_priv = StaticSecret::from(recipient_secret_key);
     let recipient_public = PublicKey::from(&recipient_priv).to_bytes();
     // Deliberately collapse invalid peer keys into the same error as an
@@ -613,21 +613,23 @@ pub(crate) fn unwrap_content_key(
 
     let cipher = XChaCha20Poly1305::new_from_slice(&wrap_key[..])
         .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
-    let unwrapped = cipher
-        .decrypt(
-            &XNonce::try_from(&wrap_nonce[..]).expect("fixed-size nonce"),
-            Payload {
-                msg: wrapped_key,
-                aad: key_id,
-            },
-        )
-        .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?;
+    let unwrapped = Zeroizing::new(
+        cipher
+            .decrypt(
+                &XNonce::try_from(&wrap_nonce[..]).expect("fixed-size nonce"),
+                Payload {
+                    msg: wrapped_key,
+                    aad: key_id,
+                },
+            )
+            .map_err(|_| BodyEnvelopeError::KeyUnwrapFailed)?,
+    );
 
     if unwrapped.len() != CONTENT_KEY_LEN {
         return Err(BodyEnvelopeError::KeyUnwrapFailed);
     }
 
-    let mut out = [0u8; CONTENT_KEY_LEN];
+    let mut out = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
     out.copy_from_slice(&unwrapped);
     Ok(out)
 }

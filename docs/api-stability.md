@@ -1,6 +1,6 @@
 # API and format stability
 
-Foctet is experimental. Rust and TypeScript APIs and the Draft v0 wire format
+Rust and TypeScript APIs and the Draft v0 wire format
 may change incompatibly during the `0.x` release line. Check the specification
 and test vectors when upgrading communicating peers together.
 
@@ -21,3 +21,6 @@ Wire changes must update [SPEC.md](../SPEC.md) and the
 [test vectors](../test-vectors/README.md) together. See
 [testing](testing.md) for compatibility checks and
 [security policy](../SECURITY.md#supported-versions) for supported releases.
+
+Release-specific API changes and upgrade notes are recorded in
+[CHANGELOG.md](../CHANGELOG.md).

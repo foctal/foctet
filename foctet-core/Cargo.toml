@@ -31,7 +31,7 @@ getrandom.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.48", features = ["io-util"], optional = true }
+tokio = { version = "1.54.1", features = ["io-util"], optional = true }
 x25519-dalek.workspace = true
 zeroize.workspace = true
 

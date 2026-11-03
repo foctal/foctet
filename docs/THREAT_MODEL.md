@@ -1,16 +1,9 @@
 # Foctet Threat Model
 
-**Document version:** 1.0 (2026-07-02) · applies to the Draft v0 wire format /
-the `0.x` release line.
-
-This document describes what Foctet defends against, what it explicitly does
-not, and which residual risks an integrating application must handle itself.
-It complements `SPEC.md` (wire format, §3 summarizes the adversary),
-`SECURITY.md` (security status, reporting), and
-`docs/recommended-deployments.md` (composition guidance). Where this document
-and the code disagree, that is a bug — please report it.
-
----
+This model applies to Draft v0 and the `0.x` release line. It describes the
+adversary, protocol defenses, and risks that applications must address.
+See the [specification](../SPEC.md) for wire rules and
+[security policy](../SECURITY.md) for vulnerability reporting.
 
 ## 1. System model
 
@@ -28,9 +21,9 @@ A Foctet deployment has up to four kinds of parties:
   TLS terminators) and platform services (Redis / Durable Objects used as
   replay stores).
 
-Foctet's core promise: **only endpoints see plaintext.** Relays, storage, and
-infrastructure are untrusted for confidentiality and integrity (at most
-honest-but-curious, potentially malicious).
+Relays and storage are untrusted for confidentiality and integrity. They must
+not hold decryption keys or have access to an endpoint's decryption service.
+Replay authorities are trusted for atomicity and retention of replay decisions.
 
 ## 2. Adversary capabilities
 
@@ -62,9 +55,9 @@ the handshake, splitting one session into two.
 closed**: a default `SessionAuthConfig` refuses to complete without peer
 authentication. Two production mechanisms exist:
 
-- **Ed25519 identity authentication** — each side signs the handshake
-  transcript hash (which covers both ephemerals and the session salt) with a
-  long-term identity key; the peer verifies against a **pinned** identity
+- **Ed25519 identity authentication** — each side signs its handshake
+  transcript inputs with a long-term identity key; the server signature binds
+  both ephemerals and the session salt. The peer verifies against a **pinned** identity
   (`PeerIdentity`). The verified key is exposed as
   `Session::authenticated_peer()`. Signing can be delegated to an HSM/KMS via
   the `HandshakeSigner` trait so the identity secret never enters process
@@ -83,6 +76,16 @@ Alice". A wrong or attacker-supplied pinned key defeats authentication.
 Trust-on-first-use, directories, and revocation are out of scope for v0
 (see §3.9 on key loss).
 
+### Public-key envelope writer authentication
+
+The body and archive formats do not authenticate a sender. A storage adversary
+with the recipient public key can construct a fresh, valid ciphertext, including
+one with the expected storage descriptor. Require a detached writer signature
+verified against a trusted pin (or a separate authenticated write mechanism).
+The signed storage helpers compose this check before decryption. Context binding
+and AEAD integrity alone do not establish writer identity. Version checkpoints
+must be independently trusted to reject an older, correctly signed object.
+
 ### 3.2 Replay
 
 **Threat.** The attacker re-delivers a previously valid ciphertext: a frame in
@@ -94,7 +97,7 @@ a session, a datagram, a sealed HTTP request, a whole streaming body.
   `(key_id, stream_id, seq)`; receivers keep a sliding replay window per
   `(key_id, stream_id)` and reject duplicates. Replay state is committed
   **only after AEAD authentication**, so a forged high sequence number cannot
-  desynchronize the window (this ordering is regression-tested). The number of
+  desynchronize the window. The number of
   tracked windows is capped (`max_replay_windows`) to bound memory.
 - **HTTP one-shot and streaming bodies** — the `*_with_context` path binds a
   `ProtectedContext` (method, path, query, direction, timestamp, expiry, a
@@ -119,8 +122,10 @@ choice matters: a replay-store entry must outlive the freshness window.
 **Threat.** The attacker reorders frames, truncates a stream early, or splices
 ciphertext from one context into another.
 
-**Defense.** Byte-stream and message sessions enforce ordering via the replay
-window; the streaming body format requires strictly sequential chunk indices,
+**Defense.** Byte-stream and message receivers reject non-increasing sequence
+numbers within each `(key_id, stream_id)` after authentication. They do not
+detect every missing frame or impose order across streams or retained key
+generations. The streaming body format requires strictly sequential chunk indices,
 authenticates chunk position (`index` in the AAD), and requires exactly one
 authenticated FINAL chunk — a truncated, extended, reordered, or duplicated
 stream fails to verify (`is_finished()` must be true before the plaintext is
@@ -142,8 +147,8 @@ application needing ordering on datagrams must layer it.
   active `old_key_id` and `new_key_id = old + 1`; stale, replayed, or jumped
   rekeys are rejected, and the rekey transcript binding covers the new
   ratchet public key. An attacker cannot force traffic back onto an old key:
-  retained previous keys are decrypt-only and bounded
-  (`max_retained_keys`).
+  normal sending uses the active generation, and retention of previous keys
+  is bounded (`max_retained_keys`).
 - **Sequence rollback (self-inflicted)** — restoring session state with reset
   counters would reuse nonces. Foctet ships **no session-persistence format**
   and the spec forbids restoring outbound sequence state; after a crash,
@@ -160,22 +165,32 @@ application needing ordering on datagrams must layer it.
   (forward secrecy at session granularity).
 - **Within a session** — rekey is a **DH ratchet**: each rekey mixes a fresh
   ephemeral DH output into a root chain, and rekeys alternate between peers.
-  Keys before the compromise stay safe (forward secrecy); after a compromise,
-  security heals once both peers have taken a ratchet turn
+  Erased keys before the compromise stay safe (forward secrecy); retained
+  previous generations are still exposed. After a passive state compromise,
+  security can heal once both peers have taken a fresh ratchet turn
   (post-compromise security). Under one-directional traffic the alternation
   stalls (the quiet side never takes its turn); rekey periodically from both
   ends.
+- **Stored envelopes** — body, storage and archive encryption does not provide
+  forward secrecy against recipient private-key compromise. Captured ciphertext
+  can be opened with that key. Session ratcheting does not protect these formats.
+  An attacker with continued endpoint access can observe replacement keys too;
+  post-compromise recovery assumes that access has ended.
 - **Long-term identity compromise** — an attacker holding the Ed25519 identity
   key can impersonate the endpoint in *new* handshakes (it cannot decrypt
   past traffic — the identity key only signs). Revocation/rotation of
   identities is the application's responsibility (see `docs/POLICIES.md`);
   using a `HandshakeSigner` backed by an HSM/KMS reduces exfiltration risk.
 
-**In-process hygiene** (reduces exposure window, not a boundary): traffic-key
-bytes live in exactly one place (`TrafficKeys` is non-`Clone`, shared via
-`KeyHandle`), are zeroized on drop, redacted in `Debug` output, and compared
-in constant time; secret-returning APIs are `expose_`-prefixed and return
-`Zeroizing` buffers. On WASM, zeroization cannot be guaranteed across the JS
+**In-process hygiene** (reduces exposure window, not a boundary): `TrafficKeys`
+is non-`Clone` and shared via `KeyHandle`; its owned bytes are zeroized when the
+last handle is dropped, redacted in `Debug`, and compared in constant time.
+Closing a session erases its root and ephemeral secret but cannot erase keys
+held by external handles, prepared rekeys, or independently owned signers.
+Some low-level APIs, including `TrafficKeys::key_for`, DH helpers, and root-key
+derivation, return raw secret copies. Wrap these in `Zeroizing` immediately and
+never log them; zeroization cannot guarantee removal of all compiler-created
+copies or snapshots. On WASM, zeroization cannot be guaranteed across the JS
 boundary (JS engines copy freely) and keys are extractable bytes — treat a
 compromised page/extension context as a compromised endpoint.
 
@@ -184,11 +199,11 @@ compromised page/extension context as a compromised endpoint.
 **Threat.** A malicious relay or storage provider reads, modifies, reorders,
 or selectively drops what passes through it.
 
-**Defense.** Relays and storage never hold traffic keys; payloads are AEAD-
-protected end to end, headers are authenticated as AAD, and archive metadata
+**Defense.** When relays and storage hold no decryption keys, payloads remain encrypted.
+Headers are authenticated as AAD, and archive metadata
 (file names, content types) is encrypted — a relay sees only routing-level
-framing (see §3.8 for what leaks). Modification anywhere fails authentication
-at the endpoint. Split archives authenticate each part and bind parts to the
+framing (see §3.8 for what leaks). Modification of existing ciphertext fails authentication
+at the endpoint; rejecting fresh replacement envelopes requires writer authentication. Split archives authenticate each part and bind parts to the
 manifest, so a storage provider cannot swap or truncate parts undetected.
 
 **Residual risk.** Availability: a malicious relay can always drop or delay
@@ -206,14 +221,12 @@ endpoint as an amplifier.
   `DatagramConfig::max_datagram_size`; archive limits). Replay-window count is
   capped. Handshake reads are bounded by timeouts on both the Tokio path
   (`DEFAULT_HANDSHAKE_TIMEOUT`) and the runtime-agnostic futures path.
-- **Authenticate-before-commit** everywhere: forged input cannot mutate
-  replay/session state, so an off-path attacker cannot poison a session.
+- **Authenticate before updating replay state:** forged frames cannot advance
+  the replay window. Invalid input may terminate the affected channel.
 - **UDP anti-amplification** — the raw-UDP adapter rejects unconnected sockets,
   and its unvalidated-server constructor always installs a QUIC-style 3x
   limiter. Until validation, an endpoint cannot send more than three times the
   bytes received. QUIC/WebTransport enforce this at the transport layer.
-- Parsers for every attacker-facing format are fuzzed continuously (7 targets,
-  seeded, time-budgeted in CI).
 
 **Residual risk.** The transport crate provides token-bucket handshake rate
 limiting and RAII concurrency admission, but applications must install and
@@ -245,9 +258,11 @@ Foctet's own header must be hidden from a specific hop.
 
 **Threat.** The holder of the only decryption key loses it.
 
-**Position.** Foctet is strictly end-to-end: there is **no key escrow and no
-recovery path**. Losing the recipient secret for a body envelope or archive
-makes the data permanently unreadable; losing an identity key means
+**Position.** Foctet is strictly end-to-end: there is **no built-in key escrow** for lost endpoint keys. Optional archive threshold recovery can
+protect a separately generated archive recipient key when shares were provisioned
+before loss; it does not recover arbitrary sessions or lost identity keys. Losing
+the only recipient secret without a backup or threshold recovery set makes the
+data permanently unreadable; losing an identity key means
 re-establishing trust out of band. Archives support **multiple recipients**
 (the DEK is wrapped per recipient), which is the supported mitigation: wrap to
 a backup/escrow recipient key *that the application controls* if recovery is a
@@ -260,16 +275,16 @@ specified in `docs/POLICIES.md`.
 
 - Keys and plaintext cross the JS boundary as `Uint8Array`s; JS engines may
   copy them arbitrarily — zeroization guarantees stop at the boundary.
-- No non-extractable key storage: WebCrypto has no portable non-extractable
-  X25519/Ed25519 type, so a compromised page context (XSS, malicious
-  extension) can exfiltrate keys. Treat the browsing context as the endpoint's
+- The SDK exposes raw key bytes and does not provide non-extractable key
+  storage, so a compromised page context (XSS, malicious extension) can
+  exfiltrate keys. Treat the browsing context as the endpoint's
   trust boundary and apply standard web hardening (CSP, no untrusted scripts).
-- The wasm runtime has no monotonic clock: age-based rekey is disabled there
+- On `wasm32-unknown-unknown`, age-based rekey is disabled
   (frame/byte-count thresholds still apply); long-lived WASM sessions should
   drive rekey explicitly.
 
 Wire compatibility between Rust and JS is pinned by interop fixtures (Node
-opens Rust-produced envelopes) and in-browser tests in CI.
+opens Rust-produced envelopes) and the in-browser runtime test suite.
 
 ## 4. Explicit non-goals
 
@@ -280,9 +295,7 @@ opens Rust-produced envelopes) and in-browser tests in CI.
   holding the transcript).
 - Protection of a compromised endpoint's own plaintext.
 
-## 5. Assurance status
+## 5. Verification and reporting
 
-Defenses above are implemented and regression-tested (unit, property,
-conformance across real transports, fuzzing in CI, cross-language interop,
-in-browser runtime tests). Report suspected gaps via the process in
-`SECURITY.md`.
+See [testing](testing.md) for regression, interoperability, and fuzzing commands.
+Report suspected security gaps through [SECURITY.md](../SECURITY.md).

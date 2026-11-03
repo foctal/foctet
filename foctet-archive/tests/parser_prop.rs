@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 use foctet_archive::{
     ArchiveOptions, create_archive_from_bytes, create_split_archive_from_bytes,
     decrypt_archive_to_bytes, decrypt_split_archive_to_bytes,

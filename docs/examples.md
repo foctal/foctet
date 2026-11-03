@@ -1,6 +1,7 @@
 # Example Guide
 
-This guide collects the recommended Foctet examples by deployment style.
+Run commands from the repository root unless a different directory is shown.
+Examples use fixed test keys; replace them with application-managed identities.
 
 ## Start Here
 
@@ -21,9 +22,7 @@ This guide collects the recommended Foctet examples by deployment style.
 cargo run -p foctet --example secure_channel_tokio
 ```
 
-- Uses pinned Ed25519 peer identities.
-- Completes the native Foctet handshake before application data is exchanged.
-- Best first read if you want to understand the core secure-channel flow.
+The peers authenticate with pinned Ed25519 identities before exchanging data.
 
 ### Sync variant
 
@@ -89,7 +88,7 @@ Run local Worker development:
 
 ```bash
 cd foctet-http/examples/workers-echo
-npm i -D wrangler@latest
+npm ci
 npx wrangler dev
 ```
 
@@ -99,11 +98,9 @@ Run the Rust client in another terminal:
 cargo run -p foctet-http --example workers_echo_client
 ```
 
-These examples encrypt the HTTP body bytes and, on the protected-context path,
-also authenticate the request metadata bound into the AEAD
-(method/path/query/message-id/timestamp/expiry). Keep the outer channel
-authenticated and keep the advisory `x-foctet-scope: body-only` header unless
-you have a compatibility reason not to.
+This example uses Durable Object replay storage. See the
+[Worker README](../foctet-http/examples/workers-echo/README.md) for rejection
+and key-rotation tests. Use HTTPS and application authorization when adapting it.
 
 ## Archive and File Examples
 
@@ -137,4 +134,5 @@ These remain useful for lower-level experimentation, but new production integrat
 cargo run -p foctet --example gen_vectors
 ```
 
-This rewrites the deterministic vectors under `test-vectors/`.
+This rewrites the deterministic vectors under `test-vectors/`. Run it only when
+intentionally updating the format or fixtures, not as part of routine tests.

@@ -4,7 +4,7 @@ Local dev with a project-local Wrangler install:
 
 ```bash
 cd foctet-http/examples/workers-echo
-npm i -D wrangler@latest
+npm ci
 npx wrangler dev
 ```
 

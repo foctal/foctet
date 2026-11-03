@@ -13,6 +13,6 @@ crate-type = ["cdylib"]
 # crypto dependency here. All sealing/opening happens on the client with
 # `foctet_core::storage`.
 [dependencies]
-worker = "0.8.5"
+worker = "0.8.7"
 
 [workspace]

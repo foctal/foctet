@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 
 const exampleDir = resolve(import.meta.dirname, "..");
 const repoDir = resolve(exampleDir, "../../..");
@@ -26,11 +29,15 @@ function run(command, args, env = {}) {
 
 async function startWorker() {
   worker = spawn(
-    "npx",
-    ["wrangler", "dev", "--port", "8787", "--persist-to", stateDir],
+    process.execPath,
+    [require.resolve("wrangler"), "dev", "--port", "8787", "--persist-to", stateDir],
     { cwd: exampleDir, stdio: "inherit" },
   );
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  let spawnError;
+  worker.on("error", (error) => { spawnError = error; });
+  // A clean Rust/WASM build can take several minutes on Windows runners.
+  for (let attempt = 0; attempt < 1200; attempt += 1) {
+    if (spawnError) throw spawnError;
     if (worker.exitCode !== null) throw new Error("wrangler exited before becoming ready");
     try {
       await fetch(`${workerUrl}/health`);
@@ -44,8 +51,19 @@ async function startWorker() {
 
 async function stopWorker() {
   if (!worker || worker.exitCode !== null) return;
-  worker.kill("SIGTERM");
-  await new Promise((resolvePromise) => worker.once("exit", resolvePromise));
+  const exited = new Promise((resolvePromise) => worker.once("exit", resolvePromise));
+  if (process.platform === "win32") {
+    // Windows does not propagate termination to Wrangler's workerd children.
+    try {
+      await run("taskkill", ["/pid", String(worker.pid), "/T", "/F"]);
+    } catch (error) {
+      // A child may exit during tree termination; require the parent to exit.
+      if (worker.exitCode === null && worker.signalCode === null) throw error;
+    }
+  } else {
+    worker.kill("SIGTERM");
+  }
+  await exited;
 }
 
 const client = (path, env) =>
@@ -71,13 +89,13 @@ try {
     EXPECTED_STATUS: "409",
   });
 
-  // The DO alarm removes the marker at protected-context expiry.
+  // Retention includes 30 seconds of skew and the inclusive final second.
   await client("/foctet", {
     FIXED_MESSAGE_ID_BYTE: "b6",
     CONTEXT_TTL_SECS: "1",
     EXPECTED_STATUS: "200",
   });
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 3000));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 33000));
   await client("/foctet", {
     FIXED_MESSAGE_ID_BYTE: "b6",
     CONTEXT_TTL_SECS: "1",
@@ -91,5 +109,5 @@ try {
   });
 } finally {
   await stopWorker();
-  await rm(stateDir, { recursive: true, force: true });
+  await rm(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }

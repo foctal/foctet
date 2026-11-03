@@ -28,17 +28,21 @@
 //!   unique per build.
 //! - The current byte-vector builders are deliberately capped at
 //!   [`MAX_IN_MEMORY_PLAINTEXT_BYTES`]. They are not a general large-file
-//!   streaming API; callers needing larger files must split at an application
-//!   boundary or wait for an authenticated streaming archive format.
+//!   streaming API; use [`streaming`] for bounded-memory signed files.
 
 mod build;
 mod codec;
 mod crypto;
 mod error;
 mod limits;
+mod signed;
 mod single;
 mod split;
+pub mod streaming;
 mod types;
+pub use signed::{SignedArchive, SignedSplitArchive};
+#[cfg(feature = "threshold")]
+pub mod threshold;
 
 pub use error::ArchiveError;
 pub use limits::{
@@ -81,7 +85,7 @@ mod tests {
         let wrapped = wrap_dek(&dek, recipient_pub).expect("wrap");
         let unwrapped =
             unwrap_dek_from_recipients(&[wrapped], recipient_priv.to_bytes()).expect("unwrap");
-        assert_eq!(unwrapped, dek);
+        assert_eq!(*unwrapped, dek);
     }
 
     #[test]

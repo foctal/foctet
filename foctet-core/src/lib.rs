@@ -86,9 +86,12 @@ pub mod secure_channel;
 mod sequence;
 /// Session handshake/rekey state and key lifecycle handling.
 pub mod session;
+/// Detached authentication of encrypted objects by a pinned writer.
+pub mod signature;
 /// At-rest storage envelopes that bind a record's identity (namespace / id /
 /// version) into the AEAD for zero-knowledge backends.
 pub mod storage;
+pub use signature::{sign_ciphertext, verify_ciphertext};
 
 pub use auth::{
     AuthenticatedPeer, ChannelBinding, HANDSHAKE_AUTH_ED25519, HANDSHAKE_AUTH_NONE, HandshakeAuth,
@@ -140,7 +143,8 @@ pub use session::{
     RekeyThresholds, Session, SessionState,
 };
 pub use storage::{
-    StorageRecord, open_storage_record, open_storage_record_with_limits, seal_storage_record,
+    StorageRecord, open_signed_storage_record, open_storage_record,
+    open_storage_record_with_limits, seal_signed_storage_record, seal_storage_record,
     seal_storage_record_with_limits,
 };
 
@@ -323,9 +327,10 @@ impl CoreError {
         }
     }
 
-    /// Classifies whether a stateful endpoint may safely continue after this
-    /// error. Stateless helpers may surface the same errors without retaining
-    /// protocol state; callers of those helpers should apply their own scope.
+    /// Classifies the error variant for retry decisions. Terminal endpoint or
+    /// closed session state takes precedence: receive failures can close an
+    /// endpoint even for variants recoverable during outbound validation.
+    /// Stateless helpers retain no protocol state; apply their documented scope.
     pub const fn disposition(&self) -> CoreErrorDisposition {
         match self {
             Self::FrameTooLarge

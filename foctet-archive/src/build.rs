@@ -50,6 +50,8 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         }
     };
 
+    let dek = zeroize::Zeroizing::new(dek);
+
     let mut hasher = Blake3::new();
     hasher.update(plaintext);
     let overall_hash = *hasher.finalize().as_bytes();
@@ -223,7 +225,7 @@ pub(crate) fn decrypt_chunk_records_with_limits(
 }
 
 pub(crate) fn partition_chunks(
-    chunks: &[EncryptedChunkRecord],
+    chunks: Vec<EncryptedChunkRecord>,
     target_part_size: usize,
 ) -> Result<Vec<Vec<EncryptedChunkRecord>>, ArchiveError> {
     if chunks.is_empty() {
@@ -244,7 +246,7 @@ pub(crate) fn partition_chunks(
             current = Vec::new();
             current_size = 0;
         }
-        current.push(rec.clone());
+        current.push(rec);
         current_size = current_size
             .checked_add(record_size)
             .ok_or(ArchiveError::InvalidInput("part size overflow"))?;

@@ -230,9 +230,8 @@ npm run build:bundler   # -> pkg/
 npm test                # builds for Node and runs the interop test
 ```
 
-The interop test (`tests/node_interop.cjs`) verifies a JS seal→open roundtrip,
-context binding, and — crucially — that Node opens **Rust-produced** envelopes
-from `tests/interop_vector.json`, proving cross-language wire compatibility.
+The interop test (`tests/node_interop.cjs`) checks JavaScript seal/open roundtrips,
+context binding, and opening Rust-produced envelopes from `tests/interop_vector.json`.
 Regenerate the fixture with:
 
 ```sh
@@ -241,10 +240,9 @@ cargo run -p foctet-wasm --example gen_interop_fixture > foctet-wasm/tests/inter
 
 ### Headless browser tests
 
-`tests/browser.rs` runs `wasm-bindgen-test` tests in a real headless Chrome
-(body envelope, context binding, authenticated `FoctetSession` handshake +
-messages + replay rejection, datagram mode). CI runs them on every push/PR;
-locally:
+`tests/browser.rs` uses `wasm-bindgen-test` in headless Chrome to test body
+envelopes, context binding, authenticated handshakes, messages, replay rejection,
+and datagrams. This suite is not part of CI. Run it locally:
 
 ```sh
 wasm-pack test --headless --chrome foctet-wasm   # from the workspace root
@@ -301,3 +299,12 @@ outer channel (`wss://`, `https://`) unless you pin identities.
 `KeyPair` and `IdentityKeyPair` expose raw key bytes. Store persistent secrets
 in an appropriate keystore or secrets manager and never log them. The WASM SDK
 does not implement host-backed, non-extractable key handling.
+
+## Signed TEXT storage
+
+`SignedObject.toStorageText()` returns a bounded canonical ASCII record containing
+both ciphertext and writer signature. `openSignedTextStorageRecord(text, secret,
+namespace, recordId, expectedVersion, pinnedWriter)` verifies it before opening,
+without unsigned fallback. Versions cross the JS boundary as `bigint`. See
+[portable TEXT storage](../docs/worker-databases.md) for supported driver adapters
+and the endpoint/application trust boundary.

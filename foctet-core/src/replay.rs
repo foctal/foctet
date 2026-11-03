@@ -78,10 +78,11 @@ impl ReplayWindow {
 
         let word_shift = (shift / 64) as usize;
         let bit_shift = (shift % 64) as usize;
-        let mut out = vec![0u64; self.bits.len()];
-
-        for (i, slot) in out.iter_mut().enumerate() {
+        // Descending writes preserve unread source words and avoid allocating
+        // a new bitmap for every in-order packet.
+        for i in (0..self.bits.len()).rev() {
             if i < word_shift {
+                self.bits[i] = 0;
                 continue;
             }
             let src_idx = i - word_shift;
@@ -89,18 +90,16 @@ impl ReplayWindow {
             if bit_shift != 0 && src_idx > 0 {
                 val |= self.bits[src_idx - 1] >> (64 - bit_shift);
             }
-            *slot = val;
+            self.bits[i] = val;
         }
 
         let remainder = (self.window_size % 64) as usize;
         if remainder != 0 {
             let last_mask = (1u64 << remainder) - 1;
-            if let Some(last) = out.last_mut() {
+            if let Some(last) = self.bits.last_mut() {
                 *last &= last_mask;
             }
         }
-
-        self.bits = out;
     }
 
     fn get_bit(&self, offset: u64) -> bool {
@@ -161,6 +160,31 @@ impl ReplayProtector {
         self.rejections
     }
 
+    /// Rejects non-increasing sequences on a reliable ordered stream.
+    ///
+    /// Call only after authenticating the frame. Gaps are allowed because byte
+    /// stream senders share a sequence allocator across logical stream IDs.
+    /// Datagram receivers must use [`Self::check_and_record`] instead.
+    pub fn check_and_record_ordered(
+        &mut self,
+        key_id: u8,
+        stream_id: u32,
+        seq: u64,
+    ) -> Result<(), CoreError> {
+        if let Some(window) = self.windows.get(&(key_id, stream_id))
+            && let Some(max) = window.max_seen
+            && seq <= max
+        {
+            self.rejections = self.rejections.saturating_add(1);
+            return Err(if max - seq >= window.window_size {
+                CoreError::ReplayWindowExceeded
+            } else {
+                CoreError::Replay
+            });
+        }
+        self.check_and_record(key_id, stream_id, seq)
+    }
+
     /// Validates and records sequence number for `(key_id, stream_id)`.
     ///
     /// Returns [`CoreError::ReplayCapacityExceeded`] when a previously unseen
@@ -201,6 +225,47 @@ impl Default for ReplayProtector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitmap_shifts_match_a_set_model_at_word_boundaries() {
+        for size in [1, 63, 64, 65, 127, 128, 129, 4096] {
+            let mut window = ReplayWindow::new(size);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut max = 0u64;
+            let mut random = 42u64;
+            for _ in 0..2000 {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let seq = if random & 1 == 0 {
+                    max.saturating_add((random >> 32) % 130)
+                } else {
+                    max.saturating_sub((random >> 32) % (size + 65))
+                };
+                let accept = (seq > max || max - seq < size) && !seen.contains(&seq);
+                assert_eq!(window.check_and_record(seq).is_ok(), accept);
+                if accept {
+                    max = max.max(seq);
+                    seen.insert(seq);
+                    seen.retain(|&n| max - n < size);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_replay_rejects_unseen_older_frames_without_affecting_datagrams() {
+        let mut ordered = ReplayProtector::default();
+        ordered.check_and_record_ordered(0, 1, 2).unwrap();
+        assert!(matches!(
+            ordered.check_and_record_ordered(0, 1, 1),
+            Err(CoreError::Replay)
+        ));
+        ordered.check_and_record_ordered(0, 2, 0).unwrap();
+        ordered.check_and_record_ordered(0, 1, 3).unwrap();
+        assert_eq!(ordered.rejections(), 1);
+        let mut datagram = ReplayProtector::default();
+        datagram.check_and_record(0, 1, 2).unwrap();
+        datagram.check_and_record(0, 1, 1).unwrap();
+    }
 
     #[test]
     fn replay_window_detects_duplicate_and_old() {

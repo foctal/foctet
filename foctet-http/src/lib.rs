@@ -28,6 +28,8 @@ pub mod context;
 mod error;
 pub mod raw;
 mod replay_store;
+mod signed;
+pub use signed::WRITER_SIGNATURE_HEADER;
 pub mod stream;
 
 #[cfg(feature = "axum")]
@@ -76,6 +78,7 @@ pub const BODY_ONLY_SCOPE: &str = "body-only";
 /// High-level helper for sealing HTTP bodies, requests, and responses.
 #[derive(Clone, Debug)]
 pub struct HttpSealer {
+    writer: Option<signed::Writer>,
     options: HttpSealOptions,
     config: HttpConfig,
 }
@@ -83,14 +86,23 @@ pub struct HttpSealer {
 /// High-level helper for opening HTTP bodies, requests, and responses.
 #[derive(Clone, Debug)]
 pub struct HttpOpener {
+    writer: Option<foctet_core::PeerIdentity>,
     options: HttpOpenOptions,
     config: HttpConfig,
 }
 
 impl HttpSealer {
+    /// Signs protected-context messages with a pinned-writer identity.
+    /// Raw/stateless sealing is rejected while this policy is configured.
+    pub fn with_writer(mut self, writer: impl foctet_core::HandshakeSigner + 'static) -> Self {
+        self.writer = Some(signed::Writer(std::sync::Arc::new(writer)));
+        self
+    }
+
     /// Creates a sealer with default HTTP behavior.
     pub fn new(options: HttpSealOptions) -> Self {
         Self {
+            writer: None,
             options,
             config: HttpConfig::default(),
         }
@@ -98,7 +110,11 @@ impl HttpSealer {
 
     /// Creates a sealer with explicit HTTP behavior.
     pub fn with_config(options: HttpSealOptions, config: HttpConfig) -> Self {
-        Self { options, config }
+        Self {
+            writer: None,
+            options,
+            config,
+        }
     }
 
     /// Returns the sealing options.
@@ -113,6 +129,11 @@ impl HttpSealer {
 
     /// Seals raw plaintext bytes into an `application/foctet` body.
     pub fn seal_body(&self, plaintext: &[u8]) -> Result<Vec<u8>, HttpError> {
+        if self.writer.is_some() {
+            return Err(HttpError::InvalidContext(
+                "signed messages require protected context",
+            ));
+        }
         match self.options.limits() {
             Some(limits) => raw::seal_http_body_with_limits(
                 plaintext,
@@ -165,6 +186,10 @@ impl HttpSealer {
         let context = ProtectedContext::for_request(&parts, carrier.clone(), binding)?;
         let aad = context.to_aad_bytes();
         let sealed = self.seal_body_with_aad(&body, &aad)?;
+        if let Some(writer) = &self.writer {
+            signed::sign(&mut parts.headers, &sealed, &aad, writer);
+        }
+        raw::clear_body_framing(&mut parts.headers);
         raw::set_foctet_content_type(&mut parts.headers);
         if self.config.set_scope_header_on_seal() {
             raw::set_foctet_scope_header(&mut parts.headers);
@@ -184,6 +209,10 @@ impl HttpSealer {
         let context = ProtectedContext::for_response(&parts, carrier.clone())?;
         let aad = context.to_aad_bytes();
         let sealed = self.seal_body_with_aad(&body, &aad)?;
+        if let Some(writer) = &self.writer {
+            signed::sign(&mut parts.headers, &sealed, &aad, writer);
+        }
+        raw::clear_body_framing(&mut parts.headers);
         raw::set_foctet_content_type(&mut parts.headers);
         if self.config.set_scope_header_on_seal() {
             raw::set_foctet_scope_header(&mut parts.headers);
@@ -209,6 +238,7 @@ impl HttpSealer {
     pub fn seal_request(&self, request: Request<Vec<u8>>) -> Result<Request<Vec<u8>>, HttpError> {
         let (mut parts, body) = request.into_parts();
         let sealed = self.seal_body(&body)?;
+        raw::clear_body_framing(&mut parts.headers);
         raw::set_foctet_content_type(&mut parts.headers);
         if self.config.set_scope_header_on_seal() {
             raw::set_foctet_scope_header(&mut parts.headers);
@@ -227,6 +257,7 @@ impl HttpSealer {
     ) -> Result<Response<Vec<u8>>, HttpError> {
         let (mut parts, body) = response.into_parts();
         let sealed = self.seal_body(&body)?;
+        raw::clear_body_framing(&mut parts.headers);
         raw::set_foctet_content_type(&mut parts.headers);
         if self.config.set_scope_header_on_seal() {
             raw::set_foctet_scope_header(&mut parts.headers);
@@ -236,9 +267,40 @@ impl HttpSealer {
 }
 
 impl HttpOpener {
+    /// Requires a valid writer signature before decryption or replay consumption.
+    /// Raw/stateless opening is rejected while this policy is configured.
+    pub fn require_writer(mut self, writer: foctet_core::PeerIdentity) -> Self {
+        self.writer = Some(writer);
+        self
+    }
+
+    fn verify_writer(
+        &self,
+        headers: &http::HeaderMap,
+        body: &[u8],
+        aad: &[u8],
+    ) -> Result<(), HttpError> {
+        if let Some(writer) = self.writer {
+            let limits = self.options.limits().cloned().unwrap_or_default();
+            if aad.len() > limits.max_context_len {
+                return Err(HttpError::LimitExceeded("context_len"));
+            }
+            if body.len()
+                > limits
+                    .max_header_bytes
+                    .saturating_add(limits.max_payload_len)
+            {
+                return Err(HttpError::LimitExceeded("signed_body"));
+            }
+            signed::verify(headers, body, aad, writer)?;
+        }
+        Ok(())
+    }
+
     /// Creates an opener with default HTTP behavior.
     pub fn new(options: HttpOpenOptions) -> Self {
         Self {
+            writer: None,
             options,
             config: HttpConfig::default(),
         }
@@ -246,7 +308,11 @@ impl HttpOpener {
 
     /// Creates an opener with explicit HTTP behavior.
     pub fn with_config(options: HttpOpenOptions, config: HttpConfig) -> Self {
-        Self { options, config }
+        Self {
+            writer: None,
+            options,
+            config,
+        }
     }
 
     /// Returns the opening options.
@@ -287,6 +353,11 @@ impl HttpOpener {
 
     /// Opens an `application/foctet` body into plaintext bytes.
     pub fn open_body(&self, envelope: &[u8]) -> Result<Vec<u8>, HttpError> {
+        if self.writer.is_some() {
+            return Err(HttpError::InvalidContext(
+                "signed messages require protected context",
+            ));
+        }
         self.open_with_keyring(|key| match self.options.limits() {
             Some(limits) => raw::open_http_body_with_limits(envelope, key, limits),
             None => raw::open_http_body(envelope, key),
@@ -333,10 +404,11 @@ impl HttpOpener {
         let (parts, plain, carrier) =
             self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
 
+        let mut plain = zeroize::Zeroizing::new(plain);
         match ReplayStore::check_and_insert(
             store,
             &carrier.message_id,
-            carrier.expiry_secs,
+            carrier.replay_retention_deadline(max_skew_secs),
             now_secs,
         )
         .map_err(HttpError::ReplayStore)?
@@ -345,7 +417,7 @@ impl HttpOpener {
             ReplayCheck::Replay => return Err(HttpError::Replayed),
         }
 
-        Ok(self.open_request_finalize(parts, plain))
+        Ok(self.open_request_finalize(parts, std::mem::take(&mut *plain)))
     }
 
     /// Opens a context-bound request using a durable [`AsyncReplayStore`].
@@ -370,10 +442,11 @@ impl HttpOpener {
         let (parts, plain, carrier) =
             self.open_request_prepare(request, now_secs, max_skew_secs, binding)?;
 
+        let mut plain = zeroize::Zeroizing::new(plain);
         match AsyncReplayStore::check_and_insert(
             store,
             &carrier.message_id,
-            carrier.expiry_secs,
+            carrier.replay_retention_deadline(max_skew_secs),
             now_secs,
         )
         .await
@@ -383,7 +456,7 @@ impl HttpOpener {
             ReplayCheck::Replay => return Err(HttpError::Replayed),
         }
 
-        Ok(self.open_request_finalize(parts, plain))
+        Ok(self.open_request_finalize(parts, std::mem::take(&mut *plain)))
     }
 
     /// Shared request-open logic up to (but excluding) the replay-store check:
@@ -402,6 +475,7 @@ impl HttpOpener {
         let context = ProtectedContext::for_request(&parts, carrier.clone(), binding)?;
         context.validate_freshness(now_secs, max_skew_secs)?;
         let aad = context.to_aad_bytes();
+        self.verify_writer(&parts.headers, &body, &aad)?;
         let plain = self.open_body_with_aad(&body, &aad)?;
         Ok((parts, plain, carrier))
     }
@@ -411,6 +485,7 @@ impl HttpOpener {
         mut parts: http::request::Parts,
         plain: Vec<u8>,
     ) -> Request<Vec<u8>> {
+        raw::clear_body_framing(&mut parts.headers);
         if self.config.strip_content_type_on_open() {
             parts.headers.remove(header::CONTENT_TYPE);
         }
@@ -440,8 +515,10 @@ impl HttpOpener {
         context.validate_freshness(now_secs, max_skew_secs)?;
 
         let aad = context.to_aad_bytes();
+        self.verify_writer(&parts.headers, &body, &aad)?;
         let plain = self.open_body_with_aad(&body, &aad)?;
 
+        raw::clear_body_framing(&mut parts.headers);
         if self.config.strip_content_type_on_open() {
             parts.headers.remove(header::CONTENT_TYPE);
         }
@@ -463,6 +540,7 @@ impl HttpOpener {
         let (mut parts, body) = request.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let plain = self.open_body(&body)?;
+        raw::clear_body_framing(&mut parts.headers);
         if self.config.strip_content_type_on_open() {
             parts.headers.remove(header::CONTENT_TYPE);
         }
@@ -477,6 +555,7 @@ impl HttpOpener {
         let (mut parts, body) = response.into_parts();
         raw::ensure_foctet_content_type(&parts.headers)?;
         let plain = self.open_body(&body)?;
+        raw::clear_body_framing(&mut parts.headers);
         if self.config.strip_content_type_on_open() {
             parts.headers.remove(header::CONTENT_TYPE);
         }
@@ -495,6 +574,64 @@ mod tests {
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::*;
+
+    #[tokio::test]
+    async fn replay_is_rejected_through_inclusive_clock_skew_window() {
+        let secret = StaticSecret::from([7; 32]);
+        let public = PublicKey::from(&secret).to_bytes();
+        let sealer = HttpSealer::new(HttpSealOptions::new(public, b"kid"));
+        let opener = HttpOpener::new(HttpOpenOptions::new(secret.to_bytes()));
+        let binding = ContextBinding::default();
+        let sealed = sealer
+            .seal_request_with_context(
+                Request::builder()
+                    .method("POST")
+                    .uri("https://example.com/pay")
+                    .body(b"payment".to_vec())
+                    .unwrap(),
+                ContextCarrier::generate(1000, 60),
+                binding,
+            )
+            .unwrap();
+        let sync_store = InMemoryReplayStore::new();
+        let async_store = InMemoryReplayStore::new();
+        opener
+            .open_request_with_context(clone_request(&sealed), &sync_store, 1059, 5, binding)
+            .unwrap();
+        opener
+            .open_request_with_async_store(clone_request(&sealed), &async_store, 1059, 5, binding)
+            .await
+            .unwrap();
+        for now in [1060, 1061, 1065] {
+            assert!(matches!(
+                opener.open_request_with_context(
+                    clone_request(&sealed),
+                    &sync_store,
+                    now,
+                    5,
+                    binding
+                ),
+                Err(HttpError::Replayed)
+            ));
+            assert!(matches!(
+                opener
+                    .open_request_with_async_store(
+                        clone_request(&sealed),
+                        &async_store,
+                        now,
+                        5,
+                        binding
+                    )
+                    .await,
+                Err(HttpError::Replayed)
+            ));
+        }
+        assert!(
+            opener
+                .open_request_with_context(clone_request(&sealed), &sync_store, 1066, 5, binding)
+                .is_err()
+        );
+    }
 
     #[test]
     #[cfg(feature = "dangerous-stateless-http")]

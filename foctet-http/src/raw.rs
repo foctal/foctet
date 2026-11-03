@@ -18,6 +18,13 @@ use http::{
 
 use crate::{CONTENT_TYPE, HttpError};
 
+// Body replacement invalidates HTTP framing. Let the transport calculate framing
+// from the new body instead of forwarding a plaintext/ciphertext byte count.
+pub(crate) fn clear_body_framing(headers: &mut HeaderMap) {
+    headers.remove(header::CONTENT_LENGTH);
+    headers.remove(header::TRANSFER_ENCODING);
+}
+
 /// Sets `Content-Type: application/foctet`.
 pub fn set_foctet_content_type(headers: &mut HeaderMap) {
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE));

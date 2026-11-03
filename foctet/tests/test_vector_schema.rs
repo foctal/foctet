@@ -2,12 +2,10 @@ use std::{fs, path::PathBuf};
 
 use serde_json::Value;
 
-fn root_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
-}
-
 fn load_json(name: &str) -> Value {
-    let p = root_dir().join("test-vectors").join(name);
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     let s = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     serde_json::from_str(&s).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
 }

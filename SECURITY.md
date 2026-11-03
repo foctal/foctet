@@ -1,14 +1,9 @@
 # Security Policy
 
-## Status: experimental — not production-ready
-
-Foctet is an **experimental Draft v0** implementation of authenticated encrypted
-framing, a one-shot `application/foctet` body envelope, and encrypted archive
-formats. The project is under active security and interoperability development.
-
-The wire format and APIs may change during the `0.x` release line. See the
-[threat model](docs/THREAT_MODEL.md) for trust boundaries and metadata leakage,
-and [policies](docs/POLICIES.md) for key management and incident response.
+Foctet protects data between trusted endpoints. See the
+[threat model](docs/THREAT_MODEL.md) for assumptions and
+[security boundaries](docs/security-boundaries.md) for the consequences of
+compromise. The wire format and APIs may change during `0.x`.
 
 ## Reporting a vulnerability
 
@@ -74,7 +69,24 @@ a protocol/profile must be disabled sooner for safety.
   each recipient. Use randomized builders for application data; deterministic
   secrets are intended for test vectors.
 
+## Writer authentication
+
+Body/storage/archive encryption to a public key does not identify the writer.
+Anyone holding the public key can create a valid replacement ciphertext. Use
+`sign_ciphertext` / `verify_ciphertext` with a pinned writer before decrypting,
+or the signed storage helpers, when the storage or relay is malicious. Protected
+HTTP context and replay protection do not replace sender authentication or
+application authorization. See [security and platform boundaries](docs/security-boundaries.md).
+
 ## Limitations and application responsibilities
+
+- **Ciphertext-only breach protection requires independent keys.** A database,
+  object-store, or relay breach does not reveal plaintext when the breached
+  system has neither endpoint secrets nor a decryption capability. Body,
+  storage, and archive recipient-key compromise can decrypt previously captured
+  ciphertext for that recipient. Rotation cannot revoke copies already stolen
+  with their keys. Session forward secrecy is a separate property; retained
+  previous traffic keys remain exposed during their retention interval.
 
 - **No session persistence or resumption.** After a restart or reconnect,
   establish a fresh authenticated session. Restoring traffic keys with reset
@@ -96,7 +108,8 @@ a protocol/profile must be disabled sooner for safety.
   count thresholds or explicit rekeys. The SDK is not yet published to npm.
 - **Endpoint security and key distribution belong to the application.** Foctet
   does not protect a compromised endpoint, distribute trusted identities,
-  enforce application authorization, or provide key recovery.
+  enforce application authorization, or recover arbitrary lost endpoint keys.
+  Optional archive threshold recovery requires shares provisioned before key loss.
 
 See [resource limits](docs/resource-limits.md) and
 [operations](docs/operations.md) for sizing, monitoring, and shutdown guidance.

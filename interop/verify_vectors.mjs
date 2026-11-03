@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
+import { blake3 } from "@noble/hashes/blake3.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { x25519, ed25519 } from "@noble/curves/ed25519.js";
@@ -497,6 +498,74 @@ const negativeVec = vectors("negative-v0.json");
     negativeVec.boundaries.replay_window === 4096,
     "shared vector: replay boundary",
   );
+}
+
+// Independent detached writer-signature transcript verification.
+{
+  const vector = vectors("ciphertext-signature-v1.json");
+  const context = ascii(vector.context_utf8);
+  const ciphertext = ascii(vector.ciphertext_utf8);
+  const digest = sha256(concat(
+    ascii("foctet ciphertext signature v1"), new Uint8Array([0]),
+    u64be(context.length), context, u64be(ciphertext.length), ciphertext,
+  ));
+  const secret = fromHex(vector.secret_key_hex);
+  const signature = ed25519.sign(digest, secret);
+  assertEq(toHex(signature), vector.signature_hex, "detached writer signature");
+  assertTrue(ed25519.verify(signature, digest, ed25519.getPublicKey(secret)), "writer verification");
+  const changed = digest.slice();
+  changed[0] ^= 1;
+  assertTrue(!ed25519.verify(signature, changed, ed25519.getPublicKey(secret)), "changed writer transcript rejected");
+}
+
+// Independently reconstruct Shamir shares and decrypt signed file records.
+{
+  const v = vectors("recovery-stream-v1.json");
+  const writer = ed25519.getPublicKey(fromHex(v.writer_secret_hex));
+  const verify = (bytes, context, signature) => ed25519.verify(signature, sha256(concat(
+    ascii("foctet ciphertext signature v1\0"), u64be(context.length), context,
+    u64be(bytes.length), bytes)), writer);
+  const shares = v.shares_hex.map(fromHex);
+  for (const share of shares) {
+    assertTrue(verify(share.slice(0,123), ascii("foctet recovery share v1"), share.slice(123)), "recovery share signature");
+    assertEq(share.slice(58,90), blake3(fromHex(v.archive_hex)), "recovery archive binding");
+  }
+  const mul = (a,b) => { let r=0; for(let i=0;i<8;i++){ if(b&1)r^=a; a=((a<<1)^((a&128)?0x11b:0))&255; b>>=1; } return r; };
+  const inv = a => { let r=1; for(let i=0;i<254;i++) r=mul(r,a); return r; };
+  for(const [a,b] of [[0,1],[0,2],[1,2]]) {
+    const sa=shares[a], sb=shares[b], xa=sa[90], xb=sb[90];
+    const wa=mul(xb,inv(xa^xb)), wb=mul(xa,inv(xa^xb));
+    const key=Uint8Array.from({length:32},(_,i)=>mul(sa[91+i],wa)^mul(sb[91+i],wb));
+    assertEq(x25519.getPublicKey(key),sa.slice(26,58),"independent 2-of-3 recovery");
+  }
+  const file=fromHex(v.stream_hex); let offset=9;
+  assertEq(file.slice(0,9),concat(ascii("FOCTETFS"),new Uint8Array([1])),"signed file magic");
+  const record = context => {
+    const length=new DataView(file.buffer,file.byteOffset+offset,4).getUint32(0); offset+=4;
+    const bytes=file.slice(offset,offset+length); offset+=length;
+    const signature=file.slice(offset,offset+64); offset+=64;
+    assertTrue(verify(bytes,context,signature),"signed file record"); return bytes;
+  };
+  const ctx=concat(ascii("foctet signed file stream v1\0"),ascii(v.context_utf8));
+  const header=record(ctx), eph=header.slice(26,58);
+  const kidLen=new DataView(header.buffer,header.byteOffset+58,2).getUint16(0);
+  const kid=header.slice(60,60+kidLen), wrapped=header.slice(62+kidLen);
+  const secret=fromHex(v.recipient_secret_hex), recipient=x25519.getPublicKey(secret);
+  const material=hkdf(sha256,x25519.getSharedSecret(secret,eph),undefined,concat(ascii("foctet body wrap v0"),eph,recipient),56);
+  const key=xchacha20poly1305(material.slice(0,32),material.slice(32),kid).decrypt(wrapped);
+  const chunkCtx=concat(ctx,blake3(header)); let index=0n, final=false, plaintext=new Uint8Array();
+  while(offset<file.length) {
+    assertTrue(!final,"no records after final"); const chunk=record(chunkCtx);
+    const actual=new DataView(chunk.buffer,chunk.byteOffset,8).getBigUint64(0);
+    assertTrue(actual===index++,"monotonic chunk index"); final=chunk[8]===1;
+    const len=new DataView(chunk.buffer,chunk.byteOffset+9,4).getUint32(0);
+    assertTrue(len===chunk.length-13,"chunk length");
+    const nonce=concat(header.slice(10,26),chunk.slice(0,8));
+    const aad=concat(header,chunk.slice(0,9),ctx);
+    plaintext=concat(plaintext,xchacha20poly1305(key,nonce,aad).decrypt(chunk.slice(13)));
+  }
+  assertTrue(final && offset===file.length,"signed file finalization");
+  assertEq(plaintext,fromHex(v.plaintext_hex),"independent streaming file decryption");
 }
 
 console.log(

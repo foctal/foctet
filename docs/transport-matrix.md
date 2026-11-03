@@ -6,7 +6,7 @@ closes the affected channel; retry requires a new authenticated session.
 
 | Adapter | Shape | Delivery contract | Size bound | Control and close contract | Deployment duties |
 | --- | --- | --- | --- | --- | --- |
-| Tokio/futures byte stream | Reliable ordered bytes | Exact ordered stream | `FrameCodecConfig::max_frame_len` | Handshake and rekey share a reliable ordered channel; EOF, ambiguous write, parse, authentication, or sequence failure is terminal | Apply handshake timeout, rate, and concurrency admission limits |
+| Tokio/futures byte stream | Reliable ordered bytes | Exact ordered stream | `ProtocolLimits::max_ciphertext_len` | Handshake and rekey share a reliable ordered channel; EOF, ambiguous write, parse, authentication, or sequence failure is terminal | Apply handshake timeout, rate, and concurrency admission limits |
 | QUIC/WebTransport bidirectional stream | Reliable ordered bytes | Exact ordered stream per transport stream | Foctet frame limit plus the implementation's stream flow control | One authenticated handshake/control stream per session; reset, stop, or connection close is terminal | Authenticate the QUIC/TLS peer or use pinned Foctet identity |
 | Raw or browser WebSocket message | Reliable ordered messages | One binary WebSocket message per Foctet message; text is rejected | `MessageConfig::max_message_size`, clamped when the backend reports a lower limit | Rekey uses the same reliable ordered message channel; close or ambiguous send is terminal | Bound any application queue; one Foctet session per raw WebSocket |
 | Multiplexed WebSocket / muxtls | Reliable ordered bytes per mux stream | Independent ordered byte streams; mux owns fairness | Foctet frame limit and mux limits | Each mux stream carries one Foctet channel; session control must not use a lossy path | Configure bounded stream and connection queues |
@@ -21,7 +21,7 @@ facade. Native stream adapters use Tokio. No features are enabled by default.
 | Feature | Module | Backend | Shapes |
 | --- | --- | --- | --- |
 | `transport-muxtls` | `muxtls` | muxtls 0.4 | Byte stream |
-| `transport-websock` | `websock` | websock 0.6 | Native/browser messages |
+| `transport-websock` | `websock` | websock-proto 0.6 | Backend-neutral messages (native/browser/Worker bridges) |
 | `transport-websock-mux` | `websock` | websock-tungstenite-mux 0.6 | Native byte stream |
 | `transport-quinn` | `quinn` | Quinn 0.11 | Byte stream, datagram |
 | `transport-quion` | `quion` | Quion 0.2.2 | Byte stream, datagram |

@@ -4,10 +4,9 @@ Foctet Protocol Specification (Draft v0)
 0\. Status
 ----------
 
-*   **Status**: Draft v0 (work-in-progress). **Not production-ready.** See `SECURITY.md` for the current security posture and known limitations, and `docs/THREAT_MODEL.md` for the full threat model.
+*   **Status**: Draft v0. Wire compatibility is not yet stable. See [SECURITY.md](SECURITY.md) for limitations and [the threat model](docs/THREAT_MODEL.md) for security assumptions.
 *   **Spec version**: `foctet-spec/0.3-draft`. The specification is versioned independently of the crate versions: crates may release without spec changes, and this stamp only changes when normative content changes. Any wire-level change MUST bump this stamp and move `test-vectors/` in the same commit (see the compatibility policy below).
 *   **Conformance language**: The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119/8174. Unless a section is explicitly marked *informative*, requirements stated with these key words are normative for Draft v0 implementations; an implementation that violates a MUST is not a conforming Foctet implementation even if it interoperates with this codebase.
-*   **Implementation status**: This specification describes the target protocol. As of this revision, the implemented surface is: **stream-oriented** framing (TCP / QUIC bi-streams / WebTransport bi-streams / multiplexed WebSocket / muxtls, all covered by a real-connection conformance suite), the **message shape** (raw WebSocket, native + browser), the **datagram API** (`foctet_core::datagram`) with QUIC and raw-UDP adapters (mandatory anti-amplification for unvalidated server peers) and rekey-over-datagram via a reliable control channel, the one-shot body envelope and archive formats, streaming HTTP request and response bodies with per-chunk AEAD, an HTTP protected-context + anti-replay layer (in-memory / Redis / Cloudflare Durable Object stores), the DH-ratchet rekey, and a **WASM/TypeScript SDK** (`foctet-wasm`) covering the body envelope **and** the framed session (message + datagram modes, including in-session rekey), tested in headless Chrome in CI, plus a browser-WebTransport datagram adapter (`foctet_transport::webtrans_browser`). The canonical vectors are additionally verified by an independent non-Rust implementation (`interop/verify_vectors.mjs`, in CI), and the Workers path is exercised against Wrangler with a real Durable Object.
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
 *   **Non-goals**: Transport reliability, congestion control, NAT traversal, application semantics. Those are delegated to underlying transports and higher layers.
@@ -72,7 +71,7 @@ key-loss policy, and the WASM boundary — is `docs/THREAT_MODEL.md`.
 *   **Replay protection**: Endpoints detect replayed frames within a session.
 *   **Forward secrecy (between sessions)**: A fresh ephemeral X25519 handshake per session means compromise of one session's keys does not reveal other sessions' traffic.
 *   **Within-session rekey is a forward-secret DH ratchet.** Each rekey performs a Diffie-Hellman ratchet step (a fresh ephemeral X25519 output mixed into a root-key chain; see §7.1.2), and rekeys alternate between the peers so both ratchet keys rotate. This provides forward secrecy and, across an alternating rekey, post-compromise security. Under strictly one-directional traffic the alternation can stall after one step, so rekey periodically from both ends.
-*   **Key separation**: Distinct keys for directions and purposes (data vs control).
+*   **Key separation**: Distinct keys for each direction. Data and control frames share directional keys and sequence allocation; the control flag is authenticated in the header.
 
 ### 3.3 Misuse Cases (Implementation Risks)
 
@@ -185,6 +184,10 @@ Immediately followed by:
 *   Sender `seq` MUST be strictly increasing for each `(direction, stream_id, key_id)` tuple.
 *   Receiver MUST maintain a replay window per tuple and reject duplicates.
 *   Receiver MAY accept out-of-order frames only when they are within the replay window.
+    Reliable byte-stream and message adapters reject non-increasing sequences
+    within each `(key_id, stream_id)` after authentication. Datagram adapters
+    permit reordering within the window. Sequence gaps and cross-stream order
+    do not establish application delivery or completeness.
 *   Frames outside the window MUST be rejected unless an application profile explicitly defines a different mode.
 
 Default replay window recommendation: 4096 frames.
@@ -258,7 +261,10 @@ Rekeys **alternate** between the two peers: after a side initiates a rekey it MU
 NOT initiate another until it has received one from the peer (`old_key_id` and the
 turn flag enforce this). This prevents the root chain from forking and ensures
 both peers' ratchet keys rotate, providing forward secrecy and post-compromise
-security across an alternating rekey. The initiator takes the first turn. The
+security across an alternating rekey. These properties require erasure of old
+ephemeral and traffic keys; retained generations remain exposed. Recovery after
+passive state compromise requires fresh contributions from both peers and an
+end to the attacker's endpoint access. The initiator takes the first turn. The
 receiver MUST reject a `Rekey` whose `old_key_id` is not its active key, whose
 `new_key_id` is not `old_key_id + 1`, or whose transcript binding does not match.
 
@@ -535,12 +541,15 @@ Mitigations:
 ### 12.2 Replay & Reordering
 
 *   Receivers MUST enforce replay windows.
-*   Reordering is permitted within window; higher layers can impose strict ordering.
+*   Datagram reordering is permitted within the window. Reliable adapters enforce
+    monotonic sequences per key/stream domain as described in §6.4.
 
 ### 12.3 Key Management
 
 *   Long-term identity keys MUST be protected by OS keystore when possible.
 *   Session keys MUST be kept in memory only and zeroized on teardown.
+    Teardown includes dropping shared key handles and prepared rekeys held by
+    the application; closing a session cannot erase independently retained copies.
 *   Rekey MUST occur per thresholds to reduce blast radius.
 
 Operational guidance:
@@ -611,11 +620,18 @@ on the same security context are forbidden.
 
 Inside ciphertext, define a simple TLV:
 
-*   type (varint)
-*   length (varint)
+*   type (u16, big-endian)
+*   length (u32, big-endian)
 *   value
 
 This allows future features (ack hints, compression hints, file metadata) without changing plaintext header.
+
+The reference implementation bounds one decoded sequence to 4,096 records and
+16 MiB + 6 encoded bytes (one maximum-sized value plus its header). These are
+resource limits, not new wire fields. Empty and unknown records count toward the
+record limit. The decoder validates the entire sequence before allocating values;
+the encoder applies the same limits. Profiles that need larger payloads should
+split them into bounded frames instead of increasing these limits implicitly.
 
 ### 14.3 Unknown-Type Handling Policy
 
@@ -685,17 +701,6 @@ Archive implementations MUST reject at least the following:
 
 * * *
 
-16\. Open Questions (Draft v0)
-------------------------------
-
-1.  **Handshake authentication**: should static identity authentication become mandatory in v1?
-2.  **Nonce format**: should v1 introduce stricter domain separation and explicit endianness requirements?
-3.  **Varint adoption**: should v1 replace fixed-width integer fields where appropriate?
-4.  **Relay envelope**: should relay envelope metadata remain out-of-scope or be standardized?
-5.  **Padding defaults**: should v1 define a mandatory default padding strategy?
-
-* * *
-
 Appendix A: Recommended Defaults (Draft)
 ========================================
 
@@ -727,3 +732,119 @@ Receiver (per stream\_id)
 *   ACTIVE: verify AAD/tag, replay check, deliver
 *   ACTIVE -> REKEY -> ACTIVE
 *   ACTIVE -> CLOSED
+
+## Detached ciphertext signatures
+
+Existing body, stream, and archive wire encodings are unchanged. Detached writer
+signatures are carried separately by the application. This construction is
+ordinary Ed25519 over the following 32-byte SHA-256 digest, not Ed25519ph:
+
+```
+SHA256(
+  ASCII("foctet ciphertext signature v1") || 0x00 ||
+  uint64_be(context_length) || context ||
+  uint64_be(ciphertext_length) || ciphertext
+)
+```
+
+The signature is exactly 64 bytes. Verification MUST use strict Ed25519
+verification with an independently trusted writer public key and MUST precede
+decryption. The application context MUST distinguish the protocol purpose and
+unambiguously encode its expected tenant, object, and version as applicable.
+A key delivered with the object MUST NOT establish trust by itself. Signatures
+do not replace HTTP replay prevention, authorization, or rollback checkpoints.
+For split archives, sign the manifest bytes, whose authenticated hashes cover
+the parts. Signed storage helpers use the existing storage-record AAD as context.
+
+## Authenticated recovery shares (FOCTETSS v1)
+
+This optional `foctet-archive/threshold` format uses vsss-rs GF(256) Shamir
+sharing (AES polynomial 0x11b) for a randomly generated 32-byte X25519 recipient
+secret. It is distinct from file splitting. The archive remains the existing
+single-file format and has that recipient as its sole recipient.
+
+Each share is exactly 187 bytes, in order:
+
+| Field | Bytes |
+| --- | ---: |
+| ASCII `FOCTETSS` | 8 |
+| Random recovery-set ID | 16 |
+| Threshold k, total n | 1 each |
+| X25519 recipient public key | 32 |
+| BLAKE3 of exact archive bytes | 32 |
+| Nonzero GF(256) share index | 1 |
+| Secret share value | 32 |
+| Detached writer signature | 64 |
+
+The signature authenticates the first 123 bytes with the detached-ciphertext
+signature transcript and context `foctet recovery share v1`. Require
+`2 <= k <= n <= 255`. Authenticate every supplied share against an independently
+pinned writer and trusted descriptor; reject duplicates, mixed sets, corruption,
+wrong archive hashes, and fewer than k or more than n shares. After interpolation,
+verify the recovered public key before opening the archive. No subset search is
+performed when a supplied share fails authentication.
+
+Shares are secret material; store and transmit them encrypted under independent
+custodian keys. A public descriptor is not a rollback checkpoint unless obtained
+from a trusted source. Rotation creates a fresh archive and set; old shares cannot
+be revoked from holders of an old threshold. This new composition still requires
+independent cryptographic review before a production assurance claim.
+
+## Signed streaming files (FOCTETFS v1)
+
+This bounded-memory format is separate from existing single/split archives. Its
+prefix is ASCII `FOCTETFS` followed by version byte 1. Every subsequent record is
+`length: u32_be || bytes[length] || signature[64]`. Readers enforce limits before
+allocating records. The first record is an existing FOCTETHS stream header. Later
+records are existing stream chunk frames, with sequential indices and authenticated
+FINAL. A successful reader requires FINAL and immediate EOF; trailing bytes,
+truncation, reordering, or signature failure invalidate the entire output.
+
+Let `C = "foctet signed file stream v1\0" || application_context`, where the
+application context is at most 60 KiB and is independently supplied by the reader.
+The first record's detached signature uses context C. Every chunk record's
+signature uses `C || BLAKE3(header)`. Core stream AEAD uses context C for all
+chunks. Thus each signature binds the writer, purpose, exact header, and index.
+The library writer emits an empty FINAL after all data; the reader also accepts
+valid core FINAL frames containing data. Default budgets are 1 MiB per plaintext
+chunk, 1 TiB total plaintext, and 2^24 frames including FINAL. Applications should
+reduce these budgets to their requirements and impose I/O deadlines externally.
+
+Decryption to an arbitrary writer is provisional until success. File extraction
+uses a restricted temporary file in the destination directory, validates the full
+stream, syncs the file, and publishes without overwriting an existing destination.
+Directory durability and filesystem semantics remain platform-dependent. The
+format supports one recipient; multi-recipient small files use existing archives.
+
+## HTTP writer signatures
+
+Complete protected-context requests and responses can carry the detached writer
+signature in `x-foctet-writer-signature` as exactly 128 lowercase hexadecimal ASCII
+characters. Duplicate headers are rejected. Its transcript signs exact body bytes
+with the canonical protected HTTP AAD as context. Receivers must explicitly require
+a trusted writer pin; stripping the header then fails. Unprotected/raw methods
+reject a configured writer policy. The signature does not replace request replay
+checks, response correlation, or application authorization.
+
+For direct signed chunk APIs, the signature context is
+`"foctet signed stream chunk v1\0" || u64_be(header.length) || header || context`.
+A signature is a separate sidecar for each existing chunk frame. Byte-reader APIs
+do not implicitly parse this sidecar; callers must use `open_signed_chunk` and
+require a writer, or authenticate the surrounding transport/application explicitly.
+
+
+## Signed storage TEXT v1
+
+Worker-compatible storage may transport the existing signed storage envelope as
+ASCII `FCT1.<ciphertext-base64>.<signature-base64>`. Both fields use RFC 4648
+standard Base64 with canonical padding and zero unused bits. Whitespace, alternate
+alphabets, omitted padding, additional fields, an empty ciphertext, and signatures
+other than 64 decoded bytes are rejected. The complete text is limited to
+1,048,576 bytes by the portable adapter. No trust is established by parsing it.
+
+The signature and storage-record AAD are unchanged from the signed storage API.
+The reader supplies the trusted namespace, record identity, expected revision and
+writer public key separately. Portable SQL revisions are positive signed BIGINTs.
+A database row version alone is not an authenticated freshness checkpoint. The
+format contains neither plaintext keys nor a self-authorizing writer pin. There
+is no automatic fallback to unsigned v0.5 storage envelopes.

@@ -1,5 +1,5 @@
 name = "foctet-http-workers-echo"
-main = "build/worker/shim.mjs"
+main = "build/index.js"
 compatibility_date = "2026-03-08"
 
 [vars]
@@ -14,4 +14,4 @@ tag = "v1"
 new_sqlite_classes = ["FoctetReplay"]
 
 [build]
-command = "cargo install -q worker-build@^0.8 && worker-build --release"
+command = "cargo install -q worker-build --version 0.8.7 --locked && worker-build --release"

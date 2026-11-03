@@ -62,3 +62,22 @@ The generator intentionally uses deterministic handshake/archive inputs. Do not 
 cargo test -p foctet --test test_vectors
 cargo test -p foctet --test test_vector_schema
 ```
+
+`ciphertext-signature-v1.json` contains the detached signature transcript vector
+for `sign_ciphertext`. It is separate from existing envelope wire vectors. The
+fixed secret is test-only. The core signature regression asserts these bytes.
+
+`recovery-stream-v1.json` freezes public test-only keys, authenticated 2-of-3
+recovery shares, the associated encrypted archive, and a signed streaming file.
+Rust consumes these fixtures; `interop/verify_vectors.mjs` independently verifies
+signatures, reconstructs every threshold pair, and decrypts the file stream.
+Frozen vectors are compatibility evidence. Do not regenerate them during routine
+tests; changes to the format require separately reviewed new vectors.
+
+`storage-text-v1.json` freezes canonical signed TEXT records for portable Worker
+storage, with public synthetic recipient/writer keys and revisions 1 and 2. Rust
+codec tests and the Worker database integration test verify these records.
+
+Crate-local copies of the recovery/stream and signed TEXT vectors allow tests to
+run from standalone crate sources. `python3 scripts/check-test-fixtures.py` verifies
+that these copies match the canonical files here byte for byte.

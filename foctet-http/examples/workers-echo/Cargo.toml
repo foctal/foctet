@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 foctet-http = { path = "../..", features = ["workers"] }
-worker = "0.8.5"
+worker = "0.8.7"
 x25519-dalek = { version = "3", features = ["static_secrets"] }
 
 [workspace]

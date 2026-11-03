@@ -22,9 +22,10 @@ use clap::{Parser, ValueEnum};
 use foctet_core::{
     ControlMessage, IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
 };
+use foctet_transport::websock::WebSocketConnection;
 use foctet_transport::websock::WebsockMessageTransport;
 use foctet_transport::{MessageTransport, SecureMessageChannel};
-use websock::{ClientBuilder, ServerBuilder, WebSocketConnection};
+use websock_tungstenite::{ClientBuilder, ServerBuilder};
 
 // Demo identities shared with the browser page (see examples/browser). The
 // initiator (browser or `client` role) uses `CLIENT_SECRET`; the responder
@@ -168,7 +169,8 @@ where
 
 async fn connect_client(
     addr: SocketAddr,
-) -> Result<WebsockMessageTransport<websock::Connection>, Box<dyn Error + Send + Sync>> {
+) -> Result<WebsockMessageTransport<websock_tungstenite::Connection>, Box<dyn Error + Send + Sync>>
+{
     let connection = ClientBuilder::new()
         .build()
         .connect(&format!("ws://{addr}/"))

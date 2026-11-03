@@ -1,7 +1,7 @@
 # Fuzzing
 
-This directory contains `cargo-fuzz` targets for hardening every parser and
-AEAD-open path that consumes attacker-controlled bytes.
+This directory contains `cargo-fuzz` targets for parsers and AEAD-open paths
+that consume attacker-controlled bytes.
 
 ## Prerequisites
 
@@ -13,6 +13,7 @@ cargo install cargo-fuzz --locked
 
 ## Targets
 
+- `storage_formats`: authenticated recovery-share parser and signed streaming files
 - `frame_parser`: `foctet_core::Frame::from_bytes` (stream frame header/wire)
 - `archive_parser`: single- and split-archive decryption entry points
 - `control_message`: control-plane (`ControlMessage`) decoder
@@ -44,19 +45,12 @@ cargo run -p foctet --example gen_fuzz_seeds
 Sealing uses random ephemerals, so regenerated seeds differ byte-for-byte;
 they only need to be valid, not reproducible.
 
-The working corpus (`corpus/`, git-ignored) grows locally. CI uploads each
-corpus as a retained artifact and restores the latest cache on scheduled runs.
-`cargo fuzz` runs libFuzzer with AddressSanitizer on its supported native Linux
-runner; the daily ten-minute-per-target schedule and retained corpora provide
-continuous cumulative coverage comparable to a small dedicated fuzz service.
+The working corpus (`corpus/`, git-ignored) grows locally; retain it between runs.
+`cargo fuzz` uses libFuzzer with AddressSanitizer on supported native targets.
 
-## Triage and service level
-
-CI fuzz failures are security-sensitive. Preserve the crashing input as a
-private artifact, acknowledge it within 2 business days, determine severity
-within 7 days, and target a fix or advisory within 30 days (7 days for critical
-impact). Do not attach an unpatched crash input to a public issue. Add every
-fixed input to the permanent regression corpus before closing the finding.
+Report security-sensitive crashes privately through [SECURITY.md](../SECURITY.md),
+including the crashing input and reproduction command. After a fix, add a
+regression case to the corpus.
 
 ## Run locally
 
@@ -66,3 +60,8 @@ mkdir -p fuzz/corpus/frame_parser
 cp fuzz/seeds/frame_parser/* fuzz/corpus/frame_parser/
 cargo +nightly fuzz run frame_parser -- -max_total_time=300
 ```
+
+The `storage_formats` target also parses bounded canonical Worker TEXT records;
+`signed-text-v1` is a public synthetic syntax seed, not an authenticated record.
+Copy seeds to a temporary corpus directory before fuzzing to keep generated cases
+out of the committed seed set.

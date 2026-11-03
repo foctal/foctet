@@ -1,5 +1,5 @@
 name = "foctet-http-workers-kv-vault"
-main = "build/worker/shim.mjs"
+main = "build/index.js"
 compatibility_date = "2026-03-08"
 
 # KV namespace holding opaque `application/foctet` blobs. `wrangler dev`
@@ -10,4 +10,4 @@ binding = "VAULT_KV"
 id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
 [build]
-command = "cargo install -q worker-build@^0.7 && worker-build --release"
+command = "cargo install -q worker-build --version 0.8.7 --locked && worker-build --release"
