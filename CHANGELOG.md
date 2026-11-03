@@ -45,6 +45,8 @@ Target version: 0.6.0.
   `openSignedTextStorageRecord` APIs.
 - Database/runtime conformance tests, signed-format vectors, parser fuzz coverage
   and checks that distributed crate fixtures match canonical vectors.
+- Crate-local protocol vectors for running the facade's tests without the
+  workspace checkout, and license texts in every distributed Rust crate.
 
 ### Changed
 
@@ -57,6 +59,11 @@ Target version: 0.6.0.
 - `ArchiveBuildSecrets` implements `Drop` and redacts secrets in `Debug` output.
   Code that moved fields out of this struct must borrow them or explicitly clone
   a required value.
+- `ArchiveError` adds `Io` and `Stream` variants; update exhaustive matches.
+  `ArchiveError`, `HttpSealer`, and `AxumSealer` no longer implement `UnwindSafe`
+  or `RefUnwindSafe`. Downstream panic boundaries that capture these types must
+  be reviewed; a caught panic does not make partially used cryptographic state
+  safe to resume.
 - HTTP body replacement removes obsolete framing headers. Additional bound
   headers cannot include rewritten content type/framing fields or the
   `x-foctet-*` namespace.
