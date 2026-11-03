@@ -1,0 +1,70 @@
+{
+  "mutations": [
+    {
+      "id": "frame_unknown_version",
+      "fixture": "frame-v0.json",
+      "field": "frame_hex",
+      "offset": 2,
+      "xor": 255,
+      "expected": "unsupported_version"
+    },
+    {
+      "id": "frame_unknown_profile",
+      "fixture": "frame-v0.json",
+      "field": "frame_hex",
+      "offset": 4,
+      "xor": 254,
+      "expected": "unsupported_profile"
+    },
+    {
+      "id": "frame_ciphertext_corruption",
+      "fixture": "frame-v0.json",
+      "field": "frame_hex",
+      "offset_from_end": 1,
+      "xor": 1,
+      "expected": "authentication_failure"
+    },
+    {
+      "id": "client_hello_signature_corruption",
+      "fixture": "handshake-v0.json",
+      "field": "client_hello_hex",
+      "offset_from_end": 1,
+      "xor": 128,
+      "expected": "signature_failure"
+    },
+    {
+      "id": "archive_manifest_corruption",
+      "fixture": "archive-v0.json",
+      "field": "manifest_hex",
+      "offset_from_end": 1,
+      "xor": 1,
+      "expected": "authentication_failure"
+    }
+  ],
+  "literals": [
+    {
+      "id": "low_order_x25519",
+      "hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expected": "low_order_rejected"
+    },
+    {
+      "id": "truncated_body_header",
+      "hex": "464f435445544842",
+      "expected": "truncated"
+    },
+    {
+      "id": "truncated_stream_header",
+      "hex": "464f435445544853",
+      "expected": "truncated"
+    },
+    {
+      "id": "malformed_control",
+      "hex": "4643544c0001",
+      "expected": "invalid_control"
+    }
+  ],
+  "boundaries": {
+    "maximum_key_id": 255,
+    "replay_window": 4096
+  }
+}

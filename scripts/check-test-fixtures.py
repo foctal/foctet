@@ -4,6 +4,11 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
 for crate, filename in (
+    ("foctet", "archive-v0.json"),
+    ("foctet", "frame-v0.json"),
+    ("foctet", "handshake-v0.json"),
+    ("foctet", "negative-v0.json"),
+    ("foctet", "rekey-v0.json"),
     ("foctet-archive", "recovery-stream-v1.json"),
     ("foctet-storage-wire", "storage-text-v1.json"),
 ):
