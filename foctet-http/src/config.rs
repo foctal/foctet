@@ -114,12 +114,24 @@ impl HttpSealOptions {
 /// key material), and is only retrievable through the explicitly named
 /// [`HttpOpenOptions::expose_recipient_secret_key`] /
 /// [`HttpOpenOptions::expose_recipient_secret_keys`].
-#[derive(Clone)]
 pub struct HttpOpenOptions {
     // Invariant: always non-empty. Keys are tried in order; index 0 is the
     // primary key returned by `expose_recipient_secret_key`.
     recipient_secret_keys: Vec<Zeroizing<[u8; 32]>>,
     limits: Option<BodyEnvelopeLimits>,
+}
+
+impl Clone for HttpOpenOptions {
+    fn clone(&self) -> Self {
+        // Reserve every rotation slot before copying secrets so appending a key
+        // cannot relocate an initialized key into an unwiped heap allocation.
+        let mut keys = Vec::with_capacity(MAX_HTTP_RECIPIENT_KEYS);
+        keys.extend_from_slice(&self.recipient_secret_keys);
+        Self {
+            recipient_secret_keys: keys,
+            limits: self.limits.clone(),
+        }
+    }
 }
 
 impl core::fmt::Debug for HttpOpenOptions {
@@ -136,8 +148,10 @@ impl core::fmt::Debug for HttpOpenOptions {
 impl HttpOpenOptions {
     /// Creates opening options for a single recipient secret key.
     pub fn new(recipient_secret_key: [u8; 32]) -> Self {
+        let mut keys = Vec::with_capacity(MAX_HTTP_RECIPIENT_KEYS);
+        keys.push(Zeroizing::new(recipient_secret_key));
         Self {
-            recipient_secret_keys: vec![Zeroizing::new(recipient_secret_key)],
+            recipient_secret_keys: keys,
             limits: None,
         }
     }
@@ -150,7 +164,7 @@ impl HttpOpenOptions {
     pub fn from_recipient_keys(
         keys: impl IntoIterator<Item = [u8; 32]>,
     ) -> Result<Self, HttpOptionsError> {
-        let mut recipient_secret_keys = Vec::new();
+        let mut recipient_secret_keys = Vec::with_capacity(MAX_HTTP_RECIPIENT_KEYS);
         for key in keys {
             if recipient_secret_keys.len() >= MAX_HTTP_RECIPIENT_KEYS {
                 return Err(HttpOptionsError::TooManyRecipientKeys);
@@ -200,6 +214,10 @@ impl HttpOpenOptions {
     #[must_use]
     pub fn expose_recipient_secret_key(&self) -> Zeroizing<[u8; 32]> {
         self.recipient_secret_keys[0].clone()
+    }
+
+    pub(crate) fn recipient_keys(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.recipient_secret_keys.iter().map(|key| &**key)
     }
 
     /// Exposes zeroizing copies of every recipient secret key, in try order.

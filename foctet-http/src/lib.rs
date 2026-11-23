@@ -338,7 +338,7 @@ impl HttpOpener {
         F: FnMut([u8; 32]) -> Result<Vec<u8>, HttpError>,
     {
         let mut first_err = None;
-        for key in self.options.expose_recipient_secret_keys() {
+        for key in self.options.recipient_keys() {
             match attempt(*key) {
                 Ok(plain) => return Ok(plain),
                 Err(err) => {
