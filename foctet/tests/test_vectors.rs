@@ -108,6 +108,32 @@ fn frame_vector_matches() {
 
     assert_eq!(plaintext, expected_plaintext);
 
+    let handle =
+        core::KeyHandle::new(core::derive_traffic_keys(&shared_secret, &session_salt, 7).unwrap());
+    let mut messages = core::MessageEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+        handle.clone(),
+        core::Direction::C2S,
+        core::Direction::S2C,
+    );
+    let mut datagrams =
+        core::DatagramEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+            handle,
+            core::Direction::C2S,
+            core::Direction::S2C,
+        );
+    let message = hex_decode(v["message_hex"].as_str().unwrap());
+    let datagram = hex_decode(v["datagram_hex"].as_str().unwrap());
+    assert_eq!(
+        messages.open(&message).unwrap().plaintext,
+        expected_plaintext
+    );
+    assert_eq!(
+        datagrams.open(&datagram).unwrap().plaintext,
+        expected_plaintext
+    );
+    assert!(messages.open(&datagram).is_err());
+    assert!(datagrams.open(&message).is_err());
+
     let mut tampered = frame_bytes.clone();
     let last = tampered
         .last_mut()

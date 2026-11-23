@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Security and compatibility
+
+- Byte streams, reliable messages and datagrams now have separate authenticated
+  frame profiles and nonce domains. Version 0.6.0 could reuse an AEAD nonce
+  when two shapes shared a traffic key, stream ID and sequence number. Upgrade
+  both peers together and establish new sessions. Message and datagram frames
+  are incompatible with 0.6.0. The byte-stream encoding is unchanged.
+- WASM rekey messages now travel inside authenticated reliable-message frames,
+  including when application data uses datagrams. Pass the bytes returned by
+  `prepareRekey()` directly to the peer's `handleControlMessage()` over a
+  reliable channel. Bare in-session rekey messages are rejected.
+- Session-backed byte-stream endpoints claim their send domain once. Key
+  installation rejects rollback and unrelated sessions. Handle the new
+  `Result` from `install_active_keys`. Updating limits preserves replay state.
+- Bound archive and body-stream decoding before allocation, account for split
+  parts in the aggregate archive limit, and reject trailing manifest/header
+  bytes. Archive operations can return `ArchiveError::RandomSource`.
+- Update locked SQLite, URL and heapless dependencies for published advisories.
+
+### Changes
+
+- `send_tlvs` writes the supplied records directly. Callers that manually
+  unwrapped a second application-data record should remove that workaround.
+- Tokio production handshake helpers use a ten-second default deadline. Native
+  transport builders, rekey operations and WASM constructors return errors if
+  the platform random source fails. Update exhaustive matches for
+  `CoreError::RandomSource`. Rust callers of WASM constructors must
+  handle the new result. Legacy infallible core constructors remain available.
+- Enable `foctet/threshold` for signed Shamir archive recovery. Persist a
+  `RecoverySet` with `to_bytes`, and distribute shares encrypted to individual
+  custodians using `RecoveryShare::seal_for_custodian`.
+- The Workers KV example stores signed, revision-bound records and verifies
+  the trusted writer and expected revision on the client.
+
 ## [0.6.0]
 
 ### Security

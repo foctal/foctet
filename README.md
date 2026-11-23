@@ -6,7 +6,8 @@
 
 Transport-agnostic end-to-end encryption for live connections, HTTP bodies,
 stored records, and files. Foctet provides authenticated sessions with rekeying,
-public-key envelopes, signed records, and encrypted archives.
+public-key envelopes, signed records, and encrypted archives with optional
+threshold recovery.
 
 Encrypt and decrypt at trusted endpoints to keep plaintext out of relays and
 storage services. Applications supply trusted identities, key custody, and
@@ -71,6 +72,7 @@ state must not be restored.
 
 ## Guides
 
+- [Blind storage with signed records](docs/zero-knowledge-workers-storage.md) and [threshold archive recovery](docs/storage-integration.md#threshold-recovery)
 - [Choosing an integration](docs/recommended-deployments.md)
 - [Runnable examples](docs/examples.md) and [transport features](docs/transport-matrix.md)
 - [HTTP context rules](docs/http-canonicalization.md) and [recipient-key rotation](docs/key-rotation.md)

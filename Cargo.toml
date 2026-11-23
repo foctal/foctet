@@ -19,7 +19,6 @@ rust-version = "1.88"
 authors = ["shellrow <shellrow@foctal.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/foctal/foctet"
-description = "Transport-agnostic end-to-end encryption layer for secure data transfer."
 
 [workspace.dependencies]
 blake3 = "1.8"
@@ -38,4 +37,3 @@ zeroize = "1.8"
 foctet-core = { path = "foctet-core", version = "0.6.0" }
 foctet-http = { path = "foctet-http", version = "0.6.0" }
 foctet-archive = { path = "foctet-archive", version = "0.6.0" }
-foctet-transport = { path = "foctet-transport", version = "0.6.0" }
