@@ -2,7 +2,7 @@ name = "foctet-http-workers-kv-vault"
 main = "build/index.js"
 compatibility_date = "2026-03-08"
 
-# KV namespace holding opaque `application/foctet` blobs. `wrangler dev`
+# KV namespace holding opaque signed TEXT records. `wrangler dev`
 # simulates this locally; for `wrangler deploy`, create a namespace with
 # `npx wrangler kv namespace create VAULT_KV` and paste the returned id below.
 [[kv_namespaces]]
