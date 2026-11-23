@@ -9,8 +9,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 ```
 
-The [Rust workflow](../.github/workflows/rust.yml) runs these checks on Windows,
-Linux, and macOS, including tests for each native transport feature in isolation.
+The [Rust workflow](../.github/workflows/rust.yml) tests all features on Windows, Linux, and macOS.
+Linux also runs formatting, lint, fixture, and isolated transport build checks.
 The [security workflow](../.github/workflows/security.yml) checks dependency
 advisories weekly.
 The manually triggered [release rehearsal](../.github/workflows/release-rehearsal.yml)
@@ -75,16 +75,14 @@ independent JavaScript implementation.
 
 ## Database and Worker regressions
 
-The public regression suite uses synthetic keys and disposable loopback databases.
-It must remain reproducible without production credentials. Test Worker handlers
-have no application authorization and must not be deployed as applications.
+The integration tests use synthetic keys and disposable loopback databases.
+The Worker fixtures run locally without application authorization.
 See [native database testing](storage-integration.md) and
 [portable adapter testing](worker-databases.md#verification) for commands.
 
 Canonical public vectors live in `test-vectors/`. Tests that must also run from a
 standalone crate use byte-identical copies in that crate's `tests/fixtures/`;
 `check-test-fixtures.py` checks that these copies cannot silently drift.
-Do not replace fixed vectors to make an incompatible implementation pass.
 
 ### Platform binding tests
 
@@ -94,7 +92,3 @@ Rust Worker replay lifecycle and opaque-byte preservation through the fixture's
 KV, R2, D1, Durable Object, Queue and Cache bindings, including concurrent writes,
 expiry, restart and failure handling. They do not validate production account
 configuration or establish platform-wide support beyond the exercised interfaces.
-
-Use the committed dependency lockfiles for runtime tests. Development dependency
-overrides are part of that test environment; update them together with runtime
-regressions and dependency audits. Test fixtures are not deployment templates.

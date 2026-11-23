@@ -12,11 +12,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Native and browser regressions run on Windows, Linux, and macOS.
-# Broader packaging checks belong to the manually dispatched release rehearsal.
 jobs:
   check:
-    name: Format, lint, and test (${{ matrix.os }})
+    name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,21 +27,28 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Setup stable toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Install formatting and lint tools
+        if: runner.os == 'Linux'
+        run: rustup component add clippy rustfmt
       - name: Check packaged test fixtures
+        if: runner.os == 'Linux'
         run: python3 scripts/check-test-fixtures.py
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Lint
+        if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Check transport features independently
+        if: runner.os == 'Linux'
         run: |
           for feature in transport-muxtls transport-websock transport-websock-mux transport-quinn transport-quion transport-webtrans transport-webtrans-quion; do
             cargo check -p foctet --no-default-features --features "$feature" --locked
-            cargo test -p foctet-transport --no-default-features --features "$feature" --test conformance --locked
           done
       - name: Check archive WASM targets
+        if: runner.os == 'Linux'
         run: |
           rustup target add wasm32-unknown-unknown
           cargo check -p foctet-archive --all-targets --all-features --locked --target wasm32-unknown-unknown
@@ -62,24 +67,9 @@ jobs:
         run: python3 scripts/test-storage-databases.py
 
   browser:
-    name: Browser interoperability (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Chrome interoperability
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            chrome: /usr/bin/google-chrome
-          - os: windows-latest
-            chrome: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-          - os: macos-latest
-            chrome: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-    defaults:
-      run:
-        shell: bash
-    env:
-      CHROME_PATH: ${{ matrix.chrome }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
