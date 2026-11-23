@@ -80,19 +80,34 @@ in the application context. For arbitrary output writers, discard all provisiona
 output on error. Memory use depends on configured chunk limits, concurrent streams
 and the underlying reader/writer buffers; measure it for the deployment workload.
 
-Enable archive `threshold` for `create_threshold_archive` and
-`recover_threshold_archive`. Keep the returned `RecoverySet` in trusted metadata,
-protect each `RecoveryShare::expose_bytes()` under a different custodian's key,
-and require the writer pin on recovery. Rotate by creating a fresh set/archive.
-The threshold convenience API currently uses the bounded in-memory archive format;
-it is not a threshold large-file stream API. Frozen vectors and independent JS
-reconstruction cover all 2-of-3 subsets.
-
 The WASM SDK exposes identity signing, `verifyCiphertext`,
 `openSignedBodyWithContext`, `sealSignedStorageRecord`, and
 `openSignedStorageRecord`. Keys are still extractable endpoint memory. External
 hardware keys can implement the Rust `HandshakeSigner`; browser/WebAuthn identity
 provisioning and recovery UX remain application decisions.
+
+## Threshold recovery
+
+Enable the `threshold` feature on `foctet` or `foctet-archive`.
+`create_threshold_archive` produces an encrypted in-memory archive, a public
+`RecoverySet`, and one signed share per custodian. Choose 2 to 255 custodians and a quorum between
+two and the number of custodians. The creating endpoint sees the recovery secret
+and must be trusted.
+
+1. Persist `RecoverySet::to_bytes()` and the writer's identity pin in trusted
+   metadata independent of the archive store. Update this checkpoint on rotation.
+2. Call `seal_for_custodian` on each share with that custodian's authenticated
+   X25519 public key. Give each custodian only its own encrypted share.
+3. Restore the checkpoint with `RecoverySet::from_bytes`. Each custodian calls
+   `RecoveryShare::open_for_custodian` with its secret key, the expected set
+   and the trusted writer pin. Send approved shares to a trusted recovery endpoint
+   over authenticated, encrypted channels.
+4. Call `recover_threshold_archive` with distinct shares, the expected set,
+   the writer pin and explicit archive limits. Invalid or duplicate shares
+   cause the entire attempt to fail.
+
+Rotation requires a freshly encrypted archive and a new set. A quorum holding
+old shares can still open an old archive.
 
 ## Runtime and backend requirements
 

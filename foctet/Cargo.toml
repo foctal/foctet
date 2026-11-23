@@ -15,6 +15,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+threshold = ["foctet-archive/threshold"]
 storage-wire = ["dep:foctet-storage-wire"]
 transport = ["dep:foctet-transport"]
 runtime-tokio = ["transport", "foctet-transport/runtime-tokio"]
