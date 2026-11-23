@@ -1,19 +1,6 @@
-//! Zero-knowledge KV vault: a blind storage Worker.
-//!
-//! This Worker holds no key and never decrypts. It only moves opaque
-//! `application/foctet` blobs in and out of Cloudflare KV, keyed by record id:
-//!
-//! - `PUT /vault/:id`    — store the request body bytes under `id`.
-//! - `GET /vault/:id`    — return the stored bytes (404 if absent).
-//! - `DELETE /vault/:id` — remove the record.
-//!
-//! Confidentiality and integrity come entirely from the client, which seals each
-//! value with `foctet_core::storage::seal_storage_record` — binding the record's
-//! namespace / id / version into the AEAD — before it ever reaches this Worker.
-//! A compromised Worker or KV store therefore cannot read a value, nor swap one
-//! record's ciphertext for another or roll back to a stale version without the
-//! client's open failing.
-
+//! Blind KV storage for signed TEXT records. The client holds the keys and
+//! verifies the writer and expected revision. These local demo routes are public.
+use futures_util::StreamExt;
 use worker::{Context, Env, Method, Request, Response, Result, event};
 
 #[event(fetch)]
@@ -26,8 +13,15 @@ pub async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response
     let kv = env.kv("VAULT_KV")?;
     match req.method() {
         Method::Put => {
-            // Store opaque ciphertext; the Worker cannot read it.
-            let bytes = req.bytes().await?;
+            let mut stream = req.stream()?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                if chunk.len() > 1024 * 1024 - bytes.len() {
+                    return Response::error("Record too large", 413);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
             kv.put_bytes(&id, &bytes)?.execute().await?;
             Ok(Response::empty()?.with_status(204))
         }
@@ -36,7 +30,7 @@ pub async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response
                 let mut response = Response::from_bytes(bytes)?;
                 response
                     .headers_mut()
-                    .set("content-type", "application/foctet")?;
+                    .set("content-type", "text/plain; charset=utf-8")?;
                 Ok(response)
             }
             None => Response::error("Not Found", 404),

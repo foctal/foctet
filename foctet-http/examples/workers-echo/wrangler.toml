@@ -2,9 +2,6 @@ name = "foctet-http-workers-echo"
 main = "build/index.js"
 compatibility_date = "2026-03-08"
 
-[vars]
-FOCTET_INTEGRATION_TESTS = "1"
-
 [[durable_objects.bindings]]
 name = "FOCTET_REPLAY"
 class_name = "FoctetReplay"
