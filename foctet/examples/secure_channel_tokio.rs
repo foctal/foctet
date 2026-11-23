@@ -1,36 +1,9 @@
+mod common;
+
 use std::error::Error;
 
-use foctet::core::{
-    AsyncSecureChannel, IdentityKeyPair, PeerIdentity, RekeyThresholds, Session, SessionAuthConfig,
-};
+use foctet::core::{AsyncSecureChannel, Session};
 use tokio::net::{TcpListener, TcpStream};
-
-fn make_session_pair() -> (Session, Session) {
-    let thresholds = RekeyThresholds::default();
-    let client_identity = IdentityKeyPair::from_secret_key_bytes([0x41; 32]);
-    let server_identity = IdentityKeyPair::from_secret_key_bytes([0x61; 32]);
-    let client_auth = SessionAuthConfig::new()
-        .with_local_identity(client_identity.clone())
-        .with_peer_identity(PeerIdentity::new(server_identity.public_key()))
-        .require_peer_authentication(true);
-    let server_auth = SessionAuthConfig::new()
-        .with_local_identity(server_identity)
-        .with_peer_identity(PeerIdentity::new(client_identity.public_key()))
-        .require_peer_authentication(true);
-
-    let (mut initiator, hello) = Session::new_initiator_with_auth(thresholds.clone(), client_auth);
-    let mut responder = Session::new_responder_with_auth(thresholds, server_auth);
-
-    let server_hello = responder
-        .handle_control(&hello)
-        .expect("responder handle client hello")
-        .expect("server hello");
-    initiator
-        .handle_control(&server_hello)
-        .expect("initiator handle server hello");
-
-    (initiator, responder)
-}
 
 async fn run_server(
     listener: TcpListener,
@@ -67,7 +40,7 @@ async fn run_client(addr: std::net::SocketAddr, session: Session) -> Result<(), 
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let (client_session, server_session) = make_session_pair();
+    let (client_session, server_session) = common::session_pair()?;
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;

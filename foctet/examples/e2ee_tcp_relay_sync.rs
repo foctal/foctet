@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     error::Error,
     io::{Read, Write},
@@ -6,17 +8,7 @@ use std::{
     thread,
 };
 
-use foctet::core::{Direction, KeyHandle, derive_traffic_keys, io::SyncIo};
-
-fn derive_demo_keys() -> Result<KeyHandle, foctet::core::CoreError> {
-    let shared_secret = [0x11u8; 32];
-    let session_salt = [0x22u8; 32];
-    Ok(KeyHandle::new(derive_traffic_keys(
-        &shared_secret,
-        &session_salt,
-        1,
-    )?))
-}
+use foctet::core::{Direction, KeyHandle, io::SyncIo};
 
 fn hex_prefix(bytes: &[u8], n: usize) -> String {
     bytes
@@ -113,7 +105,10 @@ fn run_client(relay_addr: SocketAddr, keys: KeyHandle) -> Result<(), Box<dyn Err
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let keys = derive_demo_keys()?;
+    let (client, server) = common::session_pair()?;
+    let keys = client
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
 
     let server_listener = TcpListener::bind("127.0.0.1:0")?;
     let server_addr = server_listener.local_addr()?;
@@ -123,7 +118,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
 
-    let server_keys = keys.clone();
+    let server_keys = server
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
     let server_thread = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
         run_server(server_listener, server_keys)
     });

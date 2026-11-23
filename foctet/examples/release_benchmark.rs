@@ -1,6 +1,4 @@
-//! Repeatable release-gate microbenchmark for sizing guidance.
-//!
-//! This is not a production example: it uses fixed keys so runs are comparable.
+//! Measures body encryption, body decryption and archive creation with fixed benchmark keys.
 
 use std::{hint::black_box, time::Instant};
 

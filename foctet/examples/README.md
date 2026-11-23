@@ -16,6 +16,6 @@ cargo run -p foctet --example file_archive_roundtrip -- <input_file> <output_dir
 
 Notes:
 
-- Demo keys in examples are fixed for readability and are not production-safe.
+- Loopback channel examples generate fresh identities and exchange pins in process. Provision peer pins independently when the endpoints run on different hosts.
 - New production integrations should usually start with the authenticated `secure_channel_*` examples.
 - For a full cross-crate map of examples, see the [example guide](../../docs/examples.md).
