@@ -64,7 +64,9 @@ fn encode_split_archive_from_built(
     built: crate::types::BuiltArchive,
     target_part_size: usize,
 ) -> Result<SplitArchive, ArchiveError> {
-    let part_groups = partition_chunks(built.chunks, target_part_size)?;
+    let part_header_bytes = PART_MAGIC.len() + 2 + 16 + 3 * 4;
+    let max_records_bytes = ArchiveLimits::default().max_part_bytes - part_header_bytes;
+    let part_groups = partition_chunks(built.chunks, target_part_size.min(max_records_bytes))?;
 
     let mut part_entries = Vec::with_capacity(part_groups.len());
     let mut parts = Vec::with_capacity(part_groups.len());
@@ -163,6 +165,20 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
         return Err(ArchiveError::LimitExceeded("manifest_bytes"));
     }
 
+    if part_files.len() > limits.total_parts() {
+        return Err(ArchiveError::LimitExceeded("provided_parts"));
+    }
+    if manifest_bytes.len() > limits.max_archive_bytes {
+        return Err(ArchiveError::LimitExceeded("archive_bytes"));
+    }
+    part_files
+        .iter()
+        .try_fold(manifest_bytes.len(), |sum, part| {
+            sum.checked_add(part.len())
+                .filter(|n| *n <= limits.max_archive_bytes)
+                .ok_or(ArchiveError::LimitExceeded("archive_bytes"))
+        })?;
+
     let mut rd = Cursor::new(manifest_bytes);
 
     let mut magic = [0u8; 8];
@@ -184,6 +200,9 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
     if total_parts > limits.total_parts() {
         return Err(ArchiveError::LimitExceeded("total_parts"));
     }
+    if total_parts > (manifest_bytes.len() - rd.position() as usize) / 44 {
+        return Err(ArchiveError::Truncated);
+    }
     let manifest_parts = parse_manifest_part_entries(&mut rd, total_parts, limits)?;
 
     let header_len = read_u32_be(&mut rd)? as usize;
@@ -198,6 +217,9 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
     rd.read_exact(&mut header_ct)
         .map_err(|_| ArchiveError::Truncated)?;
 
+    if rd.position() as usize != manifest_bytes.len() {
+        return Err(ArchiveError::Parse);
+    }
     let dek = unwrap_dek_from_recipients(&wrapped, recipient_private_key)?;
     let aad_prefix_len = manifest_prefix_len(&wrapped, total_parts);
     if aad_prefix_len > manifest_bytes.len() {
@@ -212,9 +234,6 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
         return Err(ArchiveError::LimitExceeded("total_chunks"));
     }
 
-    if part_files.len() > limits.total_parts() {
-        return Err(ArchiveError::LimitExceeded("provided_parts"));
-    }
     if part_files.len() != total_parts {
         return Err(ArchiveError::InvalidInput(
             "provided part count does not match manifest",
@@ -262,7 +281,9 @@ pub fn decrypt_split_archive_to_bytes_with_limits(
             if idx >= header.manifest.total_chunks {
                 return Err(ArchiveError::Parse);
             }
-            chunks_by_index.insert(idx, ct);
+            if chunks_by_index.insert(idx, ct).is_some() {
+                return Err(ArchiveError::Parse);
+            }
         }
     }
 
