@@ -21,8 +21,6 @@ use foctet_core::{
     BodyEnvelopeError, BodyEnvelopeLimits, open_body, open_body_with_context, seal_body,
     seal_body_with_context,
 };
-use getrandom::SysRng;
-use rand_core::UnwrapErr;
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -127,10 +125,13 @@ pub struct KeyPair {
 impl KeyPair {
     /// Generates a fresh random X25519 key pair.
     #[wasm_bindgen(constructor)]
-    pub fn generate() -> KeyPair {
-        let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+    pub fn generate() -> Result<KeyPair, JsError> {
+        let mut bytes = zeroize::Zeroizing::new([0; KEY_LEN]);
+        getrandom::fill(&mut bytes[..])
+            .map_err(|_| JsError::new("secure random source unavailable"))?;
+        let secret = StaticSecret::from(*bytes);
         let public = PublicKey::from(&secret).to_bytes();
-        KeyPair { secret, public }
+        Ok(KeyPair { secret, public })
     }
 
     /// Reconstructs a key pair from 32 secret-key bytes.
@@ -245,7 +246,7 @@ mod tests {
     use super::*;
 
     fn keypair_bytes() -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
-        let kp = KeyPair::generate();
+        let kp = KeyPair::generate().unwrap();
         let public = <[u8; KEY_LEN]>::try_from(kp.public_key().as_slice()).expect("public");
         let secret = <[u8; KEY_LEN]>::try_from(kp.secret_key().as_slice()).expect("secret");
         (public, secret)
@@ -289,7 +290,7 @@ mod tests {
 
     #[test]
     fn from_secret_key_recovers_public() {
-        let kp = KeyPair::generate();
+        let kp = KeyPair::generate().unwrap();
         let rebuilt =
             KeyPair::from_secret_key(&kp.secret_key()).unwrap_or_else(|_| panic!("from secret"));
         assert_eq!(rebuilt.public_key(), kp.public_key());

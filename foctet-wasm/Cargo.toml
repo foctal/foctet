@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "WebAssembly bindings for Foctet end-to-end encryption (body envelopes)"
+description = "WebAssembly bindings for Foctet encrypted sessions, body envelopes and signed records"
 readme = "README.md"
 
 [package.metadata.docs.rs]
@@ -22,12 +22,11 @@ foctet-core = { path = "../foctet-core", version = "0.6.0", default-features = f
 foctet-http = { path = "../foctet-http", version = "0.6.0", default-features = false }
 wasm-bindgen = "0.2"
 x25519-dalek = { workspace = true }
-rand_core = { workspace = true }
 getrandom.workspace = true
 zeroize = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# `SysRng` uses getrandom; wasm32 needs explicit JavaScript support.
+# Use the JavaScript random source in browser builds.
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom = { workspace = true, features = ["wasm_js"] }
 

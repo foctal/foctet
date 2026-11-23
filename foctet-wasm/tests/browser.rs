@@ -23,7 +23,7 @@ wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
 fn body_envelope_roundtrip() {
-    let kp = KeyPair::generate();
+    let kp = KeyPair::generate().unwrap();
     let plaintext = b"browser body envelope roundtrip";
 
     let Ok(envelope) = seal_body_js(plaintext, &kp.public_key(), b"browser-key") else {
@@ -37,7 +37,7 @@ fn body_envelope_roundtrip() {
 
 #[wasm_bindgen_test]
 fn context_binding_is_enforced() {
-    let kp = KeyPair::generate();
+    let kp = KeyPair::generate().unwrap();
     let plaintext = b"browser context binding";
 
     let Ok(envelope) =
@@ -78,8 +78,8 @@ fn establish(
 
 #[wasm_bindgen_test]
 fn authenticated_session_handshake_and_messages() {
-    let client_id = WasmIdentityKeyPair::generate();
-    let server_id = WasmIdentityKeyPair::generate();
+    let client_id = WasmIdentityKeyPair::generate().unwrap();
+    let server_id = WasmIdentityKeyPair::generate().unwrap();
 
     let Ok(client_auth) = WasmAuthConfig::authenticated(&client_id, &server_id.public_key()) else {
         panic!("client auth config");
@@ -89,8 +89,8 @@ fn authenticated_session_handshake_and_messages() {
     };
 
     let (mut client, mut server) = establish(
-        FoctetSession::new_initiator(&client_auth),
-        FoctetSession::new_responder(&server_auth),
+        FoctetSession::new_initiator(&client_auth).unwrap(),
+        FoctetSession::new_responder(&server_auth).unwrap(),
     );
     assert!(client.peer_authenticated());
     assert!(server.peer_authenticated());
@@ -120,8 +120,8 @@ fn authenticated_session_handshake_and_messages() {
 fn in_session_rekey_in_the_browser() {
     let auth = WasmAuthConfig::unauthenticated_for_testing();
     let (mut client, mut server) = establish(
-        FoctetSession::new_initiator(&auth),
-        FoctetSession::new_responder(&auth),
+        FoctetSession::new_initiator(&auth).unwrap(),
+        FoctetSession::new_responder(&auth).unwrap(),
     );
 
     let key_before = client.active_key_id().expect("active key id");
@@ -233,8 +233,8 @@ async fn secure_datagram_channel_over_browser_webtransport_shape() {
 fn datagram_session_roundtrip() {
     let auth = WasmAuthConfig::unauthenticated_for_testing();
     let (mut client, mut server) = establish(
-        FoctetSession::new_datagram_initiator(&auth, 1200),
-        FoctetSession::new_datagram_responder(&auth, 1200),
+        FoctetSession::new_datagram_initiator(&auth, 1200).unwrap(),
+        FoctetSession::new_datagram_responder(&auth, 1200).unwrap(),
     );
 
     let Ok(datagram) = client.seal_datagram(0, 0, b"browser datagram payload") else {
@@ -255,8 +255,8 @@ fn signed_storage_and_body_verify_writer_before_decryption() {
         KeyPair, WasmIdentityKeyPair, open_signed_body_js, open_signed_storage_record_js,
         seal_body_with_context_js, seal_signed_storage_record_js,
     };
-    let recipient = KeyPair::generate();
-    let writer = WasmIdentityKeyPair::generate();
+    let recipient = KeyPair::generate().unwrap();
+    let writer = WasmIdentityKeyPair::generate().unwrap();
     let sealed = seal_signed_storage_record_js(
         b"private",
         &recipient.public_key(),
@@ -312,7 +312,7 @@ fn signed_storage_and_body_verify_writer_before_decryption() {
             &recipient.secret_key(),
             b"context",
             &sig,
-            &WasmIdentityKeyPair::generate().public_key()
+            &WasmIdentityKeyPair::generate().unwrap().public_key()
         )
         .is_err()
     );

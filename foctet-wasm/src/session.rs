@@ -50,10 +50,10 @@ pub struct WasmIdentityKeyPair {
 impl WasmIdentityKeyPair {
     /// Generates a fresh random identity key pair.
     #[wasm_bindgen(constructor)]
-    pub fn generate() -> WasmIdentityKeyPair {
-        WasmIdentityKeyPair {
-            inner: IdentityKeyPair::generate(),
-        }
+    pub fn generate() -> Result<WasmIdentityKeyPair, JsError> {
+        Ok(WasmIdentityKeyPair {
+            inner: IdentityKeyPair::try_generate().map_err(core_to_js)?,
+        })
     }
 
     /// Reconstructs an identity key pair from 32 secret-key bytes.
@@ -257,14 +257,6 @@ impl From<DecodedDatagram> for WasmDecodedMessage {
     }
 }
 
-/// The data-framing shape a session uses after the handshake. A session commits
-/// to exactly one so message and datagram framing can never share a
-/// `(key_id, stream_id)` sequence space (which would reuse a nonce).
-enum SessionEndpoint {
-    Message(MessageEndpoint),
-    Datagram(DatagramEndpoint),
-}
-
 #[derive(Clone, Copy)]
 enum TransportKind {
     /// Reliable, ordered, message-bounded framing (raw WebSocket, WebTransport
@@ -287,7 +279,8 @@ enum TransportKind {
 pub struct FoctetSession {
     session: Session,
     kind: TransportKind,
-    endpoint: Option<SessionEndpoint>,
+    messages: Option<MessageEndpoint>,
+    datagrams: Option<DatagramEndpoint>,
     pending_handshake: Option<Vec<u8>>,
     pending_rekey: Option<PreparedRekey>,
 }
@@ -299,16 +292,16 @@ impl FoctetSession {
     /// Call [`Self::initial_handshake_message`] next to obtain the first message
     /// to send to the peer.
     #[wasm_bindgen(js_name = newInitiator)]
-    pub fn new_initiator(auth: &WasmAuthConfig) -> FoctetSession {
-        FoctetSession::initiator(auth.build())
+    pub fn new_initiator(auth: &WasmAuthConfig) -> Result<FoctetSession, JsError> {
+        FoctetSession::initiator(auth.build()).map_err(core_to_js)
     }
 
     /// Starts a session as the handshake responder.
     ///
     /// Feed the initiator's first message to [`Self::handle_handshake_message`].
     #[wasm_bindgen(js_name = newResponder)]
-    pub fn new_responder(auth: &WasmAuthConfig) -> FoctetSession {
-        FoctetSession::responder(auth.build())
+    pub fn new_responder(auth: &WasmAuthConfig) -> Result<FoctetSession, JsError> {
+        FoctetSession::responder(auth.build()).map_err(core_to_js)
     }
 
     /// Starts a datagram-mode session as the initiator (for WebTransport
@@ -321,8 +314,9 @@ impl FoctetSession {
     pub fn new_datagram_initiator(
         auth: &WasmAuthConfig,
         max_datagram_size: usize,
-    ) -> FoctetSession {
+    ) -> Result<FoctetSession, JsError> {
         FoctetSession::initiator_with_kind(auth.build(), datagram_kind(max_datagram_size))
+            .map_err(core_to_js)
     }
 
     /// Starts a datagram-mode session as the responder. See
@@ -331,8 +325,9 @@ impl FoctetSession {
     pub fn new_datagram_responder(
         auth: &WasmAuthConfig,
         max_datagram_size: usize,
-    ) -> FoctetSession {
+    ) -> Result<FoctetSession, JsError> {
         FoctetSession::responder_with_kind(auth.build(), datagram_kind(max_datagram_size))
+            .map_err(core_to_js)
     }
 
     /// Returns the initiator's first handshake message to send, exactly once.
@@ -419,11 +414,13 @@ impl FoctetSession {
         if self.session.state() == SessionState::Closed {
             return true;
         }
-        match self.endpoint.as_ref() {
-            Some(SessionEndpoint::Message(endpoint)) => endpoint.is_terminal(),
-            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.is_terminal(),
-            None => false,
-        }
+        self.messages
+            .as_ref()
+            .is_some_and(MessageEndpoint::is_terminal)
+            || self
+                .datagrams
+                .as_ref()
+                .is_some_and(DatagramEndpoint::is_terminal)
     }
 
     /// Whether the peer proved a pinned identity during the handshake.
@@ -483,59 +480,94 @@ fn datagram_kind(max_datagram_size: usize) -> TransportKind {
 
 // Inner, native-testable logic (no `JsError`), shared by the wasm wrappers above.
 impl FoctetSession {
-    fn initiator(auth: SessionAuthConfig) -> Self {
+    fn initiator(auth: SessionAuthConfig) -> Result<Self, CoreError> {
         Self::initiator_with_kind(auth, TransportKind::Message)
     }
 
-    fn responder(auth: SessionAuthConfig) -> Self {
+    fn responder(auth: SessionAuthConfig) -> Result<Self, CoreError> {
         Self::responder_with_kind(auth, TransportKind::Message)
     }
 
-    fn initiator_with_kind(auth: SessionAuthConfig, kind: TransportKind) -> Self {
-        let (session, hello) = Session::new_initiator_with_auth(RekeyThresholds::default(), auth);
-        FoctetSession {
+    fn initiator_with_kind(
+        auth: SessionAuthConfig,
+        kind: TransportKind,
+    ) -> Result<Self, CoreError> {
+        let (session, hello) =
+            Session::try_new_initiator_with_auth(RekeyThresholds::default(), auth)?;
+        Ok(FoctetSession {
             session,
             kind,
-            endpoint: None,
+            messages: None,
+            datagrams: None,
             pending_handshake: Some(hello.encode()),
             pending_rekey: None,
-        }
+        })
     }
 
-    fn responder_with_kind(auth: SessionAuthConfig, kind: TransportKind) -> Self {
-        FoctetSession {
-            session: Session::new_responder_with_auth(RekeyThresholds::default(), auth),
+    fn responder_with_kind(
+        auth: SessionAuthConfig,
+        kind: TransportKind,
+    ) -> Result<Self, CoreError> {
+        Ok(FoctetSession {
+            session: Session::try_new_responder_with_auth(RekeyThresholds::default(), auth)?,
             kind,
-            endpoint: None,
+            messages: None,
+            datagrams: None,
             pending_handshake: None,
             pending_rekey: None,
-        }
+        })
     }
 
     fn handle_handshake_inner(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, CoreError> {
-        let control = ControlMessage::decode(message)?;
-        let reply = match self.session.handle_control(&control) {
-            Ok(reply) => reply,
-            Err(error) => {
-                self.pending_rekey = None;
-                self.endpoint = None;
-                return Err(error);
-            }
+        let result = self.receive_control(message);
+        if result.is_err() {
+            self.terminate_inner();
+        }
+        result
+    }
+
+    fn receive_control(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, CoreError> {
+        if self.is_terminal() {
+            return Err(CoreError::TransportTerminal);
+        }
+        let control = if self.session.state() == SessionState::Active {
+            let endpoint = self
+                .messages
+                .as_mut()
+                .ok_or(CoreError::InvalidSessionState)?;
+            endpoint.open_rekey(message)?
+        } else {
+            ControlMessage::decode(message)?
         };
+        let reply = self.session.handle_control(&control)?;
         self.ensure_endpoint()?;
-        // A rekey control message rotates the session's active key; adopt it
-        // on the framing endpoint so subsequent seals use the new key while
-        // retained previous keys still open in-flight frames.
-        self.sync_endpoint_keys();
+        self.sync_endpoint_keys()?;
         Ok(reply.map(|msg| msg.encode()))
     }
 
     fn prepare_rekey_inner(&mut self) -> Result<Vec<u8>, CoreError> {
+        if self.is_terminal() {
+            return Err(CoreError::TransportTerminal);
+        }
         if self.pending_rekey.is_some() {
             return Err(CoreError::InvalidSessionState);
         }
         let prepared = self.session.prepare_rekey()?;
-        let message = prepared.control_message().encode();
+        let endpoint = self
+            .messages
+            .as_mut()
+            .ok_or(CoreError::InvalidSessionState)?;
+        let message = match endpoint.seal(
+            0,
+            foctet_core::frame::flags::IS_CONTROL,
+            &prepared.control_message().encode(),
+        ) {
+            Ok(message) => message,
+            Err(error) => {
+                self.terminate_inner();
+                return Err(error);
+            }
+        };
         self.pending_rekey = Some(prepared);
         Ok(message)
     }
@@ -546,8 +578,7 @@ impl FoctetSession {
             .take()
             .ok_or(CoreError::InvalidSessionState)?;
         self.session.commit_rekey(prepared)?;
-        self.sync_endpoint_keys();
-        Ok(())
+        self.sync_endpoint_keys()
     }
 
     fn cancel_prepared_rekey_inner(&mut self) -> Result<(), CoreError> {
@@ -561,49 +592,41 @@ impl FoctetSession {
     fn terminate_inner(&mut self) {
         self.pending_handshake = None;
         self.pending_rekey = None;
-        self.endpoint = None;
+        self.messages = None;
+        self.datagrams = None;
         self.session.terminate();
     }
 
-    /// Installs the session's current active key on the framing endpoint
-    /// (no-op before the endpoint exists; the endpoint keeps previous key
-    /// generations for frames still in flight across the rotation).
-    fn sync_endpoint_keys(&mut self) {
-        if let (Some(endpoint), Some(keys)) = (self.endpoint.as_mut(), self.session.active_keys()) {
-            match endpoint {
-                SessionEndpoint::Message(e) => {
-                    if e.active_key_id() != keys.key_id {
-                        e.install_active_keys(keys);
-                    }
-                }
-                SessionEndpoint::Datagram(e) => {
-                    if e.active_key_id() != keys.key_id {
-                        e.install_active_keys(keys);
-                    }
-                }
+    fn sync_endpoint_keys(&mut self) -> Result<(), CoreError> {
+        if let Some(keys) = self.session.active_keys() {
+            if let Some(endpoint) = &mut self.messages {
+                endpoint.install_active_keys(keys.clone())?;
+            }
+            if let Some(endpoint) = &mut self.datagrams {
+                endpoint.install_active_keys(keys)?;
             }
         }
+        Ok(())
     }
 
-    /// Builds the framing endpoint (matching the session's mode) once the
-    /// handshake reaches `Active`.
     fn ensure_endpoint(&mut self) -> Result<(), CoreError> {
-        if self.endpoint.is_none() && self.session.state() == SessionState::Active {
-            self.endpoint = Some(match self.kind {
-                TransportKind::Message => SessionEndpoint::Message(
-                    MessageEndpoint::from_session_lease(self.session.claim_message_endpoint()?),
-                ),
-                TransportKind::Datagram { max_datagram_size } => {
-                    let mut config = DatagramConfig::default();
-                    if max_datagram_size > 0 {
-                        config.max_datagram_size = max_datagram_size;
-                    }
-                    SessionEndpoint::Datagram(DatagramEndpoint::from_session_lease_with_config(
-                        self.session.claim_datagram_endpoint()?,
-                        config,
-                    ))
+        if self.is_terminal() {
+            return Err(CoreError::TransportTerminal);
+        }
+        if self.messages.is_none() && self.session.state() == SessionState::Active {
+            self.messages = Some(MessageEndpoint::from_session_lease(
+                self.session.claim_message_endpoint()?,
+            ));
+            if let TransportKind::Datagram { max_datagram_size } = self.kind {
+                let mut config = DatagramConfig::default();
+                if max_datagram_size > 0 {
+                    config.max_datagram_size = max_datagram_size;
                 }
-            });
+                self.datagrams = Some(DatagramEndpoint::from_session_lease_with_config(
+                    self.session.claim_datagram_endpoint()?,
+                    config,
+                ));
+            }
         }
         Ok(())
     }
@@ -615,16 +638,18 @@ impl FoctetSession {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
         self.ensure_endpoint()?;
-        match self.endpoint.as_mut() {
-            Some(SessionEndpoint::Message(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
+        match self.messages.as_mut() {
+            Some(endpoint) if matches!(self.kind, TransportKind::Message) => {
+                endpoint.seal(stream_id, flags, plaintext)
+            }
             _ => Err(CoreError::InvalidSessionState),
         }
     }
 
     fn open_message_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
         self.ensure_endpoint()?;
-        match self.endpoint.as_mut() {
-            Some(SessionEndpoint::Message(endpoint)) => endpoint.open(message),
+        match self.messages.as_mut() {
+            Some(endpoint) if matches!(self.kind, TransportKind::Message) => endpoint.open(message),
             _ => Err(CoreError::InvalidSessionState),
         }
     }
@@ -636,16 +661,16 @@ impl FoctetSession {
         plaintext: &[u8],
     ) -> Result<Vec<u8>, CoreError> {
         self.ensure_endpoint()?;
-        match self.endpoint.as_mut() {
-            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.seal(stream_id, flags, plaintext),
+        match self.datagrams.as_mut() {
+            Some(endpoint) => endpoint.seal(stream_id, flags, plaintext),
             _ => Err(CoreError::InvalidSessionState),
         }
     }
 
     fn open_datagram_inner(&mut self, datagram: &[u8]) -> Result<DecodedDatagram, CoreError> {
         self.ensure_endpoint()?;
-        match self.endpoint.as_mut() {
-            Some(SessionEndpoint::Datagram(endpoint)) => endpoint.open(datagram),
+        match self.datagrams.as_mut() {
+            Some(endpoint) => endpoint.open(datagram),
             _ => Err(CoreError::InvalidSessionState),
         }
     }
@@ -675,9 +700,9 @@ mod tests {
     #[test]
     fn unauthenticated_handshake_then_message_roundtrip_and_replay() {
         let mut initiator =
-            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         let mut responder =
-            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
 
         drive_handshake(&mut initiator, &mut responder);
         assert!(initiator.is_established() && responder.is_established());
@@ -720,8 +745,8 @@ mod tests {
         )
         .expect("responder auth");
 
-        let mut initiator = FoctetSession::initiator(initiator_auth.build());
-        let mut responder = FoctetSession::responder(responder_auth.build());
+        let mut initiator = FoctetSession::initiator(initiator_auth.build()).unwrap();
+        let mut responder = FoctetSession::responder(responder_auth.build()).unwrap();
 
         drive_handshake(&mut initiator, &mut responder);
         assert!(initiator.is_established() && responder.is_established());
@@ -751,8 +776,8 @@ mod tests {
         let responder_auth =
             WasmAuthConfig::bound_to_channel(&binding).expect("valid channel binding");
 
-        let mut initiator = FoctetSession::initiator(initiator_auth.build());
-        let mut responder = FoctetSession::responder(responder_auth.build());
+        let mut initiator = FoctetSession::initiator(initiator_auth.build()).unwrap();
+        let mut responder = FoctetSession::responder(responder_auth.build()).unwrap();
 
         drive_handshake(&mut initiator, &mut responder);
         assert!(initiator.is_established() && responder.is_established());
@@ -773,8 +798,8 @@ mod tests {
             WasmAuthConfig::bound_to_channel(b"channel-A").expect("valid channel binding");
         let responder_auth =
             WasmAuthConfig::bound_to_channel(b"channel-B").expect("valid channel binding");
-        let mut initiator = FoctetSession::initiator(initiator_auth.build());
-        let mut responder = FoctetSession::responder(responder_auth.build());
+        let mut initiator = FoctetSession::initiator(initiator_auth.build()).unwrap();
+        let mut responder = FoctetSession::responder(responder_auth.build()).unwrap();
 
         let client_hello = initiator.initial_handshake_message().expect("client hello");
         assert!(responder.handle_handshake_inner(&client_hello).is_err());
@@ -815,8 +840,8 @@ mod tests {
         .with_channel_binding(&binding)
         .expect("valid channel binding");
 
-        let mut initiator = FoctetSession::initiator(client_auth.build());
-        let mut responder = FoctetSession::responder(server_auth.build());
+        let mut initiator = FoctetSession::initiator(client_auth.build()).unwrap();
+        let mut responder = FoctetSession::responder(server_auth.build()).unwrap();
         drive_handshake(&mut initiator, &mut responder);
         assert!(initiator.peer_authenticated() && responder.peer_authenticated());
     }
@@ -824,7 +849,7 @@ mod tests {
     #[test]
     fn sealing_before_handshake_fails_closed() {
         let mut initiator =
-            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         assert!(
             !initiator.is_established(),
             "session must not be active before the handshake completes"
@@ -856,8 +881,8 @@ mod tests {
             .with_peer_identity(PeerIdentity::new(initiator_id.public_key()))
             .require_peer_authentication(true);
 
-        let mut initiator = FoctetSession::initiator(initiator_auth);
-        let mut responder = FoctetSession::responder(responder_auth);
+        let mut initiator = FoctetSession::initiator(initiator_auth).unwrap();
+        let mut responder = FoctetSession::responder(responder_auth).unwrap();
 
         let client_hello = initiator.initial_handshake_message().expect("client hello");
         let server_hello = responder
@@ -870,11 +895,28 @@ mod tests {
     }
 
     #[test]
+    fn active_session_rejects_unframed_rekey() {
+        let mut a =
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
+        let mut b =
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
+        drive_handshake(&mut a, &mut b);
+        let raw = a
+            .session
+            .prepare_rekey()
+            .unwrap()
+            .control_message()
+            .encode();
+        assert!(b.handle_handshake_inner(&raw).is_err());
+        assert!(b.is_terminal());
+    }
+
+    #[test]
     fn in_session_rekey_rotates_keys_and_traffic_continues() {
         let mut initiator =
-            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         let mut responder =
-            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         drive_handshake(&mut initiator, &mut responder);
 
         let key_before = initiator.session.active_keys().expect("key").key_id;
@@ -961,9 +1003,9 @@ mod tests {
     #[test]
     fn prepared_rekey_can_be_cancelled_only_before_delivery() {
         let mut initiator =
-            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         let mut responder =
-            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         drive_handshake(&mut initiator, &mut responder);
         let old_key_id = initiator.active_key_id().expect("active key");
 
@@ -989,9 +1031,9 @@ mod tests {
     #[test]
     fn ambiguous_rekey_delivery_can_terminate_the_wasm_session() {
         let mut initiator =
-            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::initiator(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         let mut responder =
-            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing());
+            FoctetSession::responder(SessionAuthConfig::unauthenticated_for_testing()).unwrap();
         drive_handshake(&mut initiator, &mut responder);
 
         initiator
@@ -1012,13 +1054,15 @@ mod tests {
             TransportKind::Datagram {
                 max_datagram_size: 0,
             },
-        );
+        )
+        .unwrap();
         let mut responder = FoctetSession::responder_with_kind(
             SessionAuthConfig::unauthenticated_for_testing(),
             TransportKind::Datagram {
                 max_datagram_size: 0,
             },
-        );
+        )
+        .unwrap();
         drive_handshake(&mut initiator, &mut responder);
 
         // Seal a datagram under the old key, deliver it *after* the rekey —
@@ -1064,13 +1108,15 @@ mod tests {
             TransportKind::Datagram {
                 max_datagram_size: 0,
             },
-        );
+        )
+        .unwrap();
         let mut responder = FoctetSession::responder_with_kind(
             SessionAuthConfig::unauthenticated_for_testing(),
             TransportKind::Datagram {
                 max_datagram_size: 0,
             },
-        );
+        )
+        .unwrap();
 
         drive_handshake(&mut initiator, &mut responder);
         assert!(initiator.is_established() && responder.is_established());
