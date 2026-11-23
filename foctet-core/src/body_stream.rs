@@ -44,7 +44,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use getrandom::SysRng;
-use rand_core::{TryRng, UnwrapErr};
+use rand_core::TryRng;
 use zeroize::Zeroizing;
 
 use crate::body::{
@@ -123,7 +123,19 @@ struct ParsedStreamHeader {
     eph_pub: [u8; 32],
     key_id: Vec<u8>,
     wrapped_key: Vec<u8>,
-    header_len: usize,
+}
+
+fn validate_stream_limits(limits: &BodyEnvelopeLimits) -> Result<(), BodyEnvelopeError> {
+    if limits.max_recipients == 0 {
+        return Err(BodyEnvelopeError::LimitExceeded("recipient_count"));
+    }
+    if limits.max_wrapped_key_len < CONTENT_KEY_LEN + TAG_LEN {
+        return Err(BodyEnvelopeError::LimitExceeded("wrapped_key_len"));
+    }
+    if limits.max_payload_len < TAG_LEN {
+        return Err(BodyEnvelopeError::LimitExceeded("chunk_ct_len"));
+    }
+    Ok(())
 }
 
 fn parse_stream_header(
@@ -181,12 +193,14 @@ fn parse_stream_header(
     }
     let wrapped_key = take(header, &mut cur, wrapped_len)?;
 
+    if cur != header.len() {
+        return Err(BodyEnvelopeError::InvalidHeader("trailing bytes"));
+    }
     Ok(ParsedStreamHeader {
         nonce_prefix,
         eph_pub,
         key_id,
         wrapped_key,
-        header_len: cur,
     })
 }
 
@@ -225,6 +239,7 @@ impl StreamSealer {
         context: &[u8],
         limits: &BodyEnvelopeLimits,
     ) -> Result<(Self, Vec<u8>), BodyEnvelopeError> {
+        validate_stream_limits(limits)?;
         if context.len() > limits.max_context_len {
             return Err(BodyEnvelopeError::LimitExceeded("context_len"));
         }
@@ -238,13 +253,15 @@ impl StreamSealer {
         let mut content_key = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
         SysRng
             .try_fill_bytes(&mut content_key[..])
-            .expect("OS random number generator is unavailable");
+            .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
         let mut nonce_prefix = [0u8; STREAM_NONCE_PREFIX_LEN];
         SysRng
             .try_fill_bytes(&mut nonce_prefix)
-            .expect("OS random number generator is unavailable");
+            .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
 
-        let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+        let mut ephemeral = Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut ephemeral[..]).map_err(|_| BodyEnvelopeError::EncryptFailed)?;
+        let eph_priv = StaticSecret::from(*ephemeral);
         let eph_pub = PublicKey::from(&eph_priv).to_bytes();
         let wrapped_key = wrap_content_key(
             &content_key,
@@ -389,6 +406,7 @@ impl StreamOpener {
         context: &[u8],
         limits: &BodyEnvelopeLimits,
     ) -> Result<Self, BodyEnvelopeError> {
+        validate_stream_limits(limits)?;
         if context.len() > limits.max_context_len {
             return Err(BodyEnvelopeError::LimitExceeded("context_len"));
         }
@@ -405,7 +423,7 @@ impl StreamOpener {
         Ok(Self {
             cipher,
             nonce_prefix: parsed.nonce_prefix,
-            header: header[..parsed.header_len].to_vec(),
+            header: header.to_vec(),
             context: context.to_vec(),
             expected_index: 0,
             finished: false,
@@ -625,7 +643,9 @@ impl StreamFrameDecoder {
         if ct_len > self.limits.max_payload_len {
             return Err(BodyEnvelopeError::LimitExceeded("chunk_ct_len"));
         }
-        let total = STREAM_CHUNK_OVERHEAD + ct_len;
+        let total = STREAM_CHUNK_OVERHEAD
+            .checked_add(ct_len)
+            .ok_or(BodyEnvelopeError::LimitExceeded("chunk_ct_len"))?;
         if self.buf.len() < total {
             return Ok(None);
         }

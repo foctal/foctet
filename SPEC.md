@@ -5,7 +5,7 @@ Foctet Protocol Specification (Draft v0)
 ----------
 
 *   **Status**: Draft v0. Wire compatibility is not yet stable. See [SECURITY.md](SECURITY.md) for limitations and [the threat model](docs/THREAT_MODEL.md) for security assumptions.
-*   **Spec version**: `foctet-spec/0.3-draft`. The specification is versioned independently of the crate versions: crates may release without spec changes, and this stamp only changes when normative content changes. Any wire-level change MUST bump this stamp and move `test-vectors/` in the same commit (see the compatibility policy below).
+*   **Spec version**: `foctet-spec/0.4-draft`. The specification is versioned independently of the crate versions: crates may release without spec changes, and this stamp only changes when normative content changes. Any wire-level change MUST bump this stamp and move `test-vectors/` in the same commit (see the compatibility policy below).
 *   **Conformance language**: The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as in RFC 2119/8174. Unless a section is explicitly marked *informative*, requirements stated with these key words are normative for Draft v0 implementations; an implementation that violates a MUST is not a conforming Foctet implementation even if it interoperates with this codebase.
 *   **Scope**: Defines Foctet **Core** (framing, E2EE payload protection, key schedule), **Secure Archive** (encrypted storage format), and references the `application/foctet` one-shot body envelope specification (`docs/http-body-format.md`).
 *   **Deployment guidance**: Recommended production composition patterns are summarized in `docs/recommended-deployments.md`.
@@ -197,9 +197,11 @@ Default replay window recommendation: 4096 frames.
 7\. Crypto Profiles
 -------------------
 
-### 7.1 Mandatory-to-Implement Profile (v0)
+### 7.1 Frame profiles (v0)
 
-**Profile 0x01: X25519 + HKDF + XChaCha20-Poly1305**
+Byte streams use profile `0x01`, reliable messages `0x02`, and datagrams `0x03`.
+Each uses X25519, HKDF-SHA256, and XChaCha20-Poly1305. A receiver MUST require
+the profile for its transport shape before accepting a frame.
 
 *   Handshake: X25519 ephemeral key agreement
 *   KDF: HKDF-SHA256
@@ -213,12 +215,13 @@ Default replay window recommendation: 4096 frames.
 *   XChaCha requires 24-byte nonce.
 *   Nonce MUST be unique per key.
 *   Draft v0 nonce:
-    *   `nonce = key_id(1) || stream_id(4) || seq(8) || zeros(11)` (total 24)
+    *   `nonce = key_id(1) || stream_id(4) || seq(8) || domain(1) || zeros(10)` (total 24)
+*   The domain byte is the profile ID minus one. Fixed-width integers use big-endian encoding.
 *   Endpoints MUST ensure `(key, nonce)` uniqueness; rekey MUST occur before collisions are plausible.
 
 Operational constraints for uniqueness:
 
-*   For a fixed traffic key, `seq` MUST NOT repeat for the same `(direction, stream_id, key_id)` tuple.
+*   For a fixed traffic key and shape, `seq` MUST NOT repeat for the same `(direction, stream_id, key_id)` tuple.
 *   Reusing a `stream_id` is safe only if `key_id` or traffic key material changes and `seq` restarts from a fresh domain.
 *   Reusing the same key material with wrapped `key_id` values is NOT allowed.
 *   Implementations SHOULD treat `(direction, stream_id, key_id, seq)` as a write-once space and fail closed on state rollback.
@@ -271,9 +274,9 @@ receiver MUST reject a `Rekey` whose `old_key_id` is not its active key, whose
 > Status: this ratchet construction is implemented and part of the current Draft
 > v0 behavior.
 
-#### 7.1.3 Profile 0x01 Algorithm Invariants
+#### 7.1.3 Algorithm Invariants
 
-For Draft v0 profile `0x01`, implementations MUST satisfy all of the following:
+For all three frame profiles, implementations MUST satisfy all of the following:
 
 *   **X25519 key material**
     *   Ephemeral public/private keys are 32 bytes.
@@ -380,7 +383,7 @@ Applications must not route controls through an unordered or lossy channel.
 Each session has one mutable handshake/ratchet state machine. Concurrent
 application streams may allocate distinct `stream_id` values, but outbound
 sequence ownership for a given endpoint is exclusive. A `Session` grants at
-most one message endpoint and one datagram endpoint lease. Implementations must
+most one byte-stream channel, one message endpoint, and one datagram endpoint. Implementations must
 bound simultaneous handshakes before X25519 or signature work.
 
 ### 8.3 Authentication (Recommended)
@@ -592,7 +595,7 @@ Operational guidance:
 ### 14.1 Versioning
 
 *   `version` changes indicate wire-incompatible changes.
-*   `profile_id` changes indicate cryptographic suite changes.
+*   A frame profile identifies its cipher suite and nonce domain.
 *   Draft v0 reserves plaintext header bits for future extension and requires unknown bits to be zero.
 *   Minor additions SHOULD be introduced via:
     *   new profile IDs
@@ -604,9 +607,9 @@ Compatibility policy targets:
 *   Draft v0 (`0.x` line): breaking changes are allowed, but MUST update spec and vectors together.
 *   v1+: wire compatibility MUST be preserved within major version, and incompatibilities MUST use a new wire `version`.
 
-Draft v0 and the initial v1 API use a **fixed profile**, not in-band
-negotiation. A peer sends only version `0x00` and profile `0x01`; any other
-value fails closed. There is no silent fallback.
+Draft v0 fixes the frame profile by transport shape (§7.1). There is no
+in-band negotiation or fallback. Upgrade both endpoints before exchanging
+messages or datagrams with the shape-specific profiles.
 
 A future negotiated version must define authenticated ordered offer and
 selection fields inside the signed/channel-bound handshake transcript. The

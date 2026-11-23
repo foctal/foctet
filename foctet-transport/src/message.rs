@@ -111,20 +111,19 @@ where
     /// Builds a channel from a transport and an active [`Session`], clamping the
     /// message size to the transport's reported maximum when available.
     pub fn from_active_session(transport: T, session: &Session) -> Result<Self, CoreError> {
-        let mut config = MessageConfig::default();
-        if let Some(max) = transport.max_message_size() {
-            config.max_message_size = config.max_message_size.min(max);
-        }
-        Self::from_active_session_with_config(transport, session, config)
+        Self::from_active_session_with_config(transport, session, MessageConfig::default())
     }
 
     /// Builds a channel from a transport, an active [`Session`], and an explicit
-    /// message configuration.
+    /// message configuration, clamped to the transport's reported maximum.
     pub fn from_active_session_with_config(
         transport: T,
         session: &Session,
-        config: MessageConfig,
+        mut config: MessageConfig,
     ) -> Result<Self, CoreError> {
+        if let Some(max) = transport.max_message_size() {
+            config.max_message_size = config.max_message_size.min(max);
+        }
         let lease = session.claim_message_endpoint()?;
         let endpoint = MessageEndpoint::from_session_lease_with_config(lease, config);
         Ok(Self {
@@ -146,8 +145,8 @@ where
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
-    pub fn install_active_keys(&mut self, keys: KeyHandle) {
-        self.endpoint.install_active_keys(keys);
+    pub fn install_active_keys(&mut self, keys: KeyHandle) -> Result<(), CoreError> {
+        self.endpoint.install_active_keys(keys)
     }
 
     /// Adopts the session's current active traffic keys after it has rekeyed.
@@ -163,8 +162,7 @@ where
         let keys = session
             .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
-        self.endpoint.install_active_keys(keys);
-        Ok(())
+        self.endpoint.install_active_keys(keys)
     }
 
     /// Returns a reference to the underlying transport.
@@ -220,6 +218,7 @@ where
         if self.is_terminal() {
             return Err(MessageChannelError::Core(CoreError::TransportTerminal));
         }
+        self.endpoint.validate_session(session)?;
         let prepared = session.prepare_rekey()?;
         let bytes =
             match self
@@ -262,7 +261,7 @@ where
                 return Err(MessageChannelError::Core(CoreError::InvalidSessionState));
             }
         };
-        self.endpoint.install_active_keys(keys);
+        self.endpoint.install_active_keys(keys)?;
         guard.committed = true;
         self.terminal = false;
         Ok(())
@@ -302,6 +301,10 @@ where
         &mut self,
         session: &mut Session,
     ) -> Result<(), MessageChannelError<T::Error>> {
+        if self.is_terminal() {
+            return Err(MessageChannelError::Core(CoreError::TransportTerminal));
+        }
+        self.endpoint.validate_session(session)?;
         let mut guard = RekeyGuard {
             session,
             committed: false,
@@ -314,7 +317,11 @@ where
                 return Err(error);
             }
         };
-        if decoded.header.flags & flags::IS_CONTROL == 0 {
+        if decoded.header.flags & flags::IS_CONTROL == 0
+            || session
+                .active_keys()
+                .is_none_or(|k| k.key_id != decoded.header.key_id)
+        {
             self.terminal = true;
             session.terminate();
             return Err(MessageChannelError::Core(
@@ -343,7 +350,7 @@ where
                 return Err(MessageChannelError::Core(CoreError::InvalidSessionState));
             }
         };
-        self.endpoint.install_active_keys(keys);
+        self.endpoint.install_active_keys(keys)?;
         guard.committed = true;
         Ok(())
     }
@@ -506,8 +513,8 @@ mod tests {
             b"before"
         );
 
-        client.install_active_keys(k2.clone());
-        server.install_active_keys(k2);
+        client.install_active_keys(k2.clone()).unwrap();
+        server.install_active_keys(k2).unwrap();
 
         client.send_message(0, 0, b"after").await.expect("send 2");
         let opened = server.recv_message().await.expect("recv 2");
@@ -567,6 +574,23 @@ mod tests {
             }
             assert!(channel.is_terminal());
         }
+    }
+
+    #[tokio::test]
+    async fn rekey_requires_the_local_session_before_transport_io() {
+        let (session, mut peer) = shared_session_keys();
+        let mut channel =
+            SecureMessageChannel::from_active_session(PendingTransport, &session).unwrap();
+        assert!(matches!(
+            channel.send_rekey(&mut peer).await,
+            Err(MessageChannelError::Core(CoreError::InvalidSessionState))
+        ));
+        assert!(matches!(
+            channel.recv_rekey(&mut peer).await,
+            Err(MessageChannelError::Core(CoreError::InvalidSessionState))
+        ));
+        assert!(peer.active_keys().is_some());
+        assert!(!channel.is_terminal());
     }
 
     #[tokio::test]

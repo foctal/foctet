@@ -138,11 +138,8 @@ application needing ordering on datagrams must layer it.
 
 **Threats and defenses:**
 
-- **Version/profile downgrade** — the profile ID rides in the authenticated
-  header (AAD); v0 ships exactly one mandatory profile
-  (X25519+HKDF-SHA-256+XChaCha20-Poly1305), so there is no weaker suite to
-  negotiate down to. Future profiles must fold negotiation into the
-  transcript (see `docs/POLICIES.md`).
+- **Version/profile downgrade** — each transport shape requires its own authenticated profile ID and
+  nonce domain. Endpoints reject mismatches without fallback.
 - **Key rollback** — a `Rekey` control message must name the **current**
   active `old_key_id` and `new_key_id = old + 1`; stale, replayed, or jumped
   rekeys are rejected, and the rekey transcript binding covers the new
@@ -219,8 +216,9 @@ endpoint as an amplifier.
 - All attacker-controlled lengths are validated against explicit limits before
   allocation (`ProtocolLimits`: max ciphertext length; `BodyEnvelopeLimits`;
   `DatagramConfig::max_datagram_size`; archive limits). Replay-window count is
-  capped. Handshake reads are bounded by timeouts on both the Tokio path
-  (`DEFAULT_HANDSHAKE_TIMEOUT`) and the runtime-agnostic futures path.
+  capped. Production Tokio handshakes use a ten-second deadline. For futures I/O, pass
+  a timer to the explicit timeout constructor. Untimed constructors require an
+  application deadline.
 - **Authenticate before updating replay state:** forged frames cannot advance
   the replay window. Invalid input may terminate the affected channel.
 - **UDP anti-amplification** — the raw-UDP adapter rejects unconnected sockets,

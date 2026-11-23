@@ -143,8 +143,8 @@ where
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
-    pub fn install_active_keys(&mut self, keys: KeyHandle) {
-        self.endpoint.install_active_keys(keys);
+    pub fn install_active_keys(&mut self, keys: KeyHandle) -> Result<(), CoreError> {
+        self.endpoint.install_active_keys(keys)
     }
 
     /// Adopts the session's current active traffic keys after it has rekeyed
@@ -161,8 +161,7 @@ where
         let keys = session
             .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
-        self.endpoint.install_active_keys(keys);
-        Ok(())
+        self.endpoint.install_active_keys(keys)
     }
 
     /// Initiates a transactional rekey over a reliable secure message channel,

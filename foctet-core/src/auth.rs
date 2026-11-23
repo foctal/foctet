@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use getrandom::SysRng;
-use rand_core::UnwrapErr;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -61,10 +59,16 @@ impl PartialEq for IdentityKeyPair {
 impl Eq for IdentityKeyPair {}
 
 impl IdentityKeyPair {
-    /// Generates a fresh Ed25519 identity key pair.
+    /// Generates a fresh Ed25519 identity key pair. Panics if secure randomness is unavailable.
     pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut UnwrapErr(SysRng));
-        Self::from_secret_key_bytes(signing_key.to_bytes())
+        Self::try_generate().expect("OS random number generator is unavailable")
+    }
+
+    /// Generates an identity or reports failure of the platform random source.
+    pub fn try_generate() -> Result<Self, CoreError> {
+        let mut secret = Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut secret[..]).map_err(|_| CoreError::RandomSource)?;
+        Ok(Self::from_secret_key_bytes(*secret))
     }
 
     /// Builds an identity key pair from Ed25519 secret-key bytes.

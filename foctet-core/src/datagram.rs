@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use crate::{
     CoreError,
-    crypto::{Direction, KeyHandle, decrypt_frame_with_key, encrypt_frame},
+    crypto::{Direction, FrameDomain, KeyHandle},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
     limits::{DEFAULT_MAX_OUTBOUND_STREAMS, MAX_OUTBOUND_STREAMS, MAX_RETAINED_KEYS},
     replay::{DEFAULT_MAX_REPLAY_WINDOWS, DEFAULT_REPLAY_WINDOW, ReplayProtector},
@@ -176,7 +176,7 @@ impl DatagramEndpoint {
             next_seq: HashMap::new(),
             replay: ReplayProtector::new(config.replay_window)
                 .with_max_windows(config.max_replay_windows),
-            max_datagram_size: config.max_datagram_size.max(DATAGRAM_FRAME_OVERHEAD + 1),
+            max_datagram_size: config.max_datagram_size,
             max_outbound_streams: config.max_outbound_streams.clamp(1, MAX_OUTBOUND_STREAMS),
             terminal: false,
         }
@@ -189,7 +189,8 @@ impl DatagramEndpoint {
 
     /// Returns the maximum plaintext bytes that fit in one datagram.
     pub fn max_plaintext_len(&self) -> usize {
-        self.max_datagram_size - DATAGRAM_FRAME_OVERHEAD
+        self.max_datagram_size
+            .saturating_sub(DATAGRAM_FRAME_OVERHEAD)
     }
 
     /// Returns the active key identifier.
@@ -216,10 +217,26 @@ impl DatagramEndpoint {
     }
 
     /// Installs new active keys and retains a bounded set of previous keys.
-    pub fn install_active_keys(&mut self, keys: KeyHandle) {
-        if self.active_key_id != keys.key_id {
-            self.next_seq.clear();
+    pub fn install_active_keys(&mut self, keys: KeyHandle) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
         }
+        let active = self.active_keys()?;
+        if !active.same_origin(&keys) {
+            self.terminal = true;
+            return Err(CoreError::InvalidSessionState);
+        }
+        if keys.key_id == self.active_key_id && active == &keys {
+            return Ok(());
+        }
+        if keys.key_id <= self.active_key_id {
+            self.terminal = true;
+            return Err(CoreError::UnexpectedKeyId {
+                expected: self.active_key_id.saturating_add(1),
+                actual: keys.key_id,
+            });
+        }
+        self.next_seq.clear();
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -227,6 +244,8 @@ impl DatagramEndpoint {
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
+        self.replay.retain_keys(&self.keys);
+        Ok(())
     }
 
     fn active_keys(&self) -> Result<&KeyHandle, CoreError> {
@@ -255,6 +274,11 @@ impl DatagramEndpoint {
         if self.terminal {
             return Err(CoreError::TransportTerminal);
         }
+        if self.max_datagram_size < DATAGRAM_FRAME_OVERHEAD
+            || plaintext.len() > self.max_plaintext_len()
+        {
+            return Err(CoreError::FrameTooLarge);
+        }
         let keys = self.active_keys()?.clone();
         let key_id = keys.key_id;
         if !self.next_seq.contains_key(&(key_id, stream_id))
@@ -269,7 +293,7 @@ impl DatagramEndpoint {
             .unwrap_or_default();
         let seq = sequence.current();
 
-        let frame = encrypt_frame(
+        let frame = FrameDomain::Datagram.encrypt(
             &keys,
             self.outbound_direction,
             flags,
@@ -278,9 +302,6 @@ impl DatagramEndpoint {
             plaintext,
         )?;
         let bytes = frame.to_bytes();
-        if bytes.len() > self.max_datagram_size {
-            return Err(CoreError::FrameTooLarge);
-        }
 
         // Reserve the next sequence only after the datagram is known to be
         // emittable, so a rejected datagram never consumes a nonce.
@@ -322,7 +343,7 @@ impl DatagramEndpoint {
         // exactly, enforcing one complete frame per datagram with no trailing
         // bytes and no truncation.
         let frame = Frame::from_bytes(datagram)?;
-        frame.header.validate_v0()?;
+        frame.header.validate_profile(FrameDomain::Datagram as u8)?;
 
         let keys = self
             .key_for_id(frame.header.key_id)
@@ -331,7 +352,7 @@ impl DatagramEndpoint {
                 actual: frame.header.key_id,
             })?;
 
-        let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
+        let plaintext = FrameDomain::Datagram.decrypt(keys, self.inbound_direction, &frame)?;
         self.replay.check_and_record(
             frame.header.key_id,
             frame.header.stream_id,
@@ -349,6 +370,28 @@ impl DatagramEndpoint {
 mod tests {
     use super::*;
     use crate::crypto::{EphemeralKeyPair, KeyHandle, derive_traffic_keys, random_session_salt};
+
+    #[test]
+    fn on_wire_limit_can_exclude_even_an_empty_frame() {
+        let (client, _) = endpoints();
+        for max in [0, DATAGRAM_FRAME_OVERHEAD - 1, DATAGRAM_FRAME_OVERHEAD] {
+            let mut endpoint = DatagramEndpoint::with_config(
+                client.active_keys().unwrap().clone(),
+                Direction::S2C,
+                Direction::C2S,
+                DatagramConfig {
+                    max_datagram_size: max,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(endpoint.max_plaintext_len(), 0);
+            assert!(endpoint.seal(0, 0, b"x").is_err());
+            assert_eq!(
+                endpoint.seal(0, 0, b"").is_ok(),
+                max == DATAGRAM_FRAME_OVERHEAD
+            );
+        }
+    }
 
     fn endpoints() -> (DatagramEndpoint, DatagramEndpoint) {
         let a = EphemeralKeyPair::generate();

@@ -18,13 +18,26 @@ HTTP helpers are compiled only with
 Raw body-envelope helpers remain available under explicit body-oriented names
 because their replayable building-block semantics are part of their contract.
 
+Tokio and Futures handshake builders propagate random-source errors. Code that
+constructs sessions directly can use `Session::try_new_initiator_with_auth`
+and `Session::try_new_responder_with_auth` with
+`ProductionSessionAuth::into_session_auth()`. Use `IdentityKeyPair::try_generate`
+for fallible identity generation. The infallible Rust constructors panic if
+the platform cannot supply secure randomness.
+
 ## Nonce-domain ownership
 
 `TrafficKeys` directional key fields are private and the type cannot be built
-from raw key bytes. Message and datagram channels claim a single-use endpoint
-lease from an active `Session`; a second endpoint of the same shape fails with
+from raw key bytes. Byte-stream, message, and datagram channels each claim their shape once
+from an active `Session`; a second endpoint of the same shape fails with
 `CoreError::EndpointAlreadyClaimed`. This prevents two endpoints from starting
-the same `(direction, key_id, stream_id)` sequence at zero.
+the same sequence at zero. Each shape has its own frame profile and nonce domain.
+
+For the low-level byte-stream constructors, `SyncIo::new` and
+`FoctetFramed::new` return a terminal endpoint if another stream already
+claimed the session's keys or the directions conflict with the session role. Prefer the session-backed channel constructors
+for an immediate construction error. Dropping a channel does not release
+its claim. Independently derived raw keys require caller-managed ownership.
 
 Live message, datagram, framed, and stream endpoints do not implement `Clone`.
 Sharing a channel requires synchronizing access to the same endpoint (for example,

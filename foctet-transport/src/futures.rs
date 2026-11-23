@@ -318,7 +318,7 @@ async fn run_initiator_handshake<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut session, hello) = Session::new_initiator_with_auth(thresholds, auth);
+    let (mut session, hello) = Session::try_new_initiator_with_auth(thresholds, auth)?;
     write_control(io, &hello).await?;
     let server_hello = read_control(io).await?;
     session.handle_control(&server_hello)?;
@@ -333,7 +333,7 @@ async fn run_responder_handshake<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut session = Session::new_responder_with_auth(thresholds, auth);
+    let mut session = Session::try_new_responder_with_auth(thresholds, auth)?;
     let hello = read_control(io).await?;
     let server_hello = session
         .handle_control(&hello)?

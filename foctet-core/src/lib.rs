@@ -112,7 +112,7 @@ pub use control::{ControlMessage, ControlMessageKind, MAX_CONTROL_MESSAGE_LEN};
 pub use crypto::{
     Direction, EphemeralKeyPair, KeyHandle, TrafficKeys, decrypt_frame, decrypt_frame_with_key,
     derive_ratchet_root, derive_traffic_keys, dh_ratchet_step, encrypt_frame, make_nonce,
-    random_session_salt, x25519_shared_secret,
+    random_session_salt, try_random_session_salt, x25519_shared_secret,
 };
 pub use datagram::{
     DATAGRAM_FRAME_OVERHEAD, DEFAULT_MAX_DATAGRAM_SIZE, DatagramConfig, DatagramEndpoint,
@@ -266,6 +266,9 @@ pub enum CoreError {
     /// X25519 produced a forbidden all-zero shared secret.
     #[error("invalid shared secret")]
     InvalidSharedSecret,
+    /// The platform could not provide cryptographically secure randomness.
+    #[error("secure random source unavailable")]
+    RandomSource,
     /// Outbound sequence space is exhausted and must not wrap.
     #[error("sequence space exhausted")]
     SequenceExhausted,
@@ -344,7 +347,8 @@ impl CoreError {
             | Self::HandshakeRateLimited
             | Self::HandshakeConcurrencyLimited
             | Self::EndpointAlreadyClaimed => CoreErrorDisposition::Recoverable,
-            Self::InvalidHeaderLength(_)
+            Self::RandomSource
+            | Self::InvalidHeaderLength(_)
             | Self::InvalidMagic
             | Self::UnsupportedVersion(_)
             | Self::UnsupportedProfile(_)

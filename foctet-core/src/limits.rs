@@ -43,10 +43,8 @@ pub const DEFAULT_MAX_BUFFERED_TX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Default deadline for a native handshake to complete (10 seconds).
 ///
-/// Enforced by the transport builders (`foctet-transport`), which race the
-/// handshake against a timer and fail with
-/// [`crate::CoreError::HandshakeTimeout`] on expiry, so a peer that connects
-/// and then stalls cannot pin handshake state indefinitely.
+/// Production Tokio constructors use this deadline. Runtime-independent
+/// callers provide a timer to the transport's explicit timeout constructor.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default number of *previous* traffic-key generations retained for decrypting
@@ -94,9 +92,8 @@ pub struct ProtocolLimits {
     /// the bound on how many **distinct inbound stream IDs** a peer can force
     /// the receiver to track state for.
     pub max_replay_windows: usize,
-    /// Deadline for a native handshake to complete. Enforced by the
-    /// `foctet-transport` builders ([`crate::CoreError::HandshakeTimeout`] on
-    /// expiry); the core state machine itself is poll-driven and has no clock.
+    /// Suggested deadline to pass to a timed handshake constructor. Applying
+    /// frame limits to an established connection does not configure its timer.
     pub handshake_timeout: Duration,
 }
 

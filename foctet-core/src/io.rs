@@ -370,12 +370,17 @@ pub struct SyncIo<T> {
 
 impl<T> SyncIo<T> {
     /// Creates a blocking Foctet transport wrapper.
+    ///
+    /// Session-derived keys grant a single byte-stream endpoint for their
+    /// entire ratchet lifetime. Reusing them constructs a terminal transport.
+    /// Callers deriving raw keys must provide exclusive nonce ownership.
     pub fn new(
         io: T,
         keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
+        let terminal = !keys.claim_stream(inbound_direction, outbound_direction);
         let limits = ProtocolLimits::default();
         Self {
             io,
@@ -387,7 +392,7 @@ impl<T> SyncIo<T> {
             default_flags: 0,
             next_seq: OutboundSequence::default(),
             replay: limits.replay_protector(),
-            terminal: false,
+            terminal,
             limits,
         }
     }
@@ -404,13 +409,17 @@ impl<T> SyncIo<T> {
         self
     }
 
-    /// Applies a complete set of [`ProtocolLimits`], rebuilding the replay
-    /// protector from the new replay-window size and window cap.
-    ///
-    /// Intended to be called immediately after [`SyncIo::new`], before any
-    /// frames are processed; it resets replay-window state.
+    /// Applies resource limits without discarding recorded sequence numbers.
+    /// Existing replay windows keep their width. New windows use the supplied width.
     pub fn with_limits(mut self, limits: ProtocolLimits) -> Self {
-        self.replay = limits.replay_protector();
+        let limits = ProtocolLimits {
+            max_retained_keys: limits.max_retained_keys.min(crate::MAX_RETAINED_KEYS),
+            ..limits
+        };
+        self.replay
+            .configure(limits.replay_window, limits.max_replay_windows);
+        self.keys.truncate(1 + limits.max_retained_keys);
+        self.replay.retain_keys(&self.keys);
         self.limits = limits;
         self
     }
@@ -428,7 +437,9 @@ impl<T> SyncIo<T> {
 
     /// Sets number of retained previous keys.
     pub fn with_max_retained_keys(mut self, max: usize) -> Self {
-        self.limits.max_retained_keys = max.max(1);
+        self.limits = self.limits.with_max_retained_keys(max);
+        self.keys.truncate(1 + self.limits.max_retained_keys);
+        self.replay.retain_keys(&self.keys);
         self
     }
 
@@ -461,7 +472,18 @@ impl<T> SyncIo<T> {
     }
 
     /// Installs new active keys and retains previous keys.
-    pub fn install_active_keys(&mut self, keys: KeyHandle) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let active = self.active_keys()?;
+        if !active.same_origin(&keys)
+            || keys.key_id < active.key_id
+            || (active.key_id == keys.key_id && active != &keys)
+        {
+            self.terminate();
+            return Err(CoreError::InvalidSessionState);
+        }
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -469,6 +491,8 @@ impl<T> SyncIo<T> {
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
+        self.replay.retain_keys(&self.keys);
+        Ok(())
     }
 
     /// Consumes wrapper and returns underlying I/O object.
@@ -488,17 +512,29 @@ impl<T> SyncIo<T> {
     }
 
     fn set_key_ring_from_session(&mut self, session: &Session) -> Result<(), CoreError> {
-        let ring = session.key_ring()?;
-        self.keys = ring;
-        self.active_key_id = self
-            .keys
-            .first()
-            .map(|k| k.key_id)
+        let keys = session
+            .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
-        let keep = self.limits.max_retained_keys + 1;
-        if self.keys.len() > keep {
-            self.keys.truncate(keep);
+        let active = self.active_keys()?;
+        if !active.same_origin(&keys) || keys.key_id < active.key_id {
+            self.terminate();
+            return Err(CoreError::InvalidSessionState);
         }
+        if std::ptr::eq(&**active, &*keys) {
+            return Ok(());
+        }
+        // Never reintroduce an evicted generation after its replay windows
+        // have been released, including when a caller increases retention.
+        let oldest = self
+            .keys
+            .last()
+            .ok_or(CoreError::MissingSessionSecret)?
+            .key_id;
+        self.keys = session.key_ring()?;
+        self.keys.retain(|key| key.key_id >= oldest);
+        self.active_key_id = keys.key_id;
+        self.keys.truncate(self.limits.max_retained_keys + 1);
+        self.replay.retain_keys(&self.keys);
         Ok(())
     }
 }
@@ -590,7 +626,7 @@ impl<T: Read + Write> SyncIo<T> {
         let mut header_buf = [0u8; FRAME_HEADER_LEN];
         self.io.read_exact(&mut header_buf)?;
         let header = FrameHeader::decode(&header_buf)?;
-        header.validate_v0()?;
+        header.validate_profile(crate::PROFILE_X25519_HKDF_XCHACHA20POLY1305)?;
 
         let ct_len = header.ct_len as usize;
         if ct_len > self.limits.max_ciphertext_len {
@@ -668,16 +704,27 @@ impl<T: Read + Write> SyncIo<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
+        let payload = payload::encode_application_data(plaintext)?;
+        self.send_payload_with_session(session, flags, stream_id, &payload, plaintext.len())
+    }
+
+    pub(crate) fn send_payload_with_session(
+        &mut self,
+        session: &mut Session,
+        flags: u8,
+        stream_id: u32,
+        payload: &[u8],
+        accounted_len: usize,
+    ) -> Result<(), CoreError> {
         self.set_key_ring_from_session(session)?;
-        let app_tlv = Tlv::application_data(plaintext)?;
-        if let Err(error) = self.send_tlvs_with(flags, stream_id, &[app_tlv]) {
+        if let Err(error) = self.send_with(flags, stream_id, payload) {
             if self.terminal {
                 session.terminate();
             }
             return Err(error);
         }
 
-        let prepared = match session.on_outbound_payload(plaintext.len()) {
+        let prepared = match session.on_outbound_payload(accounted_len) {
             Ok(prepared) => prepared,
             Err(error) => {
                 // The application frame may already be delivered. A failure to
@@ -737,10 +784,11 @@ impl<T: Read + Write> SyncIo<T> {
         &mut self,
         session: &mut Session,
     ) -> Result<Option<Vec<u8>>, CoreError> {
+        self.set_key_ring_from_session(session)?;
         let mut header_buf = [0u8; FRAME_HEADER_LEN];
         self.io.read_exact(&mut header_buf)?;
         let header = FrameHeader::decode(&header_buf)?;
-        header.validate_v0()?;
+        header.validate_profile(crate::PROFILE_X25519_HKDF_XCHACHA20POLY1305)?;
 
         let ct_len = header.ct_len as usize;
         if ct_len > self.limits.max_ciphertext_len {
@@ -767,6 +815,12 @@ impl<T: Read + Write> SyncIo<T> {
         )?;
 
         if frame.header.flags & crate::frame::flags::IS_CONTROL != 0 {
+            if session
+                .active_keys()
+                .is_none_or(|keys| keys.key_id != frame.header.key_id)
+            {
+                return Err(CoreError::UnexpectedControlMessage);
+            }
             let msg = ControlMessage::decode(&plaintext)?;
             let response = session.handle_control(&msg)?;
             self.set_key_ring_from_session(session)?;
@@ -1148,6 +1202,7 @@ mod tests {
         }
         let mut io = SyncIo::new(mock, keys, Direction::C2S, Direction::S2C);
         io.recv().unwrap();
+        let mut io = io.with_limits(crate::ProtocolLimits::default());
         assert!(matches!(io.recv(), Err(CoreError::Replay)));
         assert!(matches!(io.recv(), Err(CoreError::TransportTerminal)));
     }

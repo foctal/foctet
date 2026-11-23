@@ -138,8 +138,11 @@ impl QuinnDatagramChannel {
     }
 
     /// Installs a freshly rotated set of traffic keys (after a rekey).
-    pub fn install_active_keys(&mut self, keys: foctet_core::KeyHandle) {
-        self.endpoint.install_active_keys(keys);
+    pub fn install_active_keys(
+        &mut self,
+        keys: foctet_core::KeyHandle,
+    ) -> Result<(), foctet_core::CoreError> {
+        self.endpoint.install_active_keys(keys)
     }
 
     /// Returns a reference to the underlying QUIC connection.

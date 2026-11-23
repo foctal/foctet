@@ -550,8 +550,12 @@ mod tests {
             .handle_control(prepared.control_message())
             .expect("responder applies rekey");
         initiator.commit_rekey(prepared).expect("initiator commits");
-        sender.install_active_keys(initiator.active_keys().expect("sender keys"));
-        receiver.install_active_keys(responder.active_keys().expect("receiver keys"));
+        sender
+            .install_active_keys(initiator.active_keys().expect("sender keys"))
+            .unwrap();
+        receiver
+            .install_active_keys(responder.active_keys().expect("receiver keys"))
+            .unwrap();
         let new_key = sender.seal(7, 0, b"new key first").expect("new frame");
         a.send_datagram(new_key).await.expect("send new");
         a.send_datagram(delayed_old)

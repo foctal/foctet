@@ -54,8 +54,12 @@ impl<T: Read + Write> SecureChannel<T> {
         let inbound = session.inbound_direction();
         let outbound = session.outbound_direction();
 
+        let io = SyncIo::new(io, active_keys, inbound, outbound);
+        if io.is_terminal() {
+            return Err(CoreError::EndpointAlreadyClaimed);
+        }
         Ok(Self {
-            io: SyncIo::new(io, active_keys, inbound, outbound),
+            io,
             session,
             app_stream_id: 0,
             app_flags: 0,
@@ -99,11 +103,12 @@ impl<T: Read + Write> SecureChannel<T> {
     /// This bypasses `APPLICATION_DATA` convenience framing.
     pub fn send_tlvs(&mut self, tlvs: &[Tlv]) -> Result<(), CoreError> {
         let payload = payload::encode_tlvs(tlvs)?;
-        self.io.send_data_with_session(
+        self.io.send_payload_with_session(
             &mut self.session,
             self.app_flags,
             self.app_stream_id,
             &payload,
+            payload.len(),
         )
     }
 
@@ -139,8 +144,7 @@ impl<T: Read + Write> SecureChannel<T> {
                 return Err(CoreError::InvalidSessionState);
             }
         };
-        self.io.install_active_keys(keys);
-        Ok(())
+        self.io.install_active_keys(keys)
     }
 
     /// Receives the next application-data payload.
@@ -243,6 +247,9 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
         let inbound = session.inbound_direction();
         let outbound = session.outbound_direction();
         let framed = FoctetFramed::new(io, active_keys, inbound, outbound);
+        if framed.is_terminal() {
+            return Err(CoreError::EndpointAlreadyClaimed);
+        }
 
         Ok(Self {
             framed,
@@ -256,6 +263,15 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
 
     /// Sends application data in an `APPLICATION_DATA` TLV with session-aware rekey handling.
     pub async fn send_data(&mut self, plaintext: &[u8]) -> Result<(), CoreError> {
+        let payload = payload::encode_application_data(plaintext)?;
+        self.send_payload(&payload, plaintext.len()).await
+    }
+
+    async fn send_payload(
+        &mut self,
+        payload: &[u8],
+        accounted_len: usize,
+    ) -> Result<(), CoreError> {
         if self.pending_rekey.is_some() {
             return Err(CoreError::RekeyInProgress);
         }
@@ -274,11 +290,12 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
                     std::task::Poll::Ready(Ok(())) => {}
                 }
 
-                framed.as_mut().start_send_data_with_session(
+                framed.as_mut().start_send_payload_with_session(
                     &mut self.session,
                     self.app_flags,
                     self.app_stream_id,
-                    plaintext,
+                    payload,
+                    accounted_len,
                 )?;
                 queued = true;
             }
@@ -297,7 +314,7 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
     /// This bypasses `APPLICATION_DATA` convenience framing.
     pub async fn send_tlvs(&mut self, tlvs: &[Tlv]) -> Result<(), CoreError> {
         let payload = payload::encode_tlvs(tlvs)?;
-        self.send_data(&payload).await
+        self.send_payload(&payload, payload.len()).await
     }
 
     /// Immediately performs one transactional DH-ratchet rekey.
@@ -372,8 +389,7 @@ impl<T: crate::io::PollIo + Unpin> AsyncSecureChannel<T> {
                 return Err(CoreError::InvalidSessionState);
             }
         };
-        self.framed.install_active_keys(keys);
-        Ok(())
+        self.framed.install_active_keys(keys)
     }
 
     /// Receives the next application-data payload.
@@ -606,6 +622,27 @@ mod tests {
     }
 
     #[test]
+    fn explicit_tlvs_survive_rekey_and_session_cannot_restart_a_stream() {
+        let (a, b) = make_session_pair();
+        let (tx, rx) = MemPipe::pair();
+        let mut tx = SecureChannel::from_active_session(tx, a).unwrap();
+        let mut rx = SecureChannel::from_active_session(rx, b).unwrap();
+        let tlvs = [
+            crate::Tlv::new(0x7001, vec![42]).unwrap(),
+            crate::Tlv::new(0x7002, vec![]).unwrap(),
+        ];
+        for _ in 0..2 {
+            tx.send_tlvs(&tlvs).unwrap();
+            assert_eq!(rx.recv_tlvs().unwrap(), tlvs);
+        }
+        let (io, session) = tx.into_parts();
+        assert!(matches!(
+            SecureChannel::from_active_session(io, session),
+            Err(crate::CoreError::EndpointAlreadyClaimed)
+        ));
+    }
+
+    #[test]
     fn secure_channel_roundtrip_and_rekey() {
         let (a_io, b_io) = MemPipe::pair();
         let (a_session, b_session) = make_session_pair();
@@ -813,6 +850,43 @@ mod tests {
                     ));
                 }
             }
+        }
+
+        #[test]
+        fn explicit_tlvs_roundtrip_after_a_pending_flush() {
+            let (a, b) = quiet_session_pair();
+            let mut tx = AsyncSecureChannel::from_active_session(
+                SlowFlushIo {
+                    pending_flushes: 1,
+                    ..Default::default()
+                },
+                a,
+            )
+            .unwrap();
+            let mut cx = Context::from_waker(Waker::noop());
+            let tlvs = [crate::Tlv::new(0x7001, vec![1, 2]).unwrap()];
+            {
+                let mut send = pin!(tx.send_tlvs(&tlvs));
+                assert!(send.as_mut().poll(&mut cx).is_pending());
+                assert!(matches!(send.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+            }
+            let (framed, session) = tx.into_parts();
+            let io = framed.into_inner();
+            let mut rx = AsyncSecureChannel::from_active_session(
+                SlowFlushIo {
+                    inbound: io.outbound.into(),
+                    ..Default::default()
+                },
+                b,
+            )
+            .unwrap();
+            assert!(
+                matches!(pin!(rx.recv_tlvs()).poll(&mut cx), Poll::Ready(Ok(result)) if result == tlvs)
+            );
+            assert!(matches!(
+                AsyncSecureChannel::from_active_session(SlowFlushIo::default(), session),
+                Err(crate::CoreError::EndpointAlreadyClaimed)
+            ));
         }
 
         /// A suspended flush must never re-encrypt an already queued payload.

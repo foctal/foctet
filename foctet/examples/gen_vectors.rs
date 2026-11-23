@@ -96,6 +96,27 @@ fn main() {
     frame_json.push_str(&json_line("shared_secret_hex", &hex(&shared_secret), true));
     frame_json.push_str(&json_line("session_salt_hex", &hex(&session_salt), true));
     frame_json.push_str(&json_line("frame_hex", &hex(&frame_bytes), true));
+    let keys = core::KeyHandle::new(keys);
+    let mut message = core::MessageEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+        keys.clone(),
+        core::Direction::S2C,
+        core::Direction::C2S,
+    );
+    let mut datagram = core::DatagramEndpoint::dangerously_from_shared_keys_without_nonce_ownership(
+        keys,
+        core::Direction::S2C,
+        core::Direction::C2S,
+    );
+    frame_json.push_str(&json_line(
+        "message_hex",
+        &hex(&message.seal(0, 0, plaintext).unwrap()),
+        true,
+    ));
+    frame_json.push_str(&json_line(
+        "datagram_hex",
+        &hex(&datagram.seal(0, 0, plaintext).unwrap()),
+        true,
+    ));
     frame_json.push_str(&json_line("plaintext_hex", &hex(plaintext), false));
     frame_json.push_str("}\n");
     fs::write(out_dir.join("frame-v0.json"), frame_json).expect("write frame vector");
