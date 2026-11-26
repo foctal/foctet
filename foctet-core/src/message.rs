@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use crate::{
     CoreError,
-    crypto::{Direction, KeyHandle, decrypt_frame_with_key, encrypt_frame},
+    crypto::{Direction, FrameDomain, KeyHandle},
     frame::{FRAME_HEADER_LEN, Frame, FrameHeader},
     limits::{
         DEFAULT_MAX_OUTBOUND_STREAMS, DEFAULT_MAX_RETAINED_KEYS, MAX_OUTBOUND_STREAMS,
@@ -181,7 +181,7 @@ impl MessageEndpoint {
             next_seq: HashMap::new(),
             replay: ReplayProtector::new(config.replay_window)
                 .with_max_windows(config.max_replay_windows),
-            max_message_size: config.max_message_size.max(MESSAGE_FRAME_OVERHEAD + 1),
+            max_message_size: config.max_message_size,
             max_outbound_streams: config.max_outbound_streams.clamp(1, MAX_OUTBOUND_STREAMS),
             terminal: false,
         }
@@ -194,7 +194,7 @@ impl MessageEndpoint {
 
     /// Returns the maximum plaintext bytes that fit in one message.
     pub fn max_plaintext_len(&self) -> usize {
-        self.max_message_size - MESSAGE_FRAME_OVERHEAD
+        self.max_message_size.saturating_sub(MESSAGE_FRAME_OVERHEAD)
     }
 
     /// Returns the active key identifier.
@@ -221,16 +221,50 @@ impl MessageEndpoint {
     }
 
     /// Installs new active keys and retains a bounded set of previous keys.
-    pub fn install_active_keys(&mut self, keys: KeyHandle) {
-        if self.active_key_id != keys.key_id {
-            self.next_seq.clear();
+    pub fn install_active_keys(&mut self, keys: KeyHandle) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
         }
+        let active = self.active_keys()?;
+        if !active.same_origin(&keys) {
+            self.terminal = true;
+            return Err(CoreError::InvalidSessionState);
+        }
+        if keys.key_id == self.active_key_id && active == &keys {
+            return Ok(());
+        }
+        if keys.key_id <= self.active_key_id {
+            self.terminal = true;
+            return Err(CoreError::UnexpectedKeyId {
+                expected: self.active_key_id.saturating_add(1),
+                actual: keys.key_id,
+            });
+        }
+        self.next_seq.clear();
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
         let keep = self.max_retained_keys + 1;
         if self.keys.len() > keep {
             self.keys.truncate(keep);
+        }
+        self.replay.retain_keys(&self.keys);
+        Ok(())
+    }
+
+    /// Checks that the endpoint and session still use the same local key generation.
+    pub fn validate_session(&self, session: &crate::Session) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let active = self.active_keys()?;
+        if session
+            .active_keys()
+            .is_some_and(|k| std::ptr::eq(&**active, &*k))
+        {
+            Ok(())
+        } else {
+            Err(CoreError::InvalidSessionState)
         }
     }
 
@@ -260,6 +294,11 @@ impl MessageEndpoint {
         if self.terminal {
             return Err(CoreError::TransportTerminal);
         }
+        if self.max_message_size < MESSAGE_FRAME_OVERHEAD
+            || plaintext.len() > self.max_plaintext_len()
+        {
+            return Err(CoreError::FrameTooLarge);
+        }
         let keys = self.active_keys()?.clone();
         let key_id = keys.key_id;
         if !self.next_seq.contains_key(&(key_id, stream_id))
@@ -274,7 +313,7 @@ impl MessageEndpoint {
             .unwrap_or_default();
         let seq = sequence.current();
 
-        let frame = encrypt_frame(
+        let frame = FrameDomain::Message.encrypt(
             &keys,
             self.outbound_direction,
             flags,
@@ -283,9 +322,6 @@ impl MessageEndpoint {
             plaintext,
         )?;
         let bytes = frame.to_bytes();
-        if bytes.len() > self.max_message_size {
-            return Err(CoreError::FrameTooLarge);
-        }
 
         // Reserve the next sequence only after the message is known to be
         // emittable, so a rejected message never consumes a nonce.
@@ -315,6 +351,21 @@ impl MessageEndpoint {
         result
     }
 
+    /// Opens a reliable control frame authenticated under the current generation.
+    /// A data frame, stale generation, or malformed rekey closes the endpoint.
+    pub fn open_rekey(&mut self, bytes: &[u8]) -> Result<crate::ControlMessage, CoreError> {
+        let decoded = self.open(bytes)?;
+        if decoded.header.key_id == self.active_key_id
+            && decoded.header.flags & crate::frame::flags::IS_CONTROL != 0
+            && let Ok(control @ crate::ControlMessage::Rekey { .. }) =
+                crate::ControlMessage::decode(&decoded.plaintext)
+        {
+            return Ok(control);
+        }
+        self.terminal = true;
+        Err(CoreError::UnexpectedControlMessage)
+    }
+
     fn open_inner(&mut self, message: &[u8]) -> Result<DecodedMessage, CoreError> {
         if message.len() > self.max_message_size {
             return Err(CoreError::FrameTooLarge);
@@ -327,7 +378,7 @@ impl MessageEndpoint {
         // exactly, enforcing one complete frame per message with no trailing
         // bytes and no truncation.
         let frame = Frame::from_bytes(message)?;
-        frame.header.validate_v0()?;
+        frame.header.validate_profile(FrameDomain::Message as u8)?;
 
         let keys = self
             .key_for_id(frame.header.key_id)
@@ -336,7 +387,7 @@ impl MessageEndpoint {
                 actual: frame.header.key_id,
             })?;
 
-        let plaintext = decrypt_frame_with_key(keys, self.inbound_direction, &frame)?;
+        let plaintext = FrameDomain::Message.decrypt(keys, self.inbound_direction, &frame)?;
         self.replay.check_and_record_ordered(
             frame.header.key_id,
             frame.header.stream_id,
@@ -354,6 +405,28 @@ impl MessageEndpoint {
 mod tests {
     use super::*;
     use crate::crypto::{EphemeralKeyPair, derive_traffic_keys, random_session_salt};
+
+    #[test]
+    fn on_wire_limit_can_exclude_even_an_empty_frame() {
+        let (client, _) = endpoints();
+        for max in [0, MESSAGE_FRAME_OVERHEAD - 1, MESSAGE_FRAME_OVERHEAD] {
+            let mut endpoint = MessageEndpoint::with_config(
+                client.active_keys().unwrap().clone(),
+                Direction::S2C,
+                Direction::C2S,
+                MessageConfig {
+                    max_message_size: max,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(endpoint.max_plaintext_len(), 0);
+            assert!(endpoint.seal(0, 0, b"x").is_err());
+            assert_eq!(
+                endpoint.seal(0, 0, b"").is_ok(),
+                max == MESSAGE_FRAME_OVERHEAD
+            );
+        }
+    }
 
     fn endpoints() -> (MessageEndpoint, MessageEndpoint) {
         let a = EphemeralKeyPair::generate();

@@ -11,9 +11,9 @@ Three things version independently:
 - **Wire format** — the frame layout, body-envelope format, archive format,
   and handshake/control messages. Currently **Draft v0** (`version` byte `0x00`
   in the frame header; envelope/archive magics carry their own version bytes).
-- **Crypto profile** — the algorithm suite, named by the `profile_id` header
-  byte. v0 defines exactly one mandatory profile:
-  `0x01 = X25519 + HKDF-SHA-256 + XChaCha20-Poly1305`.
+- **Frame profile** — the `profile_id` header byte identifies the transport
+  shape and nonce domain. Byte streams use `0x01`, reliable messages `0x02`,
+  and datagrams `0x03`. All three use X25519, HKDF-SHA-256 and XChaCha20-Poly1305.
 - **Crates / npm package** — SemVer on the Rust crates (`0.x` line) and the
   (not yet published) npm package.
 
@@ -31,12 +31,11 @@ Three things version independently:
 
 ### 1.3 Version negotiation
 
-There is deliberately **no in-band version or cipher negotiation in v0**:
-both peers must speak Draft v0 / profile `0x01`, and a frame with an unknown
-version or profile is rejected. This removes downgrade surface while the
-format is unstable.
+Draft v0 has no in-band negotiation. Each endpoint accepts only its shape's
+profile. Upgrade message and datagram peers together when migrating from
+0.6.0, then establish fresh sessions.
 
-When a v1 (or a second profile) exists, the following rules apply:
+Any future negotiation must meet these requirements:
 
 - Version/profile selection MUST be folded into the handshake transcript so a
   MITM cannot strip or alter the offered set undetected (downgrade

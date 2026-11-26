@@ -58,7 +58,7 @@ use crate::{
     control::ControlMessage,
     crypto::{
         Direction, EphemeralKeyPair, KeyHandle, derive_ratchet_root, derive_traffic_keys,
-        dh_ratchet_step, random_session_salt,
+        dh_ratchet_step, try_random_session_salt,
     },
     observe::{ObserverHandle, SessionEvent, SessionObserver},
 };
@@ -128,7 +128,7 @@ pub struct RekeyThresholds {
     pub max_bytes: u64,
     /// Trigger rekey when elapsed time since last rekey reaches this value.
     pub max_age: Duration,
-    /// Number of previous keys retained for inbound compatibility.
+    /// Number of previous keys retained for inbound compatibility, capped at [`crate::MAX_RETAINED_KEYS`].
     pub max_previous_keys: usize,
 }
 
@@ -173,6 +173,15 @@ impl PreparedRekey {
     /// Returns the key identifier that protects [`Self::control_message`].
     pub fn old_key_id(&self) -> u8 {
         self.old_key_id
+    }
+}
+
+impl RekeyThresholds {
+    fn bounded(self) -> Self {
+        Self {
+            max_previous_keys: self.max_previous_keys.min(crate::MAX_RETAINED_KEYS),
+            ..self
+        }
     }
 }
 
@@ -277,8 +286,17 @@ impl Session {
         thresholds: RekeyThresholds,
         auth: SessionAuthConfig,
     ) -> (Self, ControlMessage) {
-        let local_eph = EphemeralKeyPair::generate();
-        let session_salt = random_session_salt();
+        Self::try_new_initiator_with_auth(thresholds, auth)
+            .expect("OS random number generator is unavailable")
+    }
+
+    /// Creates an initiator and its hello, returning an error if randomness is unavailable.
+    pub fn try_new_initiator_with_auth(
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+    ) -> Result<(Self, ControlMessage), CoreError> {
+        let local_eph = EphemeralKeyPair::try_generate()?;
+        let session_salt = try_random_session_salt()?;
         let binding =
             client_hello_binding(local_eph.public, session_salt, auth.channel_binding_bytes());
         let auth_payload = auth.local_signer().map(|signer| {
@@ -295,7 +313,7 @@ impl Session {
             auth: auth_payload,
         };
 
-        (
+        Ok((
             Self {
                 role: HandshakeRole::Initiator,
                 state: SessionState::WaitingPeerHello,
@@ -307,7 +325,7 @@ impl Session {
                 pending_rekey: None,
                 active_keys: None,
                 previous_keys: Vec::new(),
-                thresholds,
+                thresholds: thresholds.bounded(),
                 auth,
                 peer_authenticated: false,
                 authenticated_peer_key: None,
@@ -319,7 +337,7 @@ impl Session {
                 datagram_endpoint_claimed: AtomicBool::new(false),
             },
             msg,
-        )
+        ))
     }
 
     /// Creates a responder session waiting for a peer `ClientHello`.
@@ -337,10 +355,19 @@ impl Session {
 
     /// Creates a responder session with explicit authentication configuration.
     pub fn new_responder_with_auth(thresholds: RekeyThresholds, auth: SessionAuthConfig) -> Self {
-        Self {
+        Self::try_new_responder_with_auth(thresholds, auth)
+            .expect("OS random number generator is unavailable")
+    }
+
+    /// Creates a responder, returning an error if randomness is unavailable.
+    pub fn try_new_responder_with_auth(
+        thresholds: RekeyThresholds,
+        auth: SessionAuthConfig,
+    ) -> Result<Self, CoreError> {
+        Ok(Self {
             role: HandshakeRole::Responder,
             state: SessionState::WaitingPeerHello,
-            local_eph: EphemeralKeyPair::generate(),
+            local_eph: EphemeralKeyPair::try_generate()?,
             peer_eph_public: None,
             session_salt: [0u8; 32],
             ratchet_root: [0u8; 32],
@@ -348,7 +375,7 @@ impl Session {
             pending_rekey: None,
             active_keys: None,
             previous_keys: Vec::new(),
-            thresholds,
+            thresholds: thresholds.bounded(),
             auth,
             peer_authenticated: false,
             authenticated_peer_key: None,
@@ -358,7 +385,7 @@ impl Session {
             observer: ObserverHandle::default(),
             message_endpoint_claimed: AtomicBool::new(false),
             datagram_endpoint_claimed: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Returns current session state.
@@ -442,7 +469,11 @@ impl Session {
         self.observer.set(observer);
     }
 
-    /// Applies an incoming control message and optionally returns a response.
+    /// Applies a decoded control message and optionally returns a response.
+    ///
+    /// After the hello exchange, pass only controls authenticated with this
+    /// session's current inbound traffic key. A bare rekey has no standalone
+    /// authentication. The secure channel APIs enforce this requirement.
     pub fn handle_control(
         &mut self,
         msg: &ControlMessage,
@@ -509,7 +540,7 @@ impl Session {
                 let keys = derive_traffic_keys(&shared[..], &self.session_salt, 0)?;
                 self.ratchet_root = derive_ratchet_root(&self.session_salt, &shared)?;
 
-                self.active_keys = Some(KeyHandle::new(keys));
+                self.active_keys = Some(KeyHandle::for_session(keys, self.outbound_direction()));
                 self.state = SessionState::Active;
                 // The DH ratchet alternates; the initiator takes the first turn.
                 self.can_rekey = false;
@@ -570,7 +601,7 @@ impl Session {
                 let keys = derive_traffic_keys(&shared[..], &self.session_salt, 0)?;
                 self.ratchet_root = derive_ratchet_root(&self.session_salt, &shared)?;
 
-                self.active_keys = Some(KeyHandle::new(keys));
+                self.active_keys = Some(KeyHandle::for_session(keys, self.outbound_direction()));
                 self.state = SessionState::Active;
                 // The initiator takes the first DH-ratchet turn.
                 self.can_rekey = true;
@@ -624,6 +655,7 @@ impl Session {
                 self.peer_eph_public = Some(*ratchet_public);
                 self.ratchet_root.zeroize();
                 self.ratchet_root = new_root;
+                let next = active.next_generation(next);
                 self.install_new_active_key(next);
                 self.can_rekey = true;
                 self.last_rekey_at = MonoInstant::now();
@@ -733,7 +765,7 @@ impl Session {
 
         // DH-ratchet send step: rotate to a fresh ephemeral key and mix
         // DH(new ephemeral, peer's current ratchet public) into the root chain.
-        let new_eph = EphemeralKeyPair::generate();
+        let new_eph = EphemeralKeyPair::try_generate()?;
         let dh = Zeroizing::new(new_eph.shared_secret(peer_public)?);
         let (new_root, next) = dh_ratchet_step(&self.ratchet_root, &dh, new_key_id)?;
         let new_root = Zeroizing::new(new_root);
@@ -765,7 +797,7 @@ impl Session {
             transaction_id: ratchet_public,
             local_eph: new_eph,
             ratchet_root: new_root,
-            next_keys: KeyHandle::new(next),
+            next_keys: active.next_generation(next),
             previous_keys,
         };
         self.pending_rekey = Some(prepared.transaction_id);
@@ -1097,6 +1129,29 @@ mod tests {
     }
 
     #[test]
+    fn endpoints_reject_key_rollback_and_cross_session_adoption() {
+        let (mut session, _) = active_pair();
+        let (mut foreign, _) = active_pair();
+        let mut msg =
+            crate::MessageEndpoint::from_session_lease(session.claim_message_endpoint().unwrap());
+        let mut datagram =
+            crate::DatagramEndpoint::from_session_lease(session.claim_datagram_endpoint().unwrap());
+        let old = session.active_keys().unwrap();
+        session.force_rekey().unwrap();
+        foreign.force_rekey().unwrap();
+        msg.install_active_keys(session.active_keys().unwrap())
+            .unwrap();
+        assert!(msg.install_active_keys(old).is_err());
+        assert!(msg.is_terminal());
+        assert!(
+            datagram
+                .install_active_keys(foreign.active_keys().unwrap())
+                .is_err()
+        );
+        assert!(datagram.is_terminal());
+    }
+
+    #[test]
     fn endpoint_nonce_domains_can_only_be_claimed_once_per_shape() {
         let (mut client, hello) = Session::new_initiator_with_auth(
             RekeyThresholds::default(),
@@ -1126,6 +1181,27 @@ mod tests {
             client.claim_datagram_endpoint(),
             Err(CoreError::EndpointAlreadyClaimed)
         ));
+    }
+
+    #[test]
+    fn stream_direction_and_ownership_follow_the_local_session_across_rekeys() {
+        let (mut client, _) = active_pair();
+        let outbound = client.outbound_direction();
+        let inbound = client.inbound_direction();
+        let keys = client.active_keys().unwrap();
+        let stream = |key, incoming, outgoing| {
+            crate::io::SyncIo::new(
+                std::io::Cursor::new(Vec::<u8>::new()),
+                key,
+                incoming,
+                outgoing,
+            )
+        };
+        assert!(stream(keys.clone(), outbound, inbound).is_terminal());
+        assert!(stream(keys.clone(), outbound, outbound).is_terminal());
+        assert!(!stream(keys, inbound, outbound).is_terminal());
+        client.force_rekey().unwrap();
+        assert!(stream(client.active_keys().unwrap(), inbound, outbound).is_terminal());
     }
 
     #[test]

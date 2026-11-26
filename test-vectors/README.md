@@ -13,7 +13,8 @@ This directory contains deterministic vectors for interoperability and regressio
 - `frame-v0.json`
   - `shared_secret_hex`: 32-byte hex
   - `session_salt_hex`: 32-byte hex
-  - `frame_hex`: encoded frame bytes as hex
+  - `frame_hex`: encoded byte-stream frame
+  - `message_hex`, `datagram_hex`: reliable-message and datagram frames for stream zero, sequence zero, with the same traffic key and plaintext
   - `plaintext_hex`: expected decrypted plaintext as hex
 - `handshake-v0.json`
   - `client_private_hex`: 32-byte hex

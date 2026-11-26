@@ -153,6 +153,50 @@ mod tests {
     }
 
     #[test]
+    fn split_manifest_must_end_exactly_and_fit_aggregate_budget() {
+        let key = StaticSecret::from([45; 32]);
+        let mut split = create_split_archive_from_bytes(
+            b"split",
+            &[PublicKey::from(&key).to_bytes()],
+            ArchiveOptions::default(),
+            1024,
+        )
+        .unwrap();
+        let parts: Vec<&[u8]> = split.parts.iter().map(Vec::as_slice).collect();
+        let limits = ArchiveLimits {
+            max_archive_bytes: split.manifest.len(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            decrypt_split_archive_to_bytes_with_limits(
+                &split.manifest,
+                &parts,
+                key.to_bytes(),
+                &limits
+            ),
+            Err(ArchiveError::LimitExceeded("archive_bytes"))
+        ));
+        let empty_budget = ArchiveLimits {
+            max_archive_bytes: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            decrypt_split_archive_to_bytes_with_limits(
+                &split.manifest,
+                &[],
+                key.to_bytes(),
+                &empty_budget
+            ),
+            Err(ArchiveError::LimitExceeded("archive_bytes"))
+        ));
+        split.manifest.push(0);
+        assert!(matches!(
+            decrypt_split_archive_to_bytes(&split.manifest, &parts, key.to_bytes()),
+            Err(ArchiveError::Parse)
+        ));
+    }
+
+    #[test]
     fn deterministic_archive_builds_are_reproducible() {
         let recipient_priv = StaticSecret::from([0x77; 32]);
         let recipient_pub = PublicKey::from(&recipient_priv).to_bytes();

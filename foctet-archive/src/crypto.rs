@@ -2,9 +2,7 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
-use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::UnwrapErr;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
@@ -15,8 +13,9 @@ pub(crate) fn wrap_dek(
     dek: &[u8; 32],
     recipient_public: [u8; 32],
 ) -> Result<WrappedDek, ArchiveError> {
-    let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
-    wrap_dek_with_ephemeral_secret(dek, recipient_public, eph_priv.to_bytes())
+    let mut ephemeral = Zeroizing::new([0; 32]);
+    getrandom::fill(&mut ephemeral[..]).map_err(|_| ArchiveError::RandomSource)?;
+    wrap_dek_with_ephemeral_secret(dek, recipient_public, *ephemeral)
 }
 
 pub(crate) fn wrap_dek_with_ephemeral_secret(

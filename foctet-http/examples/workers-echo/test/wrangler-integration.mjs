@@ -27,10 +27,10 @@ function run(command, args, env = {}) {
   });
 }
 
-async function startWorker() {
+async function startWorker(entry) {
   worker = spawn(
     process.execPath,
-    [require.resolve("wrangler"), "dev", "--port", "8787", "--persist-to", stateDir],
+    [require.resolve("wrangler"), "dev", ...(entry ? [entry] : []), "--port", "8787", "--persist-to", stateDir],
     { cwd: exampleDir, stdio: "inherit" },
   );
   let spawnError;
@@ -103,7 +103,9 @@ try {
   });
 
   // Backend failures are fail-closed and mapped to an empty 500 response.
-  await client("/__foctet-test/backend-error", {
+  await stopWorker();
+  await startWorker("test/unavailable-replay.mjs");
+  await client("/foctet", {
     FIXED_MESSAGE_ID_BYTE: "c7",
     EXPECTED_STATUS: "500",
   });

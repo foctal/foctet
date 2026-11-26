@@ -2,17 +2,14 @@
 name = "foctet-http-workers-kv-vault"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
-# This Worker is a zero-knowledge blind store: it holds no key and never
-# decrypts, so it depends on `worker` only — there is deliberately no foctet or
-# crypto dependency here. All sealing/opening happens on the client with
-# `foctet_core::storage`.
 [dependencies]
+futures-util = "0.3"
 worker = "0.8.7"
 
 [workspace]

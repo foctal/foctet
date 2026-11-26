@@ -116,9 +116,9 @@ const dhRatchetStep = (rootKey, dh, keyId) => ({
   ),
 });
 
-// 24-byte XChaCha nonce: key_id || stream_id(be32) || seq(be64) || zeros.
-const makeNonce = (keyId, streamId, seq) =>
-  concat(new Uint8Array([keyId]), u32be(streamId), u64be(seq), new Uint8Array(11));
+// The profile fixes the transport domain byte after the sequence number.
+const makeNonce = (keyId, streamId, seq, domain = 0) =>
+  concat(new Uint8Array([keyId]), u32be(streamId), u64be(seq), new Uint8Array([domain]), new Uint8Array(10));
 
 const FRAME_HEADER_LEN = 22;
 const decodeFrameHeader = (bytes) => {
@@ -168,6 +168,17 @@ const frameVec = vectors("frame-v0.json");
   }
   assertTrue(plaintext !== null, "frame decrypts under a derived traffic key");
   assertEq(plaintext, frameVec.plaintext_hex, "frame plaintext");
+}
+
+for (const [field, profile] of [["message_hex", 2], ["datagram_hex", 3]]) {
+  const bytes = fromHex(frameVec[field]);
+  const h = decodeFrameHeader(bytes);
+  assertTrue(h.profileId === profile, field + " profile");
+  const keys = deriveTrafficKeys(fromHex(frameVec.shared_secret_hex), fromHex(frameVec.session_salt_hex));
+  const nonce = makeNonce(h.keyId, h.streamId, h.seq, profile - 1);
+  const ciphertext = bytes.slice(FRAME_HEADER_LEN);
+  assertEq(xchacha20poly1305(keys.c2s, nonce, h.raw).decrypt(ciphertext), frameVec.plaintext_hex, field);
+  assertThrows(() => xchacha20poly1305(keys.c2s, makeNonce(h.keyId, h.streamId, h.seq), h.raw).decrypt(ciphertext), field + " rejects stream nonce");
 }
 
 // --- 2. Handshake vector: X25519, key schedule, hellos, identity auth ------

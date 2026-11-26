@@ -50,8 +50,6 @@ fn select_server_key() -> ServerKeyChoice {
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    // Override with a deployed Worker URL to run against a real environment,
-    // e.g. WORKERS_URL=https://<name>.<account>.workers.dev/foctet
     let workers_url =
         std::env::var("WORKERS_URL").unwrap_or_else(|_| DEFAULT_WORKERS_URL.to_string());
     let server_key = select_server_key();
@@ -130,6 +128,9 @@ async fn main() {
             .parse::<u16>()
             .expect("EXPECTED_STATUS must be an integer");
         assert_eq!(status.as_u16(), expected, "{body:?}");
+        if expected == 500 {
+            assert!(body.is_empty(), "backend error exposed a response body");
+        }
         println!("status: {status} (expected)");
         return;
     }

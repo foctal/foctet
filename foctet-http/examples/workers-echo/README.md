@@ -14,12 +14,7 @@ Run the Rust client against the local worker in another terminal:
 cargo run -p foctet-http --example workers_echo_client
 ```
 
-Target a deployed Worker with `WORKERS_URL`:
-
-```bash
-WORKERS_URL=https://<name>.<account>.workers.dev/foctet \
-  cargo run -p foctet-http --example workers_echo_client
-```
+This loopback example uses public demo keys. Set `WORKERS_URL` to select a different local address.
 
 ## Key rotation demo
 
@@ -46,7 +41,6 @@ for the production rotation procedure.
 
 Notes:
 
-- Demo keys are hardcoded and are not production-safe.
 - Requests bind method, path, query, freshness, and message ID. Responses bind
   status and the initiating request message ID.
 - Replay decisions use a per-message Durable Object. Cloudflare KV is not a

@@ -37,15 +37,15 @@ pub(crate) fn build_encrypted_materials_with_secrets(
             let mut file_id = [0u8; 16];
             SysRng
                 .try_fill_bytes(&mut archive_id)
-                .expect("OS random number generator is unavailable");
+                .map_err(|_| ArchiveError::RandomSource)?;
             SysRng
                 .try_fill_bytes(&mut file_id)
-                .expect("OS random number generator is unavailable");
+                .map_err(|_| ArchiveError::RandomSource)?;
 
             let mut dek = [0u8; 32];
             SysRng
                 .try_fill_bytes(&mut dek)
-                .expect("OS random number generator is unavailable");
+                .map_err(|_| ArchiveError::RandomSource)?;
             (archive_id, file_id, dek)
         }
     };
@@ -91,6 +91,11 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         .map_err(|_| ArchiveError::Serialize)?
         .to_vec();
 
+    let limits = ArchiveLimits::default();
+    if header_plain.len() + 16 > limits.max_header_ciphertext_len {
+        return Err(ArchiveError::LimitExceeded("header_ciphertext_len"));
+    }
+
     let mut chunks = Vec::with_capacity(total_chunks as usize);
     for (idx, chunk) in plaintext.chunks(options.chunk_size).enumerate() {
         let mut chunk_hasher = Blake3::new();
@@ -104,6 +109,9 @@ pub(crate) fn build_encrypted_materials_with_secrets(
         };
         let chunk_plain =
             rkyv::to_bytes::<RkyvError>(&chunk_record).map_err(|_| ArchiveError::Serialize)?;
+        if chunk_plain.len() + 16 > limits.max_chunk_ciphertext_len {
+            return Err(ArchiveError::LimitExceeded("chunk_ciphertext_len"));
+        }
         let chunk_index = u32::try_from(idx)
             .map_err(|_| ArchiveError::InvalidInput("chunk index exceeds u32 max"))?;
         let nonce = chunk_nonce(archive_id, chunk_index);
@@ -173,7 +181,9 @@ pub(crate) fn decrypt_chunk_records_with_limits(
         return Err(ArchiveError::LimitExceeded("file_size"));
     }
 
-    let mut output = Vec::with_capacity(file_size);
+    // A public-key sender controls the manifest. Never reserve its declared
+    // output size until the corresponding chunk bytes have been validated.
+    let mut output = Vec::new();
     let mut overall = Blake3::new();
 
     for expected_index in 0..header.manifest.total_chunks {
@@ -204,7 +214,7 @@ pub(crate) fn decrypt_chunk_records_with_limits(
             .len()
             .checked_add(chunk.payload.len())
             .ok_or(ArchiveError::LimitExceeded("file_size overflow"))?
-            > limits.max_total_output_bytes
+            > file_size
         {
             return Err(ArchiveError::LimitExceeded("file_size"));
         }
@@ -326,9 +336,12 @@ pub(crate) fn ensure_profile(profile: u8, expected: u8) -> Result<(), ArchiveErr
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_total_chunks, validate_inputs};
+    #[cfg(target_pointer_width = "64")]
+    use super::checked_total_chunks;
+    use super::validate_inputs;
     use crate::{ArchiveError, ArchiveOptions, MAX_ARCHIVE_CHUNKS, MAX_ARCHIVE_RECIPIENTS};
 
+    #[cfg(target_pointer_width = "64")]
     #[test]
     fn total_chunks_rejects_values_that_would_repeat_a_nonce() {
         assert!(matches!(

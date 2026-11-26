@@ -1,9 +1,8 @@
 # Blind KV storage example
 
-A Cloudflare Worker stores opaque `application/foctet` records in KV. The Rust
-client encrypts and decrypts with
-[`foctet_core::storage`](../../../foctet-core/src/storage.rs); the Worker holds
-no decryption keys.
+A Cloudflare Worker stores signed TEXT records in KV. The Rust
+client creates a recipient key and a writer identity for each run. It verifies
+the returned record with its local writer pin and expected object revision.
 
 - `PUT /vault/:id` stores a request body.
 - `GET /vault/:id` returns the stored bytes, or 404.
@@ -24,19 +23,14 @@ cargo run -p foctet-http --example workers_kv_vault_client
 ```
 
 The client stores and opens a record, then checks that opening it with a
-different record ID or expected version fails.
+newer expected version fails.
 
 ## Limitations
 
-This example has fixed client keys and unauthenticated storage routes. Use it
-locally. Before adapting it for deployment, add authorization, request limits,
-HTTPS, and application-managed keys.
-
-Record context binds the namespace, ID, and version. The reader must keep its
-expected version independently trusted to detect rollback. This example uses
-unsigned records: anyone with the recipient public key can create a fresh valid
-ciphertext. Use signed storage records and a trusted writer pin when the backend
-must not be able to replace data.
+The example has unauthenticated storage routes and a 1 MiB record limit. Run
+it locally. Deployments need authorization, HTTPS, durable endpoint keys, and
+trusted revision checkpoints stored outside KV. The example's ephemeral keys
+can only open records within the same run.
 
 Encryption does not prevent deletion or denial of service. See the
 [blind storage guide](../../../docs/zero-knowledge-workers-storage.md) for

@@ -1,26 +1,12 @@
+mod common;
+
 use std::{env, error::Error};
 
-use foctet::core::{Direction, FoctetStream, KeyHandle, derive_traffic_keys};
+use foctet::core::{Direction, FoctetStream, KeyHandle};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
-use x25519_dalek::{PublicKey, StaticSecret};
-
-fn build_shared_keys() -> Result<KeyHandle, foctet::core::CoreError> {
-    let client_private = StaticSecret::from([0x31; 32]);
-    let server_private = StaticSecret::from([0x52; 32]);
-    let server_public = PublicKey::from(&server_private).to_bytes();
-    let shared_secret = client_private
-        .diffie_hellman(&PublicKey::from(server_public))
-        .to_bytes();
-    let session_salt = [0xA5; 32];
-    Ok(KeyHandle::new(derive_traffic_keys(
-        &shared_secret,
-        &session_salt,
-        1,
-    )?))
-}
 
 async fn run_server(
     listener: TcpListener,
@@ -69,12 +55,17 @@ async fn run_client(addr: std::net::SocketAddr, keys: KeyHandle) -> Result<(), B
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let keys = build_shared_keys()?;
+    let (client, server) = common::session_pair()?;
+    let keys = client
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
 
-    let server_keys = keys.clone();
+    let server_keys = server
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
     let server_task = tokio::spawn(async move { run_server(listener, server_keys).await });
 
     run_client(addr, keys).await?;

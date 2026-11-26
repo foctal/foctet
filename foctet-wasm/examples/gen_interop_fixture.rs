@@ -6,8 +6,6 @@
 //! Rust/WASM boundary.
 
 use foctet_core::{BodyEnvelopeLimits, seal_body, seal_body_with_context};
-use getrandom::SysRng;
-use rand_core::UnwrapErr;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn hex(bytes: &[u8]) -> String {
@@ -20,7 +18,9 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn main() {
-    let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+    let mut key = zeroize::Zeroizing::new([0; 32]);
+    getrandom::fill(&mut key[..]).expect("secure random source");
+    let secret = StaticSecret::from(*key);
     let public = PublicKey::from(&secret).to_bytes();
     let key_id = b"interop-kid";
     let plaintext = b"hello from rust";

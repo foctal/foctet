@@ -143,6 +143,16 @@ impl ReplayProtector {
         self
     }
 
+    pub(crate) fn retain_keys(&mut self, keys: &[crate::KeyHandle]) {
+        self.windows
+            .retain(|(id, _), _| keys.iter().any(|k| k.key_id == *id));
+    }
+
+    pub(crate) fn configure(&mut self, window_size: u64, max_windows: usize) {
+        self.window_size = window_size.clamp(1, MAX_REPLAY_WINDOW);
+        self.max_windows = max_windows.clamp(1, MAX_REPLAY_WINDOWS);
+    }
+
     /// Returns the number of distinct windows currently tracked.
     pub fn tracked_windows(&self) -> usize {
         self.windows.len()

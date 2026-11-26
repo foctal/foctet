@@ -88,12 +88,10 @@ try {
   await waitForHttp("http://127.0.0.1:8011/examples/browser/webtransport.html");
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000));
 
-  const executablePath =
-    process.env.CHROME_PATH ??
-    process.env.CHROME_BIN ??
-    "/usr/bin/google-chrome";
+  const executablePath = process.env.CHROME_PATH ?? process.env.CHROME_BIN;
+
   browser = await chromium.launch({
-    executablePath,
+    ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: true,
     args: ["--enable-quic", "--origin-to-force-quic-on=127.0.0.1:4470"],
   });

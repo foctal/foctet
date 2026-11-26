@@ -11,12 +11,7 @@ use crate::{TransportConfig, adapter::SplitIo};
 
 const HANDSHAKE_CONTROL_MAX_LEN: usize = foctet_core::MAX_CONTROL_MESSAGE_LEN;
 
-/// Default deadline for [`TokioTransportBuilder::establish_initiator_with_timeout`]
-/// and the responder/auth variants: enough for a two-message round trip over a
-/// slow network, short enough to bound a stalled or hostile peer's hold on
-/// server resources. This is the same value as
-/// [`foctet_core::ProtocolLimits::handshake_timeout`]'s default, so the
-/// centralized limits struct remains the single documented source.
+/// Deadline used by the production Tokio handshake constructors.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = foctet_core::DEFAULT_HANDSHAKE_TIMEOUT;
 
 /// Builder for the recommended Tokio-based transport integration path.
@@ -126,8 +121,13 @@ impl TokioTransportBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        self.establish_initiator_with_auth(io, thresholds, auth.into_session_auth())
-            .await
+        self.establish_initiator_with_auth_and_timeout(
+            io,
+            thresholds,
+            auth.into_session_auth(),
+            DEFAULT_HANDSHAKE_TIMEOUT,
+        )
+        .await
     }
 
     /// Runs the native Foctet handshake as responder on the transport, then builds a secure channel.
@@ -173,8 +173,13 @@ impl TokioTransportBuilder {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        self.establish_responder_with_auth(io, thresholds, auth.into_session_auth())
-            .await
+        self.establish_responder_with_auth_and_timeout(
+            io,
+            thresholds,
+            auth.into_session_auth(),
+            DEFAULT_HANDSHAKE_TIMEOUT,
+        )
+        .await
     }
 
     /// Runs the native Foctet handshake as initiator with an explicit deadline,
@@ -388,7 +393,7 @@ async fn run_initiator_handshake<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let (mut session, hello) = Session::new_initiator_with_auth(thresholds, auth);
+    let (mut session, hello) = Session::try_new_initiator_with_auth(thresholds, auth)?;
     write_control(io, &hello).await?;
     let server_hello = read_control(io).await?;
     session.handle_control(&server_hello)?;
@@ -403,7 +408,7 @@ async fn run_responder_handshake<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut session = Session::new_responder_with_auth(thresholds, auth);
+    let mut session = Session::try_new_responder_with_auth(thresholds, auth)?;
     let hello = read_control(io).await?;
     let server_hello = session
         .handle_control(&hello)?

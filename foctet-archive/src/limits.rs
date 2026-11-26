@@ -13,7 +13,7 @@ pub const MAX_ARCHIVE_PART_CHUNKS: usize = 65_536;
 /// declared lengths/counts from container bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArchiveLimits {
-    /// Maximum accepted single-file archive input size in bytes.
+    /// Maximum single-file or aggregate split archive input size in bytes.
     pub max_archive_bytes: usize,
     /// Maximum accepted split-manifest input size in bytes.
     pub max_manifest_bytes: usize,

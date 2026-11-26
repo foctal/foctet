@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     error::Error,
     net::{TcpListener, TcpStream},
@@ -5,23 +7,7 @@ use std::{
     thread,
 };
 
-use foctet::core::{Direction, KeyHandle, derive_traffic_keys, io::SyncIo};
-use x25519_dalek::{PublicKey, StaticSecret};
-
-fn build_shared_keys() -> Result<KeyHandle, foctet::core::CoreError> {
-    let client_private = StaticSecret::from([0x31; 32]);
-    let server_private = StaticSecret::from([0x52; 32]);
-    let server_public = PublicKey::from(&server_private).to_bytes();
-    let shared_secret = client_private
-        .diffie_hellman(&PublicKey::from(server_public))
-        .to_bytes();
-    let session_salt = [0xA5; 32];
-    Ok(KeyHandle::new(derive_traffic_keys(
-        &shared_secret,
-        &session_salt,
-        1,
-    )?))
-}
+use foctet::core::{Direction, KeyHandle, io::SyncIo};
 
 fn run_server(listener: TcpListener, keys: KeyHandle) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (stream, peer) = listener.accept()?;
@@ -51,13 +37,18 @@ fn run_client(addr: std::net::SocketAddr, keys: KeyHandle) -> Result<(), Box<dyn
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let keys = build_shared_keys()?;
+    let (client, server) = common::session_pair()?;
+    let keys = client
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
 
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
     let (ready_tx, ready_rx) = mpsc::channel();
 
-    let server_keys = keys.clone();
+    let server_keys = server
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
     let server_thread = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
         ready_tx
             .send(())

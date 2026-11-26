@@ -7,7 +7,7 @@
 use crate::*;
 use foctet_core::{HandshakeSigner, PeerIdentity, sign_ciphertext, verify_ciphertext};
 use getrandom::SysRng;
-use rand_core::{TryRng, UnwrapErr};
+use rand_core::{Rng, SeedableRng};
 use vsss_rs::Gf256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
@@ -32,7 +32,8 @@ pub struct RecoverySet {
     pub archive_hash: [u8; 32],
 }
 impl RecoverySet {
-    fn encode(&self) -> Vec<u8> {
+    /// Encodes the public descriptor for storage in a trusted checkpoint.
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = MAGIC.to_vec();
         out.extend(self.id);
         out.push(self.threshold);
@@ -41,6 +42,22 @@ impl RecoverySet {
         out.extend(self.archive_hash);
         out
     }
+    /// Parses a 90-byte descriptor. The caller authenticates its provenance.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArchiveError> {
+        if bytes.len() != 90 || &bytes[..8] != MAGIC {
+            return Err(ArchiveError::Parse);
+        }
+        let set = Self {
+            id: bytes[8..24].try_into().map_err(|_| ArchiveError::Parse)?,
+            threshold: bytes[24],
+            total: bytes[25],
+            recipient: bytes[26..58].try_into().map_err(|_| ArchiveError::Parse)?,
+            archive_hash: bytes[58..90].try_into().map_err(|_| ArchiveError::Parse)?,
+        };
+        set.validate()?;
+        Ok(set)
+    }
+
     fn validate(&self) -> Result<(), ArchiveError> {
         if self.threshold < 2 || self.threshold > self.total {
             return Err(ArchiveError::InvalidInput("invalid recovery threshold"));
@@ -73,29 +90,76 @@ impl RecoveryShare {
         // Reserve the complete encoding before copying any secret material:
         // Zeroizing wipes on drop, but cannot wipe buffers retired by realloc.
         let mut out = Zeroizing::new(Vec::with_capacity(SHARE_BYTES));
-        out.extend_from_slice(&self.set.encode());
+        out.extend_from_slice(&self.set.to_bytes());
         out.extend_from_slice(&self.value);
         out.extend(self.signature);
         out
     }
+    /// Verifies the issuer, expected descriptor and index before a custodian accepts a share.
+    pub fn verify(&self, expected: &RecoverySet, writer: PeerIdentity) -> Result<(), ArchiveError> {
+        if self.set != *expected || self.value[0] == 0 || self.value[0] > expected.total {
+            return Err(ArchiveError::InvalidInput("unexpected recovery share"));
+        }
+        let mut signed = Zeroizing::new(expected.to_bytes());
+        signed.extend_from_slice(&self.value);
+        verify_ciphertext(&signed, DOMAIN, self.signature, writer).map_err(|_| ArchiveError::Aead)
+    }
+
+    /// Encrypts a signed share to one custodian's trusted X25519 public key.
+    /// Deliver each share to an independent custodian and keep the public set
+    /// descriptor in trusted storage.
+    pub fn seal_for_custodian(
+        &self,
+        custodian: [u8; 32],
+        key_id: &[u8],
+    ) -> Result<Vec<u8>, ArchiveError> {
+        Ok(foctet_core::seal_body_with_context(
+            &self.expose_bytes(),
+            custodian,
+            key_id,
+            &self.set.to_bytes(),
+            &share_envelope_limits(),
+        )?)
+    }
+
+    /// Opens an encrypted share and verifies its issuer and trusted descriptor.
+    pub fn open_for_custodian(
+        envelope: &[u8],
+        custodian_secret: [u8; 32],
+        expected: &RecoverySet,
+        writer: PeerIdentity,
+    ) -> Result<Self, ArchiveError> {
+        expected.validate()?;
+        let bytes = Zeroizing::new(foctet_core::open_body_with_context(
+            envelope,
+            custodian_secret,
+            &expected.to_bytes(),
+            &share_envelope_limits(),
+        )?);
+        let share = Self::from_bytes(&bytes)?;
+        share.verify(expected, writer)?;
+        Ok(share)
+    }
+
     /// Parses a bounded share. Authentication occurs during recovery.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArchiveError> {
         if bytes.len() != SHARE_BYTES || &bytes[..8] != MAGIC {
             return Err(ArchiveError::Parse);
         }
-        let set = RecoverySet {
-            id: bytes[8..24].try_into().map_err(|_| ArchiveError::Parse)?,
-            threshold: bytes[24],
-            total: bytes[25],
-            recipient: bytes[26..58].try_into().map_err(|_| ArchiveError::Parse)?,
-            archive_hash: bytes[58..90].try_into().map_err(|_| ArchiveError::Parse)?,
-        };
-        set.validate()?;
+        let set = RecoverySet::from_bytes(&bytes[..90])?;
         Ok(Self {
             set,
             value: Zeroizing::new(bytes[90..123].to_vec()),
             signature: bytes[123..].try_into().map_err(|_| ArchiveError::Parse)?,
         })
+    }
+}
+
+fn share_envelope_limits() -> foctet_core::BodyEnvelopeLimits {
+    foctet_core::BodyEnvelopeLimits {
+        max_payload_len: SHARE_BYTES + 16,
+        max_recipients: 1,
+        ..Default::default()
     }
 }
 
@@ -112,13 +176,13 @@ pub fn create_threshold_archive(
     if threshold < 2 || threshold > total {
         return Err(ArchiveError::InvalidInput("invalid recovery threshold"));
     }
-    let secret = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+    let mut rng =
+        chacha20::ChaCha20Rng::try_from_rng(&mut SysRng).map_err(|_| ArchiveError::RandomSource)?;
+    let secret = StaticSecret::random_from_rng(&mut rng);
     let recipient = PublicKey::from(&secret).to_bytes();
     let (archive, _) = create_archive_from_bytes(plaintext, &[recipient], options)?;
     let mut id = [0; 16];
-    SysRng
-        .try_fill_bytes(&mut id)
-        .map_err(|_| ArchiveError::InvalidInput("random source failed"))?;
+    rng.fill_bytes(&mut id);
     let set = RecoverySet {
         id,
         threshold,
@@ -131,14 +195,14 @@ pub fn create_threshold_archive(
         threshold as usize,
         total as usize,
         &secret_bytes[..],
-        UnwrapErr(SysRng),
+        &mut rng,
     )
     .map_err(|_| ArchiveError::InvalidInput("secret sharing failed"))?;
     let shares = values
         .into_iter()
         .map(|value| {
             let value = Zeroizing::new(value);
-            let mut signed = Zeroizing::new(set.encode());
+            let mut signed = Zeroizing::new(set.to_bytes());
             signed.extend_from_slice(&value);
             let signature = sign_ciphertext(&signed, DOMAIN, writer);
             RecoveryShare {
@@ -174,18 +238,12 @@ pub fn recover_threshold_archive(
     let mut seen = [false; 256];
     let mut values = Zeroizing::new(Vec::with_capacity(shares.len()));
     for share in shares {
-        if share.set != *expected || share.value.len() != 33 {
-            return Err(ArchiveError::Parse);
-        }
-        let index = share.value[0] as usize;
-        if index == 0 || index > expected.total as usize || seen[index] {
-            return Err(ArchiveError::InvalidInput("duplicate or invalid share"));
+        share.verify(expected, writer)?;
+        let index = usize::from(share.value[0]);
+        if seen[index] {
+            return Err(ArchiveError::InvalidInput("duplicate recovery share"));
         }
         seen[index] = true;
-        let mut signed = Zeroizing::new(expected.encode());
-        signed.extend_from_slice(&share.value);
-        verify_ciphertext(&signed, DOMAIN, share.signature, writer)
-            .map_err(|_| ArchiveError::Aead)?;
         values.push(share.value.to_vec());
     }
     let recovered =
@@ -205,6 +263,41 @@ pub fn recover_threshold_archive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_custodians_open_only_their_signed_share() {
+        let writer = foctet_core::IdentityKeyPair::generate();
+        let pin = PeerIdentity::new(writer.public_key());
+        let (archive, set, shares) =
+            create_threshold_archive(b"backup", ArchiveOptions::default(), 2, 3, &writer).unwrap();
+        let expected = RecoverySet::from_bytes(&set.to_bytes()).unwrap();
+        let wrong_writer = PeerIdentity::new(foctet_core::IdentityKeyPair::generate().public_key());
+        let mut recovered = Vec::new();
+        for (share, key) in shares.iter().take(2).zip([[21; 32], [22; 32]]) {
+            let public = PublicKey::from(&StaticSecret::from(key)).to_bytes();
+            let sealed = share.seal_for_custodian(public, b"backup").unwrap();
+            assert!(RecoveryShare::open_for_custodian(&sealed, [23; 32], &expected, pin).is_err());
+            assert!(
+                RecoveryShare::open_for_custodian(&sealed, key, &expected, wrong_writer).is_err()
+            );
+            let mut other = expected.clone();
+            other.id[0] ^= 1;
+            assert!(RecoveryShare::open_for_custodian(&sealed, key, &other, pin).is_err());
+            recovered
+                .push(RecoveryShare::open_for_custodian(&sealed, key, &expected, pin).unwrap());
+        }
+        assert_eq!(
+            recover_threshold_archive(
+                &archive,
+                &expected,
+                &recovered,
+                pin,
+                &ArchiveLimits::default()
+            )
+            .unwrap(),
+            b"backup"
+        );
+    }
+
     #[test]
     fn threshold_boundaries_all_three_of_five_subsets_and_wrong_writer() {
         let writer = foctet_core::IdentityKeyPair::from_secret_key_bytes([11; 32]);

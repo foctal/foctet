@@ -21,7 +21,7 @@ use crate::{
 
 /// Draft v0 wire version identifier.
 pub const WIRE_VERSION_V0: u8 = 0x00;
-/// Mandatory profile identifier for Draft v0.
+/// Draft v0 byte-stream profile. Body envelopes and archives also use this identifier.
 pub const PROFILE_X25519_HKDF_XCHACHA20POLY1305: u8 = 0x01;
 /// Serialized frame-header length in bytes.
 pub const FRAME_HEADER_LEN: usize = 22;
@@ -137,15 +137,22 @@ impl FrameHeader {
         })
     }
 
-    /// Validates version/profile/flags according to Draft v0.
+    /// Validates a Draft v0 header for any defined transport shape.
     pub fn validate_v0(&self) -> Result<(), CoreError> {
+        match self.profile_id {
+            1..=3 => self.validate_profile(self.profile_id),
+            other => Err(CoreError::UnsupportedProfile(other)),
+        }
+    }
+
+    pub(crate) fn validate_profile(&self, profile: u8) -> Result<(), CoreError> {
         if self.magic != DRAFT_MAGIC {
             return Err(CoreError::InvalidMagic);
         }
         if self.version != WIRE_VERSION_V0 {
             return Err(CoreError::UnsupportedVersion(self.version));
         }
-        if self.profile_id != PROFILE_X25519_HKDF_XCHACHA20POLY1305 {
+        if self.profile_id != profile {
             return Err(CoreError::UnsupportedProfile(self.profile_id));
         }
         if self.flags & !flags::ALL_KNOWN_BITS != 0 {
@@ -179,14 +186,17 @@ impl Frame {
             return Err(CoreError::InvalidHeaderLength(buf.len()));
         }
         let header = FrameHeader::decode(&buf[..FRAME_HEADER_LEN])?;
-        let ciphertext = buf[FRAME_HEADER_LEN..].to_vec();
+        let ciphertext = &buf[FRAME_HEADER_LEN..];
         if ciphertext.len() != header.ct_len as usize {
             return Err(CoreError::CiphertextLengthMismatch {
                 expected: header.ct_len as usize,
                 actual: ciphertext.len(),
             });
         }
-        Ok(Self { header, ciphertext })
+        Ok(Self {
+            header,
+            ciphertext: ciphertext.to_vec(),
+        })
     }
 }
 
@@ -237,12 +247,17 @@ enum WriteState {
 
 impl<T> FoctetFramed<T> {
     /// Creates a framed transport with initial traffic keys.
+    ///
+    /// Session-derived keys grant a single byte-stream endpoint for their
+    /// entire ratchet lifetime. Reusing them constructs a terminal transport.
+    /// Callers deriving raw keys must provide exclusive nonce ownership.
     pub fn new(
         io: T,
         keys: KeyHandle,
         inbound_direction: Direction,
         outbound_direction: Direction,
     ) -> Self {
+        let terminal = !keys.claim_stream(inbound_direction, outbound_direction);
         let limits = ProtocolLimits::default();
         Self {
             io,
@@ -258,7 +273,7 @@ impl<T> FoctetFramed<T> {
             replay: limits.replay_protector(),
             limits,
             eof: false,
-            terminal: false,
+            terminal,
             write_state: WriteState::Open,
         }
     }
@@ -275,13 +290,17 @@ impl<T> FoctetFramed<T> {
         self
     }
 
-    /// Applies a complete set of [`ProtocolLimits`], rebuilding the replay
-    /// protector from the new replay-window size and window cap.
-    ///
-    /// Intended to be called immediately after [`FoctetFramed::new`], before any
-    /// frames are processed; it resets replay-window state.
+    /// Applies resource limits without discarding recorded sequence numbers.
+    /// Existing replay windows keep their width. New windows use the supplied width.
     pub fn with_limits(mut self, limits: ProtocolLimits) -> Self {
-        self.replay = limits.replay_protector();
+        let limits = ProtocolLimits {
+            max_retained_keys: limits.max_retained_keys.min(crate::MAX_RETAINED_KEYS),
+            ..limits
+        };
+        self.replay
+            .configure(limits.replay_window, limits.max_replay_windows);
+        self.keys.truncate(1 + limits.max_retained_keys);
+        self.replay.retain_keys(&self.keys);
         self.limits = limits;
         self
     }
@@ -299,7 +318,9 @@ impl<T> FoctetFramed<T> {
 
     /// Sets number of retained previous keys.
     pub fn with_max_retained_keys(mut self, max: usize) -> Self {
-        self.limits.max_retained_keys = max.max(1);
+        self.limits = self.limits.with_max_retained_keys(max);
+        self.keys.truncate(1 + self.limits.max_retained_keys);
+        self.replay.retain_keys(&self.keys);
         self
     }
 
@@ -348,7 +369,18 @@ impl<T> FoctetFramed<T> {
     }
 
     /// Installs new active keys and retains previous keys.
-    pub fn install_active_keys(&mut self, keys: KeyHandle) {
+    pub fn install_active_keys(&mut self, keys: KeyHandle) -> Result<(), CoreError> {
+        if self.terminal {
+            return Err(CoreError::TransportTerminal);
+        }
+        let active = self.active_keys()?;
+        if !active.same_origin(&keys)
+            || keys.key_id < active.key_id
+            || (active.key_id == keys.key_id && active != &keys)
+        {
+            self.terminate();
+            return Err(CoreError::InvalidSessionState);
+        }
         self.keys.retain(|k| k.key_id != keys.key_id);
         self.keys.insert(0, keys.clone());
         self.active_key_id = keys.key_id;
@@ -356,6 +388,8 @@ impl<T> FoctetFramed<T> {
         if self.keys.len() > keep {
             self.keys.truncate(keep);
         }
+        self.replay.retain_keys(&self.keys);
+        Ok(())
     }
 
     fn active_keys(&self) -> Result<&KeyHandle, CoreError> {
@@ -370,17 +404,29 @@ impl<T> FoctetFramed<T> {
     }
 
     fn set_key_ring_from_session(&mut self, session: &Session) -> Result<(), CoreError> {
-        let ring = session.key_ring()?;
-        self.keys = ring;
-        self.active_key_id = self
-            .keys
-            .first()
-            .map(|k| k.key_id)
+        let keys = session
+            .active_keys()
             .ok_or(CoreError::InvalidSessionState)?;
-        let keep = self.limits.max_retained_keys + 1;
-        if self.keys.len() > keep {
-            self.keys.truncate(keep);
+        let active = self.active_keys()?;
+        if !active.same_origin(&keys) || keys.key_id < active.key_id {
+            self.terminate();
+            return Err(CoreError::InvalidSessionState);
         }
+        if std::ptr::eq(&**active, &*keys) {
+            return Ok(());
+        }
+        // Never reintroduce an evicted generation after its replay windows
+        // have been released, including when a caller increases retention.
+        let oldest = self
+            .keys
+            .last()
+            .ok_or(CoreError::MissingSessionSecret)?
+            .key_id;
+        self.keys = session.key_ring()?;
+        self.keys.retain(|key| key.key_id >= oldest);
+        self.active_key_id = keys.key_id;
+        self.keys.truncate(self.limits.max_retained_keys + 1);
+        self.replay.retain_keys(&self.keys);
         Ok(())
     }
 
@@ -516,13 +562,23 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         stream_id: u32,
         plaintext: &[u8],
     ) -> Result<(), CoreError> {
+        let payload = payload::encode_application_data(plaintext)?;
+        self.start_send_payload_with_session(session, flags, stream_id, &payload, plaintext.len())
+    }
+
+    pub(crate) fn start_send_payload_with_session(
+        self: Pin<&mut Self>,
+        session: &mut Session,
+        flags: u8,
+        stream_id: u32,
+        payload: &[u8],
+        accounted_len: usize,
+    ) -> Result<(), CoreError> {
         let this = self.get_mut();
         this.set_key_ring_from_session(session)?;
-        let app_tlv = Tlv::application_data(plaintext)?;
-        let app_payload = payload::encode_tlvs(&[app_tlv])?;
-        this.enqueue_with_specific_key(this.active_key_id, flags, stream_id, &app_payload)?;
+        this.enqueue_with_specific_key(this.active_key_id, flags, stream_id, payload)?;
 
-        let prepared = match session.on_outbound_payload(plaintext.len()) {
+        let prepared = match session.on_outbound_payload(accounted_len) {
             Ok(prepared) => prepared,
             Err(error) => {
                 // The application frame is already queued. Its session
@@ -564,6 +620,7 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
     }
 
     /// Processes one incoming decoded frame with session-aware control handling.
+    /// Pass only a frame authenticated by this transport for the supplied session.
     pub fn handle_incoming_with_session(
         self: Pin<&mut Self>,
         session: &mut Session,
@@ -588,7 +645,14 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         session: &mut Session,
         frame: DecodedFrame,
     ) -> Result<Option<Vec<u8>>, CoreError> {
+        self.set_key_ring_from_session(session)?;
         if frame.header.flags & flags::IS_CONTROL != 0 {
+            if session
+                .active_keys()
+                .is_none_or(|keys| keys.key_id != frame.header.key_id)
+            {
+                return Err(CoreError::UnexpectedControlMessage);
+            }
             let msg = ControlMessage::decode(&frame.plaintext)?;
             let response = session.handle_control(&msg)?;
             self.set_key_ring_from_session(session)?;
@@ -611,14 +675,16 @@ impl<T: PollIo + Unpin> FoctetFramed<T> {
         }
 
         let header = FrameHeader::decode(&self.rx[..FRAME_HEADER_LEN])?;
-        header.validate_v0()?;
+        header.validate_profile(PROFILE_X25519_HKDF_XCHACHA20POLY1305)?;
 
         let ct_len = header.ct_len as usize;
         if ct_len > self.limits.max_ciphertext_len {
             return Err(CoreError::FrameTooLarge);
         }
 
-        let total = FRAME_HEADER_LEN + ct_len;
+        let total = FRAME_HEADER_LEN
+            .checked_add(ct_len)
+            .ok_or(CoreError::FrameTooLarge)?;
         if self.rx.len() < total {
             return Ok(None);
         }
@@ -708,6 +774,7 @@ impl<T: PollIo + Unpin> Stream for FoctetFramed<T> {
                 if this.rx.is_empty() {
                     return Poll::Ready(None);
                 }
+                this.terminate();
                 return Poll::Ready(Some(Err(CoreError::UnexpectedEof)));
             }
 
@@ -848,22 +915,23 @@ impl<T: PollIo + Unpin> FoctetStream<T> {
     ) -> Poll<Result<usize, CoreError>> {
         let this = self.get_mut();
 
-        if !this.read_buf.is_empty() {
-            let n = out.len().min(this.read_buf.len());
-            out[..n].copy_from_slice(&this.read_buf.split_to(n));
-            return Poll::Ready(Ok(n));
+        if out.is_empty() {
+            return Poll::Ready(Ok(0));
         }
-
-        match ready!(Pin::new(&mut this.framed).poll_next(cx)) {
-            Some(Ok(frame)) => {
-                this.read_buf.extend_from_slice(&frame.plaintext);
-                let n = out.len().min(this.read_buf.len());
-                out[..n].copy_from_slice(&this.read_buf.split_to(n));
-                Poll::Ready(Ok(n))
+        if this.read_buf.is_empty() {
+            match ready!(Pin::new(&mut this.framed).poll_next(cx)) {
+                Some(Ok(frame)) if frame.plaintext.is_empty() => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Some(Ok(frame)) => this.read_buf.extend_from_slice(&frame.plaintext),
+                Some(Err(e)) => return Poll::Ready(Err(e)),
+                None => return Poll::Ready(Ok(0)),
             }
-            Some(Err(e)) => Poll::Ready(Err(e)),
-            None => Poll::Ready(Ok(0)),
         }
+        let n = out.len().min(this.read_buf.len());
+        out[..n].copy_from_slice(&this.read_buf.split_to(n));
+        Poll::Ready(Ok(n))
     }
 
     /// Poll-based plaintext write into encrypted framed transport.
@@ -946,6 +1014,7 @@ mod tests {
             Pin::new(&mut framed).poll_next(&mut cx),
             Poll::Ready(Some(Ok(_)))
         ));
+        let mut framed = framed.with_limits(crate::ProtocolLimits::default());
         assert!(matches!(
             Pin::new(&mut framed).poll_next(&mut cx),
             Poll::Ready(Some(Err(CoreError::Replay)))
@@ -954,6 +1023,37 @@ mod tests {
             Pin::new(&mut framed).poll_next(&mut cx),
             Poll::Ready(Some(Err(CoreError::TransportTerminal)))
         ));
+    }
+
+    #[test]
+    fn empty_frame_does_not_end_a_byte_stream() {
+        let keys = fixed_test_keys();
+        let mut io = MemoryIo::default();
+        for (seq, bytes) in [(0, &b""[..]), (1, b"next")] {
+            io.inbound.extend(
+                encrypt_frame(&keys, Direction::C2S, 0, 0, seq, bytes)
+                    .unwrap()
+                    .to_bytes(),
+            );
+        }
+        let mut stream =
+            FoctetStream::new(FoctetFramed::new(io, keys, Direction::C2S, Direction::S2C));
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut out = [0; 4];
+        assert!(matches!(
+            Pin::new(&mut stream).poll_read_plain(&mut cx, &mut []),
+            Poll::Ready(Ok(0))
+        ));
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read_plain(&mut cx, &mut out)
+                .is_pending()
+        );
+        assert!(matches!(
+            Pin::new(&mut stream).poll_read_plain(&mut cx, &mut out),
+            Poll::Ready(Ok(4))
+        ));
+        assert_eq!(&out, b"next");
     }
 
     #[derive(Default, Debug)]
@@ -1473,16 +1573,12 @@ mod tests {
         // dispatcher: control-shaped bytes delivered as a *data* frame
         // (IS_CONTROL unset) must surface as plain application data, never be
         // parsed and acted on as a control message.
-        let eph_a = EphemeralKeyPair::generate();
-        let eph_b = EphemeralKeyPair::generate();
-        let ss = eph_a.shared_secret(eph_b.public).expect("shared secret");
-        let salt = random_session_salt();
-        let keys = KeyHandle::new(derive_traffic_keys(&ss, &salt, 1).expect("traffic keys"));
-
-        let (mut session, _hello) = crate::Session::new_initiator_with_auth(
-            crate::RekeyThresholds::default(),
-            crate::SessionAuthConfig::unauthenticated_for_testing(),
-        );
+        let config = crate::SessionAuthConfig::unauthenticated_for_testing();
+        let (_peer, hello) =
+            crate::Session::new_initiator_with_auth(Default::default(), config.clone());
+        let mut session = crate::Session::new_responder_with_auth(Default::default(), config);
+        session.handle_control(&hello).unwrap();
+        let keys = session.active_keys().unwrap();
 
         let control_shaped_bytes = ControlMessage::Error { code: 7 }.encode();
         let frame = encrypt_frame(&keys, Direction::C2S, 0, 0, 0, &control_shaped_bytes)

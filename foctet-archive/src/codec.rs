@@ -169,6 +169,9 @@ pub(crate) fn parse_part_file(
         return Err(ArchiveError::LimitExceeded("part_chunks"));
     }
 
+    if chunk_count_usize > (part_bytes.len() - rd.position() as usize) / 4 {
+        return Err(ArchiveError::Truncated);
+    }
     let mut chunk_ciphertexts = Vec::with_capacity(chunk_count_usize);
     for _ in 0..chunk_count {
         let len = read_u32_be(&mut rd)? as usize;

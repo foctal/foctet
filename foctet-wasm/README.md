@@ -175,7 +175,9 @@ travel over that reliable channel: call `prepareRekey()` only when
 after the transport accepts it. Call `cancelPreparedRekey()` only when the
 transport proves that it accepted no bytes. If delivery is ambiguous, call
 `terminate()` and discard both the session and transport. Feed the peer's rekey
-bytes to `handleControlMessage()`.
+bytes to `handleControlMessage()`. After the hello exchange, both methods use
+authenticated reliable-message frames (profile `0x02`). Upgrade the peer
+alongside the SDK when migrating from the bare rekey encoding in 0.6.0.
 
 Example over a browser `WebSocket` (binary frames), as the initiator:
 

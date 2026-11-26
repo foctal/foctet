@@ -25,6 +25,7 @@ Size configurable limits for the workload and available memory.
 | HTTP bound headers | 32 | 32 | Count is checked during policy iteration |
 | HTTP bound header name/value | 256 bytes / 16 KiB | Fixed HTTP limit | Checked before copying into protected context |
 | HTTP protected context | 64 KiB | 64 KiB | Aggregate variable data is checked before AAD construction |
+| In-memory archive input | 768 MiB | Configured limit | Includes the manifest and every supplied part for split archives |
 | Archive recipients | 1024 | 1024 | Checked before wrapper allocation or X25519 |
 | Archive chunks | 65,536 | 65,536 | Checked before hashing plaintext or allocating chunk records |
 | Archive split parts | 65,536 | 65,536 | Checked before manifest maps and part iteration |

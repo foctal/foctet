@@ -1,6 +1,8 @@
+mod common;
+
 use std::{env, error::Error};
 
-use foctet::core::{Direction, FoctetStream, KeyHandle, derive_traffic_keys};
+use foctet::core::{Direction, FoctetStream, KeyHandle};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -8,16 +10,6 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
 };
-
-fn derive_demo_keys() -> Result<KeyHandle, foctet::core::CoreError> {
-    let shared_secret = [0x11u8; 32];
-    let session_salt = [0x22u8; 32];
-    Ok(KeyHandle::new(derive_traffic_keys(
-        &shared_secret,
-        &session_salt,
-        1,
-    )?))
-}
 
 fn hex_prefix(bytes: &[u8], n: usize) -> String {
     bytes
@@ -139,14 +131,19 @@ async fn run_client(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let keys = derive_demo_keys()?;
+    let (client, server) = common::session_pair()?;
+    let keys = client
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
 
     let server_listener = TcpListener::bind("127.0.0.1:0").await?;
     let server_addr = server_listener.local_addr()?;
 
     let relay_listener = TcpListener::bind("127.0.0.1:0").await?;
     let relay_addr = relay_listener.local_addr()?;
-    let server_keys = keys.clone();
+    let server_keys = server
+        .active_keys()
+        .ok_or(foctet::core::CoreError::InvalidSessionState)?;
     let server_task = tokio::spawn(async move { run_server(server_listener, server_keys).await });
     let relay_task = tokio::spawn(async move { run_relay(relay_listener, server_addr).await });
     run_client(relay_addr, keys).await?;

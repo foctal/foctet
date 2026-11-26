@@ -1,7 +1,6 @@
 use foctet_http::{
-    AsyncReplayStore, ContextBinding, ContextCarrier, DEFAULT_CONTEXT_TTL_SECS,
-    DEFAULT_MAX_CLOCK_SKEW_SECS, HttpOpenOptions, HttpSealOptions, MESSAGE_ID_LEN, ReplayCheck,
-    ReplayStoreError,
+    ContextBinding, ContextCarrier, DEFAULT_CONTEXT_TTL_SECS, DEFAULT_MAX_CLOCK_SKEW_SECS,
+    HttpOpenOptions, HttpSealOptions,
     workers::{
         DurableObjectReplayStore, WorkersOpener, WorkersSealer, check_and_insert_in_durable_object,
         expire_durable_object_replay_entry,
@@ -23,11 +22,7 @@ const CLIENT_SECRET_KEY: [u8; 32] = [0x22; 32];
 
 #[event(fetch)]
 pub async fn fetch(request: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let backend_error_test = request.path() == "/__foctet-test/backend-error"
-        && env
-            .var("FOCTET_INTEGRATION_TESTS")
-            .is_ok_and(|value| value.to_string() == "1");
-    if request.path() != "/foctet" && !backend_error_test {
+    if request.path() != "/foctet" {
         return Response::error("Not Found", 404);
     }
 
@@ -42,27 +37,15 @@ pub async fn fetch(request: Request, env: Env, _ctx: Context) -> Result<Response
     let namespace = env.durable_object("FOCTET_REPLAY")?;
     let replay_store = DurableObjectReplayStore::new(namespace, "foctet-replay-v1");
     let now_secs = worker::Date::now().as_millis() / 1_000;
-    let opened = if backend_error_test {
-        opener
-            .open_request_with_async_store(
-                request,
-                &FailingReplayStore,
-                now_secs,
-                DEFAULT_MAX_CLOCK_SKEW_SECS,
-                ContextBinding::default(),
-            )
-            .await
-    } else {
-        opener
-            .open_request_with_async_store(
-                request,
-                &replay_store,
-                now_secs,
-                DEFAULT_MAX_CLOCK_SKEW_SECS,
-                ContextBinding::default(),
-            )
-            .await
-    };
+    let opened = opener
+        .open_request_with_async_store(
+            request,
+            &replay_store,
+            now_secs,
+            DEFAULT_MAX_CLOCK_SKEW_SECS,
+            ContextBinding::default(),
+        )
+        .await;
     let opened = match opened {
         Ok(opened) => opened,
         // Answer client-caused failures with a status-only response (e.g. a
@@ -88,21 +71,6 @@ pub async fn fetch(request: Request, env: Env, _ctx: Context) -> Result<Response
         .seal_response_with_context(200, transformed, response_carrier)
         .map_err(|err| Error::RustError(err.to_string()))?;
     Ok(response)
-}
-
-struct FailingReplayStore;
-
-impl AsyncReplayStore for FailingReplayStore {
-    async fn check_and_insert(
-        &self,
-        _message_id: &[u8; MESSAGE_ID_LEN],
-        _expires_at_secs: u64,
-        _now_secs: u64,
-    ) -> std::result::Result<ReplayCheck, ReplayStoreError> {
-        Err(ReplayStoreError::Backend(
-            "intentional integration-test failure".into(),
-        ))
-    }
 }
 
 /// One durable object per message ID; its alarm deletes the replay marker when

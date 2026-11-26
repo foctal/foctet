@@ -58,6 +58,17 @@ impl Tlv {
     }
 }
 
+pub(crate) fn encode_application_data(data: &[u8]) -> Result<Vec<u8>, CoreError> {
+    if data.len() > MAX_TLV_VALUE_LEN {
+        return Err(CoreError::TlvTooLarge);
+    }
+    let mut out = Vec::with_capacity(6 + data.len());
+    out.extend_from_slice(&tlv_type::APPLICATION_DATA.to_be_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    Ok(out)
+}
+
 /// Encodes a TLV sequence into the Draft v0 wire format.
 pub fn encode_tlvs(tlvs: &[Tlv]) -> Result<Vec<u8>, CoreError> {
     if tlvs.len() > MAX_TLV_RECORDS {

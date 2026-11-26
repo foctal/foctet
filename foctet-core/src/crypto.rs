@@ -3,11 +3,12 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
-use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::{TryRng, UnwrapErr};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -126,13 +127,57 @@ impl Drop for TrafficKeys {
 /// coerces to `&TrafficKeys` at call sites such as [`encrypt_frame`]. Equality
 /// and `Debug` delegate to [`TrafficKeys`] (constant-time comparison, redacted
 /// secret bytes).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyHandle(Arc<TrafficKeys>);
+#[derive(Clone, Debug)]
+pub struct KeyHandle(Arc<TrafficKeys>, Option<Arc<SessionKeyOrigin>>);
+
+#[derive(Debug)]
+struct SessionKeyOrigin {
+    outbound: Direction,
+    stream_claimed: AtomicBool,
+}
+
+impl PartialEq for KeyHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for KeyHandle {}
 
 impl KeyHandle {
+    pub(crate) fn for_session(keys: TrafficKeys, outbound: Direction) -> Self {
+        Self(
+            Arc::new(keys),
+            Some(Arc::new(SessionKeyOrigin {
+                outbound,
+                stream_claimed: AtomicBool::new(false),
+            })),
+        )
+    }
+
+    pub(crate) fn next_generation(&self, keys: TrafficKeys) -> Self {
+        Self(Arc::new(keys), self.1.clone())
+    }
+
+    pub(crate) fn claim_stream(&self, inbound: Direction, outbound: Direction) -> bool {
+        self.1.as_ref().is_none_or(|origin| {
+            origin.outbound == outbound
+                && inbound != outbound
+                && !origin.stream_claimed.swap(true, Ordering::AcqRel)
+        })
+    }
+
+    pub(crate) fn same_origin(&self, other: &Self) -> bool {
+        match (&self.1, &other.1) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     /// Wraps a freshly derived key set in a shared handle.
     pub fn new(keys: TrafficKeys) -> Self {
-        Self(Arc::new(keys))
+        Self(Arc::new(keys), None)
     }
 }
 
@@ -232,13 +277,16 @@ pub fn dh_ratchet_step(
     Ok((new_root, TrafficKeys { key_id, c2s, s2c }))
 }
 
-/// Generates a random session salt for key derivation.
+/// Generates a session salt. Panics if the platform random source is unavailable.
 pub fn random_session_salt() -> [u8; 32] {
-    let mut out = [0u8; 32];
-    SysRng
-        .try_fill_bytes(&mut out)
-        .expect("OS random number generator is unavailable");
-    out
+    try_random_session_salt().expect("OS random number generator is unavailable")
+}
+
+/// Generates a session salt or reports failure of the platform random source.
+pub fn try_random_session_salt() -> Result<[u8; 32], CoreError> {
+    let mut salt = [0; 32];
+    getrandom::fill(&mut salt).map_err(|_| CoreError::RandomSource)?;
+    Ok(salt)
 }
 
 /// Ephemeral X25519 key pair used during native handshake.
@@ -265,14 +313,17 @@ impl EphemeralKeyPair {
         self.private.zeroize();
     }
 
-    /// Generates a fresh ephemeral X25519 key pair.
+    /// Generates a fresh ephemeral X25519 key pair. Panics if secure randomness is unavailable.
     pub fn generate() -> Self {
-        let private = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
-        let public = PublicKey::from(&private);
-        Self {
-            private: Zeroizing::new(private.to_bytes()),
-            public: public.to_bytes(),
-        }
+        Self::try_generate().expect("OS random number generator is unavailable")
+    }
+
+    /// Generates a key pair or reports failure of the platform random source.
+    pub fn try_generate() -> Result<Self, CoreError> {
+        let mut private = Zeroizing::new([0u8; 32]);
+        getrandom::fill(&mut private[..]).map_err(|_| CoreError::RandomSource)?;
+        let public = PublicKey::from(&StaticSecret::from(*private)).to_bytes();
+        Ok(Self { private, public })
     }
 
     /// Computes shared secret with peer ephemeral public key.
@@ -324,44 +375,69 @@ pub fn encrypt_frame(
     seq: u64,
     plaintext: &[u8],
 ) -> Result<Frame, CoreError> {
-    // Reject plaintext that would make the ciphertext length (plaintext + AEAD
-    // tag) overflow the header's `u32 ct_len` field. Without this check the
-    // cast below would silently truncate, producing a frame whose declared
-    // length doesn't match its actual ciphertext.
-    let expected_ct_len = checked_ciphertext_len(plaintext.len())?;
+    FrameDomain::Stream.encrypt(keys, direction, flags, stream_id, seq, plaintext)
+}
 
-    let key = Zeroizing::new(keys.key_for(direction));
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| CoreError::InvalidKeyLength)?;
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum FrameDomain {
+    Stream = PROFILE_X25519_HKDF_XCHACHA20POLY1305,
+    Message = 2,
+    Datagram = 3,
+}
 
-    let mut header = FrameHeader::new(
-        flags,
-        PROFILE_X25519_HKDF_XCHACHA20POLY1305,
-        keys.key_id,
-        stream_id,
-        seq,
-        0,
-    );
+impl FrameDomain {
+    fn nonce(self, key_id: u8, stream_id: u32, seq: u64) -> [u8; 24] {
+        let mut nonce = make_nonce(key_id, stream_id, seq);
+        nonce[13] = self as u8 - 1;
+        nonce
+    }
 
-    let nonce_raw = make_nonce(keys.key_id, stream_id, seq);
-    let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
+    pub(crate) fn encrypt(
+        self,
+        keys: &TrafficKeys,
+        direction: Direction,
+        flags: u8,
+        stream_id: u32,
+        seq: u64,
+        plaintext: &[u8],
+    ) -> Result<Frame, CoreError> {
+        // Reject plaintext that would make the ciphertext length (plaintext + AEAD
+        // tag) overflow the header's `u32 ct_len` field. Without this check the
+        // cast below would silently truncate, producing a frame whose declared
+        // length doesn't match its actual ciphertext.
+        let expected_ct_len = checked_ciphertext_len(plaintext.len())?;
 
-    let mut aad_header = header.clone();
-    aad_header.ct_len = expected_ct_len;
-    let aad = aad_header.encode();
+        let header = FrameHeader::new(
+            flags,
+            self as u8,
+            keys.key_id,
+            stream_id,
+            seq,
+            expected_ct_len,
+        );
+        header.validate_profile(self as u8)?;
+        let key = Zeroizing::new(keys.key_for(direction));
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| CoreError::InvalidKeyLength)?;
 
-    let ciphertext = cipher
-        .encrypt(
-            nonce,
-            Payload {
-                msg: plaintext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| CoreError::Aead)?;
+        let nonce_raw = self.nonce(keys.key_id, stream_id, seq);
+        let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
 
-    header.ct_len = ciphertext.len() as u32;
-    Ok(Frame { header, ciphertext })
+        let aad = header.encode();
+
+        let ciphertext = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CoreError::Aead)?;
+
+        Ok(Frame { header, ciphertext })
+    }
 }
 
 /// Decrypts a frame and enforces `key_id` equality with `keys`.
@@ -386,33 +462,44 @@ pub fn decrypt_frame_with_key(
     direction: Direction,
     frame: &Frame,
 ) -> Result<Vec<u8>, CoreError> {
-    frame.header.validate_v0()?;
-    if frame.ciphertext.len() != frame.header.ct_len as usize {
-        return Err(CoreError::CiphertextLengthMismatch {
-            expected: frame.header.ct_len as usize,
-            actual: frame.ciphertext.len(),
-        });
-    }
+    FrameDomain::Stream.decrypt(keys, direction, frame)
+}
 
-    let key = Zeroizing::new(keys.key_for(direction));
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| CoreError::InvalidKeyLength)?;
-    let nonce_raw = make_nonce(
-        frame.header.key_id,
-        frame.header.stream_id,
-        frame.header.seq,
-    );
-    let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
-    let aad = frame.header.encode();
-    cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: &frame.ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| CoreError::Aead)
+impl FrameDomain {
+    pub(crate) fn decrypt(
+        self,
+        keys: &TrafficKeys,
+        direction: Direction,
+        frame: &Frame,
+    ) -> Result<Vec<u8>, CoreError> {
+        frame.header.validate_profile(self as u8)?;
+        if frame.ciphertext.len() != frame.header.ct_len as usize {
+            return Err(CoreError::CiphertextLengthMismatch {
+                expected: frame.header.ct_len as usize,
+                actual: frame.ciphertext.len(),
+            });
+        }
+
+        let key = Zeroizing::new(keys.key_for(direction));
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| CoreError::InvalidKeyLength)?;
+        let nonce_raw = self.nonce(
+            frame.header.key_id,
+            frame.header.stream_id,
+            frame.header.seq,
+        );
+        let nonce = &XNonce::try_from(&nonce_raw[..]).expect("fixed-size nonce");
+        let aad = frame.header.encode();
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: &frame.ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| CoreError::Aead)
+    }
 }
 
 #[cfg(test)]

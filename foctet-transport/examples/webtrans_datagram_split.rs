@@ -179,7 +179,7 @@ async fn serve(
     // Handshake over a reliable bidi stream (byte-framed Foctet handshake).
     let (mut send, mut recv) = session.accept_bi().await?;
     let mut protocol = Session::new_responder_with_auth(RekeyThresholds::default(), server_auth());
-    let hello = read_control(&mut recv).await?;
+    let hello = ControlMessage::decode(&read_control(&mut recv).await?)?;
     let reply = protocol
         .handle_control(&hello)?
         .ok_or("responder did not produce ServerHello")?;
@@ -189,6 +189,8 @@ async fn serve(
         "peer failed identity authentication"
     );
     println!("handshake complete; peer authenticated");
+    let mut controls =
+        foctet_core::MessageEndpoint::from_session_lease(protocol.claim_message_endpoint()?);
     let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         loop {
@@ -233,7 +235,8 @@ async fn serve(
                     Some(control) => control,
                     None => break,
                 };
-                protocol.handle_control(&control)?;
+                protocol.handle_control(&controls.open_rekey(&control)?)?;
+                controls.install_active_keys(protocol.active_keys().ok_or("missing session keys")?)?;
                 datagram.rekey_from_session(&protocol)?;
                 // Test-harness acknowledgement: this is outer transport
                 // coordination, not a Foctet control message. It proves the
@@ -251,14 +254,14 @@ async fn serve(
 
 async fn read_control(
     recv: &mut webtrans::RecvStream,
-) -> Result<ControlMessage, Box<dyn Error + Send + Sync>> {
+) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
     let len = recv.read_u16().await? as usize;
-    if len == 0 || len > MAX_CONTROL_MESSAGE_LEN {
+    if len == 0 || len > MAX_CONTROL_MESSAGE_LEN + foctet_core::message::MESSAGE_FRAME_OVERHEAD {
         return Err("invalid control length".into());
     }
     let mut encoded = vec![0u8; len];
     recv.read_exact(&mut encoded).await?;
-    Ok(ControlMessage::decode(&encoded)?)
+    Ok(encoded)
 }
 
 async fn write_control(

@@ -4,7 +4,7 @@ use chacha20poly1305::{
 };
 use getrandom::SysRng;
 use hkdf::Hkdf;
-use rand_core::{TryRng, UnwrapErr};
+use rand_core::TryRng;
 use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -189,6 +189,9 @@ pub fn seal_body_with_context(
         return Err(BodyEnvelopeError::LimitExceeded("key_id_len"));
     }
 
+    if limits.max_recipients == 0 {
+        return Err(BodyEnvelopeError::LimitExceeded("recipient_count"));
+    }
     let payload_len = plaintext
         .len()
         .checked_add(TAG_LEN)
@@ -200,14 +203,16 @@ pub fn seal_body_with_context(
     let mut content_key = Zeroizing::new([0u8; CONTENT_KEY_LEN]);
     SysRng
         .try_fill_bytes(&mut content_key[..])
-        .expect("OS random number generator is unavailable");
+        .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
 
     let mut payload_nonce = [0u8; XCHACHA_NONCE_LEN];
     SysRng
         .try_fill_bytes(&mut payload_nonce)
-        .expect("OS random number generator is unavailable");
+        .map_err(|_| BodyEnvelopeError::EncryptFailed)?;
 
-    let eph_priv = StaticSecret::random_from_rng(&mut UnwrapErr(SysRng));
+    let mut ephemeral = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut ephemeral[..]).map_err(|_| BodyEnvelopeError::EncryptFailed)?;
+    let eph_priv = StaticSecret::from(*ephemeral);
     let eph_pub = PublicKey::from(&eph_priv).to_bytes();
 
     let wrapped_key = wrap_content_key(
@@ -769,6 +774,7 @@ fn decode_varint(input: &[u8], cur: &mut usize) -> Result<u64, BodyEnvelopeError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_core::UnwrapErr;
 
     #[test]
     fn body_roundtrip_single_recipient() {

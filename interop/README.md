@@ -32,10 +32,6 @@ npm ci
 npm test
 ```
 
-The maintainer-dispatched release rehearsal runs this verification before a
-release. Run it locally when changing the vectors, wire format, or cryptographic
-behavior.
-
 ## `minimal_decoder.js` / `minimal_decoder.ts`
 
 A tiny, dependency-free Node.js decoder (with an equivalent TypeScript
